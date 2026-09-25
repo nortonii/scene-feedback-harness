@@ -21,6 +21,7 @@ from typing import Any
 
 
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+CLIENT_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ASSET_RE = re.compile(r"^/assets/[0-9a-f]{32}\.glb$")
 COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 MAX_MODEL_BYTES = 100 * 1024 * 1024
@@ -84,16 +85,163 @@ def _safe_json(value: Any, *, depth: int = 0) -> None:
     raise APIError(400, "value is not valid JSON")
 
 
+def _glb_int(value: Any, label: str, *, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise APIError(400, f"GLB {label} must be an integer >= {minimum}")
+    return value
+
+
+def _glb_index(value: Any, count: int, label: str) -> int:
+    index = _glb_int(value, label)
+    if index >= count:
+        raise APIError(400, f"GLB {label} index is out of bounds")
+    return index
+
+
+def _glb_array(document: dict[str, Any], key: str) -> list[Any]:
+    value = document.get(key, [])
+    if not isinstance(value, list):
+        raise APIError(400, f"GLB {key} must be an array")
+    return value
+
+
+def _reject_glb_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant {value}")
+
+
+def _validate_glb_document(document: Any, handle: Any, bin_start: int | None, bin_length: int) -> None:
+    """Check self-contained core glTF resources before the GLB is published."""
+    if not isinstance(document, dict) or not isinstance(document.get("asset"), dict) or document["asset"].get("version") != "2.0":
+        raise APIError(400, "GLB asset version must be 2.0")
+
+    # This publishing endpoint requires BIN/bufferView resources. Even data URIs
+    # are rejected: they are self-contained but bypass the single checked BIN
+    # resource path. Reject URI fields in extensions as well as core objects.
+    pending: list[Any] = [document]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            if "uri" in value:
+                raise APIError(400, "GLB URI resources are not allowed, including data URIs; embed resources in BIN")
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+    buffers = _glb_array(document, "buffers")
+    if len(buffers) > 1:
+        raise APIError(400, "GLB may contain only one BIN-backed buffer")
+    buffer_length = 0
+    if buffers:
+        if not isinstance(buffers[0], dict):
+            raise APIError(400, "GLB buffer must be an object")
+        buffer_length = _glb_int(buffers[0].get("byteLength"), "buffer.byteLength", minimum=1)
+        if bin_start is None:
+            raise APIError(400, "GLB BIN chunk is missing for buffer 0")
+        if not buffer_length <= bin_length <= buffer_length + 3:
+            raise APIError(400, "GLB BIN chunk length does not match buffer 0")
+        if bin_length > buffer_length:
+            handle.seek(bin_start + buffer_length)
+            if handle.read(bin_length - buffer_length) != bytes(bin_length - buffer_length):
+                raise APIError(400, "GLB BIN padding must be zero")
+    elif bin_start is not None:
+        raise APIError(400, "GLB BIN chunk has no buffer declaration")
+
+    views = _glb_array(document, "bufferViews")
+    for index, view in enumerate(views):
+        if not isinstance(view, dict):
+            raise APIError(400, f"GLB bufferView {index} must be an object")
+        _glb_index(view.get("buffer"), len(buffers), f"bufferView {index}.buffer")
+        offset = _glb_int(view.get("byteOffset", 0), f"bufferView {index}.byteOffset")
+        length = _glb_int(view.get("byteLength"), f"bufferView {index}.byteLength", minimum=1)
+        if offset + length > buffer_length:
+            raise APIError(400, f"GLB bufferView {index} exceeds its buffer")
+        if "byteStride" in view:
+            stride = _glb_int(view["byteStride"], f"bufferView {index}.byteStride", minimum=4)
+            if stride > 252 or stride % 4 or stride > length:
+                raise APIError(400, f"GLB bufferView {index} has invalid byteStride")
+
+    component_sizes = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
+    accessor_shapes = {"SCALAR": (1, 1), "VEC2": (1, 2), "VEC3": (1, 3), "VEC4": (1, 4), "MAT2": (2, 2), "MAT3": (3, 3), "MAT4": (4, 4)}
+    accessors = _glb_array(document, "accessors")
+    for index, accessor in enumerate(accessors):
+        if not isinstance(accessor, dict):
+            raise APIError(400, f"GLB accessor {index} must be an object")
+        component_type = accessor.get("componentType")
+        accessor_type = accessor.get("type")
+        shape = accessor_shapes.get(accessor_type) if isinstance(accessor_type, str) else None
+        if type(component_type) is not int or component_type not in component_sizes or shape is None:
+            raise APIError(400, f"GLB accessor {index} has invalid type or componentType")
+        count = _glb_int(accessor.get("count"), f"accessor {index}.count", minimum=1)
+        component_size = component_sizes[component_type]
+        columns, rows = shape
+        column_size = rows * component_size
+        element_size = columns * ((column_size + 3) // 4 * 4) if columns > 1 else column_size
+        if "bufferView" in accessor:
+            view_index = _glb_index(accessor["bufferView"], len(views), f"accessor {index}.bufferView")
+            view = views[view_index]
+            offset = _glb_int(accessor.get("byteOffset", 0), f"accessor {index}.byteOffset")
+            stride = view.get("byteStride", element_size)
+            if offset % component_size or view.get("byteOffset", 0) % component_size or stride < element_size:
+                raise APIError(400, f"GLB accessor {index} has invalid alignment or stride")
+            if offset + (count - 1) * stride + element_size > view["byteLength"]:
+                raise APIError(400, f"GLB accessor {index} exceeds its bufferView")
+        elif "byteOffset" in accessor:
+            raise APIError(400, f"GLB accessor {index} has byteOffset without bufferView")
+
+        sparse = accessor.get("sparse")
+        if sparse is not None:
+            if not isinstance(sparse, dict):
+                raise APIError(400, f"GLB accessor {index}.sparse must be an object")
+            sparse_count = _glb_int(sparse.get("count"), f"accessor {index}.sparse.count", minimum=1)
+            if sparse_count > count:
+                raise APIError(400, f"GLB accessor {index}.sparse.count exceeds count")
+            for label, item_size, alignment in (("indices", None, None), ("values", element_size, component_size)):
+                item = sparse.get(label)
+                if not isinstance(item, dict):
+                    raise APIError(400, f"GLB accessor {index}.sparse.{label} must be an object")
+                view_index = _glb_index(item.get("bufferView"), len(views), f"accessor {index}.sparse.{label}.bufferView")
+                view = views[view_index]
+                if "byteStride" in view or "target" in view:
+                    raise APIError(400, f"GLB sparse {label} bufferView cannot have stride or target")
+                if label == "indices":
+                    index_type = item.get("componentType")
+                    if type(index_type) is not int or index_type not in {5121, 5123, 5125}:
+                        raise APIError(400, f"GLB accessor {index}.sparse.indices has invalid componentType")
+                    item_size = alignment = component_sizes[index_type]
+                offset = _glb_int(item.get("byteOffset", 0), f"accessor {index}.sparse.{label}.byteOffset")
+                if offset % alignment or view.get("byteOffset", 0) % alignment or offset + sparse_count * item_size > view["byteLength"]:
+                    raise APIError(400, f"GLB accessor {index}.sparse.{label} exceeds its bufferView")
+
+    images = _glb_array(document, "images")
+    image_formats = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}
+    for index, image in enumerate(images):
+        if not isinstance(image, dict):
+            raise APIError(400, f"GLB image {index} must be an object")
+        view_index = _glb_index(image.get("bufferView"), len(views), f"image {index}.bufferView")
+        mime = image.get("mimeType")
+        if not isinstance(mime, str) or mime not in image_formats:
+            raise APIError(400, f"GLB image {index} has unsupported mimeType")
+        view = views[view_index]
+        if "byteStride" in view or "target" in view:
+            raise APIError(400, f"GLB image {index} bufferView cannot have stride or target")
+        assert bin_start is not None
+        handle.seek(bin_start + view.get("byteOffset", 0))
+        data = handle.read(view["byteLength"])
+        from PIL import Image, UnidentifiedImageError
+
+        try:
+            with Image.open(io.BytesIO(data)) as decoded:
+                width, height = decoded.size
+                if decoded.format != image_formats[mime] or width <= 0 or height <= 0 or width * height > 50_000_000:
+                    raise APIError(400, f"GLB image {index} bytes do not match mimeType")
+                decoded.load()
+        except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+            raise APIError(400, f"GLB image {index} bytes do not match mimeType") from exc
+
+
 def _default_objects() -> list[dict[str, Any]]:
-    """A small editable chair makes the harness useful immediately."""
-    return [
-        {"id": "chair_seat", "name": "Seat", "type": "box", "position": [0, 0, 0.91], "size": [1.25, 1.15, 0.18], "rotation": [0, 0, 0], "color": "#d68b5b"},
-        {"id": "chair_back", "name": "Backrest", "type": "box", "position": [0, 0.51, 1.54], "size": [1.25, 0.16, 1.42], "rotation": [0, 0, 0], "color": "#cd785a"},
-        *[
-            {"id": f"chair_leg_{index}", "name": f"Leg {index}", "type": "box", "position": [x, y, 0.45], "size": [0.13, 0.13, 0.9], "rotation": [0, 0, 0], "color": "#6d5143"}
-            for index, (x, y) in enumerate(((-0.49, -0.43), (0.49, -0.43), (-0.49, 0.43), (0.49, 0.43)), 1)
-        ],
-    ]
+    """A new project starts with references and no invented geometry."""
+    return []
 
 
 class SceneStore:
@@ -104,10 +252,12 @@ class SceneStore:
         self.media_dir = self.data_dir / "media"
         self.state_path = self.data_dir / "state.json"
         self.token_path = self.data_dir / "control_token"
+        self.browser_token_path = self.data_dir / "browser_token"
         self.lock = threading.RLock()
         for directory in (self.data_dir, self.assets_dir, self.screenshots_dir, self.media_dir):
             directory.mkdir(parents=True, exist_ok=True)
         self.control_token = self._control_token()
+        self.browser_token = self._read_or_create_token(self.browser_token_path)
         if self.state_path.exists():
             self.state = json.loads(self.state_path.read_text(encoding="utf-8"))
             # Existing v1 state and review sessions stay readable after upgrading.
@@ -119,18 +269,21 @@ class SceneStore:
             self.state = {"schema_version": 2, "scene": {"revision": 1, "objects": _default_objects()}, "sessions": {}, "feedback": []}
             self._save()
 
-    def _control_token(self) -> str:
-        if self.token_path.exists():
-            return self.token_path.read_text(encoding="ascii").strip()
+    def _read_or_create_token(self, path: Path) -> str:
+        if path.exists():
+            return path.read_text(encoding="ascii").strip()
         token = uuid.uuid4().hex + uuid.uuid4().hex
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         try:
-            descriptor = os.open(self.token_path, flags, 0o600)
+            descriptor = os.open(path, flags, 0o600)
             with os.fdopen(descriptor, "w", encoding="ascii") as handle:
                 handle.write(token + "\n")
         except FileExistsError:
-            return self.token_path.read_text(encoding="ascii").strip()
+            return path.read_text(encoding="ascii").strip()
         return token
+
+    def _control_token(self) -> str:
+        return self._read_or_create_token(self.token_path)
 
     def _save(self) -> None:
         fd, temporary = tempfile.mkstemp(prefix="state-", suffix=".json", dir=self.data_dir)
@@ -200,6 +353,8 @@ class SceneStore:
             validated = self._validate_objects(objects)
             self.state["scene"] = {"revision": expected_revision + 1, "objects": validated}
             self._save()
+            if "workspace" in self.state:
+                self.workspace_event("scene_published", {"scene_revision": expected_revision + 1})
             return self.scene()
 
     def _check_revision(self, revision: Any) -> None:
@@ -356,6 +511,110 @@ class SceneStore:
         with self.lock:
             return copy.deepcopy(self.state["feedback"])
 
+    def ensure_workspace(self, project_dir: str | Path, *, preferred_session_id: str | None = None) -> dict[str, Any]:
+        """Bind this data directory to one project and one persistent browser session."""
+        project = Path(project_dir).expanduser().resolve()
+        if not project.is_dir():
+            raise APIError(400, "workspace project directory does not exist")
+        with self.lock:
+            workspace = self.state.get("workspace")
+            if workspace is not None:
+                if workspace["project_dir"] != str(project):
+                    raise APIError(409, "workspace is already bound to another project directory")
+                return copy.deepcopy(workspace)
+            sessions = self.state["sessions"]
+            if preferred_session_id is not None:
+                session = sessions.get(preferred_session_id)
+                if session is None or session["status"] != "open":
+                    raise APIError(404, "requested workspace session is not open")
+                session_id = preferred_session_id
+            else:
+                open_sessions = [item for item in sessions.values() if item["status"] == "open"]
+                session_id = open_sessions[-1]["session_id"] if open_sessions else self.create_session()["session_id"]
+            workspace = {
+                "project_id": uuid.uuid4().hex,
+                "project_dir": str(project),
+                "session_id": session_id,
+                "thread_id": None,
+                "created_at": _now(),
+                "agent": {"status": "disconnected", "turn_id": None, "error": None},
+                "queue": [],
+                "active_feedback_id": None,
+                "approvals": [],
+                "request_feedback": None,
+                "events": [],
+                "event_seq": 0,
+            }
+            self.state["workspace"] = workspace
+            self._save()
+            return copy.deepcopy(workspace)
+
+    def workspace(self) -> dict[str, Any]:
+        with self.lock:
+            if "workspace" not in self.state:
+                raise APIError(404, "workspace is not initialized")
+            result = copy.deepcopy(self.state["workspace"])
+            result["scene_revision"] = self.state["scene"]["revision"]
+            return result
+
+    def workspace_events(self, cursor: int = 0) -> dict[str, Any]:
+        if type(cursor) is not int or cursor < 0:
+            raise APIError(400, "cursor must be a nonnegative integer")
+        with self.lock:
+            workspace = self.state.get("workspace")
+            if workspace is None:
+                raise APIError(404, "workspace is not initialized")
+            return {
+                "items": copy.deepcopy([item for item in workspace["events"] if item["id"] > cursor]),
+                "next_cursor": workspace["event_seq"],
+            }
+
+    def workspace_event(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _safe_json(payload)
+        with self.lock:
+            workspace = self.state["workspace"]
+            workspace["event_seq"] += 1
+            event = {"id": workspace["event_seq"], "type": kind, "payload": copy.deepcopy(payload), "at": _now()}
+            workspace["events"].append(event)
+            workspace["events"] = workspace["events"][-500:]
+            self._save()
+            return copy.deepcopy(event)
+
+    def workspace_thread(self, thread_id: str) -> None:
+        if not isinstance(thread_id, str) or not thread_id:
+            raise APIError(400, "invalid Codex thread ID")
+        with self.lock:
+            workspace = self.state["workspace"]
+            old = workspace.get("thread_id")
+            if old and old != thread_id:
+                # App Server 0.156.1 may return a thread ID before persisting
+                # a rollout. Its adapter recreates only a thread with no turn
+                # attempt; the Gateway additionally requires no submitted
+                # feedback before accepting and recording that replacement.
+                if workspace["queue"] or any(item["session_id"] == workspace["session_id"] for item in self.state["feedback"]):
+                    raise APIError(409, "workspace is already bound to another Codex thread")
+            workspace["thread_id"] = thread_id
+            self._save()
+            if old and old != thread_id:
+                self.workspace_event("empty_thread_recreated", {"old_thread_id": old, "thread_id": thread_id})
+
+    def workspace_agent(self, *, status: str, turn_id: str | None = None, error: str | None = None) -> None:
+        with self.lock:
+            self.state["workspace"]["agent"] = {"status": status, "turn_id": turn_id, "error": error}
+            self._save()
+
+    def workspace_request_feedback(self, message: str, *, object_ids: list[str] | None = None) -> dict[str, Any]:
+        if not isinstance(message, str) or not 1 <= len(message) <= 2000:
+            raise APIError(400, "request message must contain 1 to 2000 characters")
+        if object_ids is not None and (not isinstance(object_ids, list) or len(object_ids) > 50 or any(not isinstance(item, str) or not ID_RE.fullmatch(item) for item in object_ids)):
+            raise APIError(400, "object_ids must contain at most 50 object IDs")
+        with self.lock:
+            request = {"message": message, "object_ids": object_ids or [], "at": _now(), "scene_revision": self.state["scene"]["revision"]}
+            self.state["workspace"]["request_feedback"] = request
+            self._save()
+            self.workspace_event("feedback_requested", request)
+            return copy.deepcopy(request)
+
     def cancel_session(self, session_id: str) -> dict[str, Any]:
         with self.lock:
             session = self.state["sessions"].get(session_id)
@@ -404,7 +663,7 @@ class SceneStore:
         if not isinstance(annotation, dict):
             raise APIError(400, "each annotation must be an object")
         kind = annotation.get("type", annotation.get("kind", annotation.get("operation")))
-        visual_kinds = {"point", "rectangle", "rect", "line", "arrow", "text"}
+        visual_kinds = {"point", "rectangle", "rect", "line", "arrow", "text", "freehand"}
         legacy_kinds = {"target_box", "guide_line", "move", "resize", "note"}
         if kind not in visual_kinds | legacy_kinds:
             raise APIError(400, "unsupported annotation type")
@@ -424,6 +683,11 @@ class SceneStore:
             normalized = copy.deepcopy(annotation)
             normalized["type"] = "rectangle" if kind == "rect" else kind
             normalized["coordinates"] = coordinates
+            if kind == "freehand":
+                points = annotation.get("points")
+                if not isinstance(points, list) or not 2 <= len(points) <= 256:
+                    raise APIError(400, "freehand annotation needs 2 to 256 points")
+                normalized["points"] = [self._screen_coordinates(point, "point") for point in points]
             if "scene_node" in normalized:
                 if pane != "scene":
                     raise APIError(400, "reference annotation cannot identify a scene node")
@@ -470,23 +734,48 @@ class SceneStore:
                 raise APIError(404, "session not found")
             if session["status"] != "open":
                 raise APIError(409, "session is already closed")
+            client_key = payload.get("idempotency_key")
+            digest = None
+            if client_key is not None:
+                if not isinstance(client_key, str) or not CLIENT_KEY_RE.fullmatch(client_key):
+                    raise APIError(400, "idempotency_key must be 8 to 128 URL-safe characters")
+                try:
+                    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False)
+                except (TypeError, ValueError) as exc:
+                    raise APIError(400, "submission contains invalid JSON values") from exc
+                digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                for old in self.state["feedback"]:
+                    if old["session_id"] == session_id and old.get("idempotency_key") == client_key:
+                        if old.get("payload_digest") != digest:
+                            raise APIError(409, "idempotency_key was already used for another submission")
+                        return copy.deepcopy(old)
             revision = payload.get("scene_revision")
             if type(revision) is not int or revision < 1:
                 raise APIError(400, "scene_revision must be a positive integer")
-            if revision != self.state["scene"]["revision"]:
+            stale_snapshot = revision != self.state["scene"]["revision"]
+            if stale_snapshot and payload.get("confirm_stale") is not True:
                 raise APIError(409, f"scene revision changed to {self.state['scene']['revision']}; reload and resubmit")
             annotations = payload.get("annotations", [])
             if not isinstance(annotations, list) or len(annotations) > 100:
                 raise APIError(400, "annotations must be an array with at most 100 items")
             object_ids = {obj["id"] for obj in self.state["scene"]["objects"]}
             model_ids = {obj["id"] for obj in self.state["scene"]["objects"] if obj["type"] == "model"}
+            if stale_snapshot:
+                # Historic IDs are only visual references; no scene edit is inferred here.
+                historic_selected = payload.get("selected_object_ids", [])
+                if isinstance(historic_selected, list):
+                    object_ids.update(item for item in historic_selected if isinstance(item, str) and ID_RE.fullmatch(item))
+                object_ids.update(item.get("object_id") for item in annotations if isinstance(item, dict) and isinstance(item.get("object_id"), str) and ID_RE.fullmatch(item["object_id"]))
+                historic_nodes = payload.get("selected_scene_nodes", [])
+                if isinstance(historic_nodes, list):
+                    model_ids.update(node.get("parent_object_id") for node in historic_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
             reference_ids = {image["id"] for image in session.get("reference_images", [])}
             normalized_annotations = [self._normalize_annotation(item, object_ids, model_ids, reference_ids) for item in annotations]
             note = payload.get("note", "")
             if not isinstance(note, str) or len(note) > 10_000:
                 raise APIError(400, "note must be text up to 10000 characters")
-            if not annotations and not note.strip():
-                raise APIError(400, "add an annotation or a note before submitting")
+            if not annotations and not note.strip() and not session.get("reference_images"):
+                raise APIError(400, "add a reference, annotation or note before submitting")
             camera = payload.get("camera")
             if camera is not None:
                 _safe_json(camera)
@@ -536,6 +825,11 @@ class SceneStore:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
             feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes}
+            if client_key is not None:
+                feedback["idempotency_key"] = client_key
+                feedback["payload_digest"] = digest
+            if stale_snapshot:
+                feedback["submitted_from_stale_snapshot"] = True
             if camera is not None:
                 feedback["camera"] = camera
             feedback["reference_annotated_images"] = [{"reference_id": ref_id, "url": self._write_media(data)} for ref_id, data in prepared_refs]
@@ -548,6 +842,14 @@ class SceneStore:
             self.state["feedback"].append(feedback)
             session["last_submitted_at"] = feedback["submitted_at"]
             session["feedback_count"] = session.get("feedback_count", 0) + 1
+            workspace = self.state.get("workspace")
+            if workspace and workspace["session_id"] == session_id:
+                queue_item = {"feedback_id": feedback["feedback_id"], "scene_revision": revision, "status": "queued", "enqueued_at": feedback["submitted_at"], "confirmed_against_revision": self.state["scene"]["revision"] if payload.get("confirm_stale") is True else None, "turn_id": None, "error": None}
+                workspace["queue"].append(queue_item)
+                workspace["request_feedback"] = None
+                workspace["event_seq"] += 1
+                workspace["events"].append({"id": workspace["event_seq"], "type": "feedback_queued", "payload": {"feedback_id": feedback["feedback_id"], "scene_revision": revision, "note": note[:4000]}, "at": _now()})
+                workspace["events"] = workspace["events"][-500:]
             self._save()
             return copy.deepcopy(feedback)
 
@@ -558,6 +860,13 @@ class SceneStore:
                 raise APIError(400, "cursor must be a nonnegative integer")
             items = [copy.deepcopy(item) for item in self.state["feedback"] if item["session_id"] == session_id]
             return {"session_id": session_id, "status": session["status"], "items": items[cursor:], "next_cursor": len(items)}
+
+    def feedback_by_id(self, feedback_id: str) -> dict[str, Any]:
+        with self.lock:
+            item = next((entry for entry in self.state["feedback"] if entry["feedback_id"] == feedback_id), None)
+            if item is None:
+                raise APIError(404, "feedback not found")
+            return copy.deepcopy(item)
 
     @staticmethod
     def _validate_glb_source(local_path: str) -> Path:
@@ -581,16 +890,39 @@ class SceneStore:
                 magic, version, declared_size = struct.unpack("<4sII", header)
                 if magic != b"glTF" or version != 2 or declared_size != file_size:
                     raise APIError(400, "file is not a valid GLB 2.0 container")
-                chunk_header = handle.read(8)
-                if len(chunk_header) != 8:
+                remaining = file_size - 12
+                chunk_number = 0
+                bin_start = None
+                bin_length = 0
+                document = None
+                while remaining:
+                    if remaining < 8:
+                        raise APIError(400, "GLB has a truncated chunk header")
+                    chunk_size, chunk_type = struct.unpack("<I4s", handle.read(8))
+                    if chunk_size % 4 or chunk_size > remaining - 8:
+                        raise APIError(400, "GLB has an invalid chunk length")
+                    if chunk_number == 0:
+                        if chunk_type != b"JSON" or not 0 < chunk_size <= 16 * 1024 * 1024:
+                            raise APIError(400, "GLB has an invalid JSON chunk")
+                        json_bytes = handle.read(chunk_size)
+                        document = json.loads(json_bytes.decode("utf-8"), parse_constant=_reject_glb_json_constant)
+                    elif chunk_type == b"BIN\x00":
+                        if chunk_number != 1 or bin_start is not None:
+                            raise APIError(400, "GLB BIN chunk must occur only as the second chunk")
+                        bin_start = handle.tell()
+                        bin_length = chunk_size
+                        handle.seek(chunk_size, os.SEEK_CUR)
+                    else:
+                        if chunk_type == b"JSON":
+                            raise APIError(400, "GLB has a duplicate JSON chunk")
+                        # Unknown chunks are allowed after JSON/BIN by glTF 2.0.
+                        handle.seek(chunk_size, os.SEEK_CUR)
+                    remaining -= 8 + chunk_size
+                    chunk_number += 1
+                if document is None:
                     raise APIError(400, "GLB is missing its JSON chunk")
-                chunk_size, chunk_type = struct.unpack("<I4s", chunk_header)
-                if chunk_type != b"JSON" or chunk_size > 16 * 1024 * 1024 or chunk_size % 4 or chunk_size > file_size - 20:
-                    raise APIError(400, "GLB has an invalid JSON chunk")
-                document = json.loads(handle.read(chunk_size))
-                if not isinstance(document, dict) or document.get("asset", {}).get("version") != "2.0":
-                    raise APIError(400, "GLB asset version must be 2.0")
-        except (OSError, struct.error, ValueError, AttributeError) as exc:
+                _validate_glb_document(document, handle, bin_start, bin_length)
+        except (OSError, struct.error, UnicodeDecodeError, ValueError, TypeError, RecursionError) as exc:
             raise APIError(400, "file is not a valid GLB 2.0 container") from exc
         return source
 
@@ -598,22 +930,33 @@ class SceneStore:
         file_name = f"{uuid.uuid4().hex}.glb"
         destination = self.assets_dir / file_name
         hasher = hashlib.sha256()
-        with source.open("rb") as src, destination.open("xb") as dst:
-            while chunk := src.read(1024 * 1024):
-                hasher.update(chunk)
-                dst.write(chunk)
+        try:
+            with source.open("rb") as src, destination.open("xb") as dst:
+                while chunk := src.read(1024 * 1024):
+                    hasher.update(chunk)
+                    dst.write(chunk)
+            # The source could have changed after its first validation. Only the
+            # exact bytes that will be served may be committed to scene state.
+            self._validate_glb_source(str(destination))
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
         return f"/assets/{file_name}", hasher.hexdigest()
 
-    def set_scene_preview(self, local_path: str) -> dict[str, Any]:
+    def set_scene_preview(self, local_path: str, *, expected_revision: int | None = None) -> dict[str, Any]:
         """Atomically replace the visible result with one stable selectable GLB."""
         source = self._validate_glb_source(local_path)
         with self.lock:
+            if expected_revision is not None:
+                self._check_revision(expected_revision)
             url, digest = self._copy_glb(source)
             obj = self._validate_object({"id": "scene_preview", "name": source.stem[:120] or "Current scene", "type": "model", "url": url, "position": [0, 0, 0], "size": [1, 1, 1], "rotation": [0, 0, 0], "color": "#ffffff", "metadata": {"source_name": source.name, "sha256": digest}})
             scene = self.state["scene"]
             scene["objects"] = [obj]
             scene["revision"] += 1
             self._save()
+            if "workspace" in self.state:
+                self.workspace_event("scene_published", {"scene_revision": scene["revision"], "asset_url": url, "sha256": digest})
             return copy.deepcopy(scene)
 
     def import_model(self, local_path: str, *, object_id: str | None = None, name: str | None = None, position: list[float] | None = None, size: list[float] | None = None) -> dict[str, Any]:

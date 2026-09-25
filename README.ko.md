@@ -1,110 +1,90 @@
 **语言 / Languages:** [简体中文](README.md) · [English](README.en.md) · [日本語](README.ja.md) · **한국어** · [Русский](README.ru.md)
 
-# Astra 시각 피드백 작업대
+# Codex 시각 재구성 작업대
 
-사람과 Astra가 같은 참고 사진과 현재 장면을 보며 소통할 수 있는 작업대입니다. 사진이나 3D 뷰에 점을 찍거나, 선과 상자를 그리고, 짧은 설명을 덧붙이면 MCP가 원본 이미지, 주석이 표시된 이미지, 장면 스크린샷과 필요한 문맥을 모델에 전달합니다. **객체, 카메라, 재질 또는 재구성 방식을 어떻게 수정할지는 Astra가 판단합니다.** 사용자가 좌표나 기하학적 제약을 입력할 필요는 없습니다.
+참고 이미지와 현재 3D 장면에 표시를 그리고 한 문장을 쓴 뒤 「보내기」를 누르세요. 작업대는 글, 원본 이미지, 주석 이미지, 장면 스냅샷을 **같은 Codex 대화의 사용자 메시지**로 보냅니다. Codex가 프로젝트를 수정하고 GLB를 게시하면 결과가 이 페이지에 나타납니다. 터미널에서 별도의 읽기 작업을 다시 시작할 필요가 없습니다.
 
-![참고 사진과 장면을 나란히 표시하고 주석을 추가한 화면](preview.png)
+![참고 이미지와 장면을 나란히 놓고 표시한 화면](preview.png)
 
-## 주요 기능
+## 작동 방식
 
-- 왼쪽에서 참고 사진을 보고, 오른쪽에서 현재 3D 장면을 회전하거나 확대하고 객체를 선택할 수 있습니다. 여러 참고 사진 사이를 전환할 수도 있습니다.
-- 어느 쪽이든 점, 사각형, 선, 화살표, 텍스트를 그릴 수 있습니다. 양쪽의 표시를 연결하고 싶다면 같은 번호를 붙이세요. 장면에 아직 없는 대상은 참고 사진에만 표시해도 됩니다.
-- 현재 참고 사진을 반투명하게 3D 뷰 위에 겹쳐 육안으로 비교할 수 있습니다. 이 오버레이에는 **자동 카메라 정합 기능이 없습니다**.
-- 「Astra에 보내기」를 누른 뒤에도 같은 세션이 유지됩니다. Astra가 장면을 업데이트하면 페이지가 자동으로 새로고침됩니다. 주석 초안과 뷰 각도는 다음 라운드를 위해 브라우저에 남습니다.
+```text
+브라우저: 참고 이미지 + 3D 장면 + 표시 + 글
+                 │ 사용자가 「보내기」 클릭
+                 ▼
+          로컬 Workspace Gateway
+                 │ 실제 이미지 입력과 실행 이벤트
+                 ▼
+       Codex App Server: 같은 프로젝트, 같은 대화
+                 │ 소스 파일 수정, GLB 내보내기, MCP 도구 호출
+                 ▼
+              작업대의 장면 새로고침
+```
 
-제출되는 시각 피드백에는 원본 참고 사진, 주석이 표시된 참고 사진, 현재 장면의 원본 및 주석 스크린샷, 필요한 부분 확대 이미지, 메모, 선택한 객체 ID, 장면 버전, 뷰 카메라가 포함됩니다. GLB 내부의 개별 부품을 클릭하면 선택한 노드의 이름과 경로도 포함됩니다. 이미지는 MCP image content로 반환되며, 메타데이터는 structured content와 텍스트에도 담깁니다. 호스트가 MCP 이미지 블록을 전달하지 않을 때 읽을 수 있도록 로컬 절대 경로도 제공됩니다.
+Gateway는 이 프로젝트의 Codex 대화를 지속적으로 보관합니다. stdio로 `codex app-server`를 실행하고 이미지를 `localImage` 입력 항목으로 보냅니다. 작업대가 이미 열려 있는 다른 Codex 데스크톱 또는 터미널 대화에 메시지를 주입하지는 않습니다. MCP는 문맥 읽기, 사용자 검토 요청, 장면 게시에 사용합니다. **웹페이지의 보내기 버튼이 사용자 턴을 직접 시작합니다.**
 
-## 로컬에서 사용해 보기
+이 화면은 사람이 문제를 가리킬 수 있도록 돕습니다. 재구성 알고리즘을 규정하거나 사용자에게 좌표나 기하학적 제약을 입력하라고 요구하지 않습니다. Codex는 프로젝트에 이미 있는 모델링, 재구성, 편집 도구를 사용할 수 있습니다.
 
-Python 3.11 이상과 WebGL을 지원하는 브라우저가 필요합니다. 저장소를 복제한 뒤 루트 디렉터리에서 실행하세요.
+## 페이지에서 할 수 있는 일
+
+- 왼쪽에서 참고 이미지를 전환하고 확대하거나 이동합니다. 오른쪽에서 GLB 장면을 회전하고 확대하며 노드를 선택합니다.
+- 양쪽에 점, 사각형, 선, 화살표, 자유로운 펜 선과 글자를 그립니다. 서로 대응하는 표시에는 번호를 붙일 수 있습니다. 빠진 물체는 참고 이미지에만 표시해도 됩니다.
+- 「현재 시점에 주석 달기」를 누르면 장면 표시가 **그때의 스크린샷, 카메라, 선택한 객체, 장면 버전**에 묶입니다. 실시간 3D 뷰를 돌려도 기존 표시가 다른 물체로 옮겨가지 않습니다. 새 장면이 게시되어도 표시 중인 스냅샷을 덮어쓰지 않습니다.
+- 전송할 때 사용자의 원문, 참고 이미지 원본과 주석 이미지, 표시 없는 장면 스크린샷과 표시된 스크린샷, 선택한 노드, 카메라와 장면 버전을 변경 불가능한 피드백 묶음으로 저장합니다. 표시는 사람의 힌트이며, 원본 이미지는 별도로 보관됩니다.
+- 실행 중에 보낸 새 피드백은 다음 턴의 대기열에 들어갑니다. 대기하는 동안 장면이 바뀌었다면, 페이지가 먼저 이전 버전을 바탕으로 한 피드백인지 확인을 요청합니다. 승인 요청과 중지 동작도 페이지에서 처리합니다. 새로고침 후에도 프로젝트, 대화, 초안이 유지됩니다.
+
+현재 장면 입력은 자체적으로 필요한 데이터를 모두 담은 `.glb` 파일입니다. 게시할 때 기하 형상과 텍스처 리소스가 GLB의 BIN 블록에 내장되어 있는지 검증합니다. 외부 URI와 data URI는 모두 거부합니다. data URI도 자체 완결형일 수 있지만 이 버전은 BIN 블록만 허용합니다. 참고 이미지로만 제출할 수 있으므로 초기 장면이 없어도 시작할 수 있습니다. 참고 이미지 오버레이는 눈으로 비교하기 위한 기능이며 자동으로 카메라를 정합하지 않습니다.
+
+## 빠른 체험: 방과 캐비닛
+
+현재 브라우저 UI의 버튼 표시는 중국어입니다. `标注当前视角`는 「현재 시점에 주석 달기」, `发送到 Codex`는 「Codex에 보내기」에 해당합니다.
+
+Python 3.11 이상, WebGL을 지원하는 브라우저, 로그인된 **`codex-cli 0.156.1`**이 필요합니다. App Server 요청과 응답 형식은 이 버전에서 생성한 JSON Schema와 대조해 확인했습니다. 다른 버전에서는 호환되지 않는 필드를 조용히 사용하지 않고 명시적인 오류를 표시합니다.
+
+클론한 저장소의 루트에서 실행하세요.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
-.venv/bin/python backend/server.py
+codex --version
+.venv/bin/python examples/room_demo/seed_demo.py
+.venv/bin/python backend/server.py --project-dir "$PWD" --data-dir "$PWD/examples/room_demo/output/data"
 ```
 
-<http://127.0.0.1:18765/>을 열고 참고 사진을 업로드하면 됩니다. 오른쪽에는 기본 예시 의자가 표시되며, 자신의 장면을 연결하면 해당 결과가 표시됩니다. 이 작업대는 독립된 브라우저 화면이므로 클라이언트가 MCP Apps 내장 표시를 지원하지 않아도 됩니다. 서버는 `127.0.0.1`에서만 수신합니다. 가져온 이미지, 장면, 피드백은 `backend/data/`에 저장되며 이 디렉터리는 Git에서 제외됩니다.
+Gateway가 프로젝트의 Codex 대화에 이 다섯 가지 `scene_feedback` MCP 도구를 자동으로 구성하므로 `codex mcp add`를 수동으로 실행할 필요가 없습니다. Gateway는 포트, 데이터 디렉터리, 프로젝트 디렉터리를 해당 대화에 전달하여 다른 프로젝트나 전역 MCP 설정이 잘못된 작업대를 가리키지 않도록 합니다.
 
-## Codex / Astra에 연결하기
+<http://127.0.0.1:18765/>을 여세요. 왼쪽에는 목표를 보여 주는 이미지가, 오른쪽에는 초기 방 GLB가 있습니다. 캐비닛을 선택하고 이미지에서 원하는 위치를 가리킨 뒤 「캐비닛을 왼쪽 벽에 더 가깝게 옮기고 왼쪽 이미지를 기준으로 맞춰 주세요」라고 입력하고 「보내기」를 누르세요. 데모의 원본 매개변수는 [`examples/room_demo/scene.json`](examples/room_demo/scene.json)에 있으며, [`build_scene.py`](examples/room_demo/build_scene.py)는 매개변수로부터 GLB를 생성합니다. Codex가 `workspace_publish_scene`을 호출하면 결과가 페이지에 나타납니다. `seed_demo.py`는 별도의 `examples/room_demo/output/data`를 사용하므로 일반 작업 공간의 데이터를 덮어쓰지 않습니다.
 
-저장소 루트에서 MCP 서버를 등록하세요. `$PWD`는 저장소의 절대 경로로 확장됩니다.
+자신의 프로젝트에서는 다음처럼 실행할 수 있습니다.
 
 ```bash
-codex mcp add scene_feedback -- "$PWD/.venv/bin/python" "$PWD/backend/mcp_server.py"
+.venv/bin/python backend/server.py --project-dir "/absolute/path/to/your/project" --data-dir "/absolute/path/to/private/workspace-data"
 ```
 
-`~/.codex/config.toml`의 `[mcp_servers.scene_feedback]`에 충분히 긴 상호작용 대기 시간을 설정하세요. `codex mcp add`가 만든 기존 섹션을 수정하고, 같은 이름의 섹션을 중복해서 추가하지 마세요. 승인을 묻지 않는 Codex 모드를 사용한다면 작업대를 만드는 도구에만 자동 승인을 설정할 수 있습니다. 피드백을 읽는 도구는 읽기 전용으로 선언되어 있습니다. 그다음 MCP 설정을 다시 불러오세요: [Codex MCP 설정 안내](https://learn.chatgpt.com/docs/extend/mcp).
+브라우저에서 참고 이미지를 추가하세요. Codex가 프로젝트 소스 파일에서 자체 완결형 GLB를 빌드하거나 내보낸 다음 MCP를 통해 게시하도록 하면 됩니다. 프로젝트 디렉터리와 thread ID는 데이터 디렉터리에 저장되므로 재시작해도 같은 대화가 복원됩니다. 데이터 디렉터리 하나는 프로젝트 하나에만 연결되며 다른 프로젝트로 몰래 바뀌지 않습니다.
 
-```toml
-[mcp_servers.scene_feedback]
-tool_timeout_sec = 900
+## MCP 도구
 
-[mcp_servers.scene_feedback.tools.request_visual_feedback]
-approval_mode = "approve"
-```
+| 도구 | 용도 |
+| --- | --- |
+| `workspace_open` | 이 프로젝트의 작업대 주소를 반환하거나 엽니다 |
+| `workspace_get_context` | 현재 참고 이미지, 장면 버전 및 프로젝트 문맥을 읽습니다 |
+| `workspace_get_feedback` | 제출된 피드백과 실제 이미지를 읽습니다 |
+| `workspace_publish_scene` | 새 GLB를 검증하고 게시하며, 예상 버전을 확인하고 페이지에 새로고침을 알립니다 |
+| `workspace_request_feedback` | 페이지에서 사용자에게 특정 부분의 검토를 요청하고 즉시 반환합니다. 사용자의 답변은 다음 사용자 메시지가 됩니다 |
 
-권장하는 두 단계 호출 방식:
+저장소의 [시각 재구성 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)은 Codex에게 원본 이미지와 표시를 구별하고, 프로젝트 소스 파일을 편집하며, 결과가 준비되면 GLB를 게시하도록 안내합니다. 새 작업 흐름에서는 다음 턴을 보내기 위해 MCP 호출이 대기할 필요가 없습니다.
 
-```text
-request_visual_feedback(
-  reference_images=["/absolute/path/reference.jpg"],
-  scene_glb_path="/absolute/path/current.glb",
-  wait_for_submit=false
-)
-→ session_id, url, next_cursor
-
-사용자가 url에서 표시를 그리고 「Astra에 보내기」를 클릭
-
-wait_visual_feedback(session_id, cursor=next_cursor)
-→ 이미지 블록 + 주석/텍스트/객체/카메라/버전 정보 + 새로운 next_cursor
-```
-
-`current_scene={"objects": [...]}`로 기존 장면의 객체 목록을 전달하거나, 장면을 전달하지 않고 작업대의 현재 장면을 사용할 수도 있습니다. `scene_glb_path`는 미리 볼 수 있는 GLB 파일을 가져오는 데 사용하며 Astra의 모델링 방식을 지정하지 않습니다. GLB 파일과 참고 사진 경로는 MCP 서버가 실행되는 컴퓨터의 로컬 경로여야 합니다. 브라우저에서도 참고 사진을 직접 추가할 수 있습니다.
-
-피드백을 받은 Astra는 자체 모델링 도구로 장면을 수정합니다. 다음 라운드에는 `request_visual_feedback(session_id=..., scene_glb_path="/absolute/path/updated.glb", wait_for_submit=false)`를 호출하고, 반환된 `next_cursor`로 `wait_visual_feedback`을 호출하세요. 같은 `session_id`를 재사용하면 페이지와 참고 사진을 다시 열 필요가 없습니다. 웹페이지에서 피드백을 제출하는 것만으로 이미 끝난 Codex 턴이 새로 시작되지는 않습니다. Astra가 이어서 작업하려면 대기 중인 MCP 호출이 있거나 사용자 정의 호스트가 다음 턴을 시작해야 합니다.
-
-호스트가 로컬 브라우저를 열 수 있다면 `request_visual_feedback()`은 기본적으로 페이지를 열고 제출을 기다립니다. 페이지를 열지 못하면 즉시 URL을 반환하며, 이후 `wait_visual_feedback`으로 기다릴 수 있습니다. 대기 시간이 초과되어도 세션은 열린 상태로 유지됩니다. `get_visual_feedback(session_id, cursor)`로 조회하거나 다시 기다리면 됩니다.
-
-## 피드백 형식
-
-주석 좌표는 해당 사진이나 뷰 안에서 정규화된 화면 좌표(`0–1`)입니다. 사용자가 가리킨 화면 위치를 표현하며, 월드 좌표나 실행할 모델링 명령이 아닙니다. 예:
-
-```json
-{
-  "scene_revision": 12,
-  "note": "캐비닛 윗면이 왼쪽 사진 ①의 선과 비슷한 높이에 있어야 해요. 오른쪽에는 조명도 하나 빠졌어요.",
-  "selected_object_ids": ["cabinet"],
-  "annotations": [
-    {
-      "pane": "reference",
-      "reference_image_id": "<reference-id>",
-      "type": "line",
-      "group_id": "1",
-      "coordinates": {"x": 0.23, "y": 0.32, "x2": 0.68, "y2": 0.32}
-    },
-    {
-      "pane": "scene",
-      "type": "point",
-      "group_id": "1",
-      "object_id": "cabinet",
-      "coordinates": {"x": 0.54, "y": 0.46}
-    }
-  ]
-}
-```
-
-`group_id`와 `object_id`는 모두 선택 사항입니다. GLB 내부의 노드를 선택하면 피드백에 `selected_scene_nodes`도 포함됩니다. 각 노드에는 소속 모델 객체 ID, GLB 내부 하위 노드의 인덱스 경로, 사용할 수 있는 노드 이름이 들어갑니다. 이는 화면 위치를 이해하기 위한 참고 정보이지 모델이 실행할 작업이 아닙니다. 원본 사진과 주석이 표시된 사진은 별도로 보관되어 Astra가 사진의 원래 내용과 사람의 지시를 구분할 수 있습니다. 장면 버전이 바뀌면 UI에 이전 장면 주석의 원본 버전이 표시되며, 제출할 때 현재 버전을 확인하여 오래된 화면을 새 화면으로 오인하지 않게 합니다. 유지된 주석은 다음 라운드에도 전송되므로 개별적으로 삭제하거나 모두 지울 수 있습니다.
-
-기존 `get_scene`, `update_scene`, `replace_scene`, `import_scene_model` 도구는 장면 표시와 기존 호출자와의 호환을 위해 계속 사용할 수 있습니다. 작업대 자체는 GLB 메시를 수정하지 않습니다.
-
-## 검증 및 사용 범위
+## 검증과 사용 범위
 
 ```bash
 .venv/bin/python -m unittest discover -s backend/tests -v
 ```
 
-이 프로젝트는 신뢰할 수 있는 로컬 환경을 위한 프로토타입입니다. 같은 컴퓨터의 다른 프로세스가 페이지와 세션 API에 접근할 수 있으므로, 로컬 포트를 신뢰할 수 없는 사용자에게 개방하지 마세요. 자동 승인 설정은 신뢰하는 로컬 서버에만 적용하세요. Codex CLI가 이 도구의 MCP 이미지 블록에서 참고 사진 내용을 읽는 것은 실제로 확인했습니다. 다른 호스트가 이미지를 전달하는지는 구현에 따라 다릅니다. 호스트가 텍스트만 표시한다면 Astra가 피드백에 포함된 로컬 이미지 경로를 읽도록 할 수 있습니다.
+두 개의 서로 다른 로컬 이미지로 실제 App Server 통합을 검증했습니다. Codex는 첫 턴에 빨간 이미지를 알아보았고, stdio를 닫고 다시 시작한 뒤 **같은 대화**의 두 번째 턴에서 파란 이미지를 알아보았습니다. `thread/read` 기록에는 두 턴의 `localImage` 항목이 모두 들어 있습니다. 따라서 이미지 경로만 전달된 것이 아니라 이미지가 실제로 모델에 입력되었음을 확인했습니다.
 
-프로젝트의 독창적인 코드는 [MIT 라이선스](LICENSE)를 사용합니다. 저장소의 Three.js 파일에는 [원래의 MIT 라이선스](web/vendor/three/LICENSE)가 유지됩니다.
+실제 브라우저→Codex→MCP 흐름도 Selenium으로 두 차례 검증했습니다. 첫 번째 라운드에서 사용자가 참고 이미지와 장면 이미지에 각각 번호가 있는 사각형을 그리고 보냈고, App Server 턴에는 `localImage` 5개가 포함되었습니다. Codex는 데모의 `scene.json`을 수정해 GLB를 생성하고 프로젝트별 MCP의 `workspace_publish_scene`을 두 차례 성공적으로 호출했습니다. 페이지에서 사용자가 승인한 뒤 브라우저의 장면 버전은 2→3→4로 자동 갱신되었고, 캐비닛 중심의 `x`는 `-0.8`이 되었습니다. 두 번째 라운드에서는 사용자가 웹페이지의 참고 이미지에 선을 더 그려 보냈습니다. 같은 대화에서 Codex는 추가 `input_image` 5개를 받고 확인 답변을 했습니다. 파일을 수정하거나 다시 게시하지 않았으며 최종 장면 버전은 4입니다.
+
+서비스는 `127.0.0.1`에서만 수신하며 신뢰할 수 있는 로컬 환경을 대상으로 합니다. 로컬 MCP Gateway와 통신할 수 있도록 Codex의 `workspaceWrite` 턴에 `networkAccess: true`가 설정됩니다. 페이지 제어 API에는 로컬에서 생성한 임의의 capability를 사용합니다. 신뢰할 수 없는 사용자에게 포트를 프록시하지 마세요. 실행 승인은 사용자가 페이지에서 결정하며 작업대는 자동으로 승인하지 않습니다. 실행 데이터와 데모 출력은 Git에 포함되지 않습니다.
+
+프로젝트 코드는 [MIT 라이선스](LICENSE)를 따릅니다. 저장소의 Three.js 파일에는 [원래의 MIT 라이선스](web/vendor/three/LICENSE)가 유지됩니다.

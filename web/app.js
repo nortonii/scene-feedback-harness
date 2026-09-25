@@ -5,8 +5,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const array = (value) => [value.x, value.y, value.z].map((n) => Number(n.toFixed(5)));
-const labels = {point:'点', rectangle:'方框', line:'线段', arrow:'箭头', text:'文字'};
-const glyphs = {point:'●', rectangle:'▢', line:'╱', arrow:'↗', text:'T'};
+const labels = {point:'点', rectangle:'方框', line:'线段', arrow:'箭头', text:'文字', freehand:'自由画笔'};
+const glyphs = {point:'●', rectangle:'▢', line:'╱', arrow:'↗', text:'T', freehand:'〰'};
 const circled = ['','①','②','③','④','⑤','⑥','⑦','⑧','⑨'];
 const ui = {
   viewport:id('viewport'), sceneStage:id('scene-stage'), sceneCanvas:id('scene-annotations'),
@@ -14,6 +14,7 @@ const ui = {
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
+  referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   compareImage:id('compare-image'), compareEnabled:id('compare-enabled'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
@@ -22,13 +23,21 @@ const ui = {
   note:id('feedback-note'), submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
-  textEditor:id('text-editor'), annotationText:id('annotation-text')
+  textEditor:id('text-editor'), annotationText:id('annotation-text'),
+  freeze:id('freeze-button'), browse:id('browse-button'), snapshotButton:id('snapshot-button'),
+  snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
+  newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
+  approvals:id('approval-list'), queue:id('queue-list'), conversation:id('conversation')
 };
 const state = {
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
+  browserCapability:null, agent:{status:'disconnected'}, queue:[], approvals:[],
+  eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
   annotations:[], mode:'select', groupId:'', drag:null, textPending:null,
+  snapshot:null, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
+  referencePanning:null, spacePan:false,
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
   restoredSceneRevision:null, restoredModelUrl:null
 };
@@ -92,14 +101,23 @@ function announce(message, error=false) {
 
 async function api(path, options={}) {
   const request = {...options};
+  if (state.browserCapability && /^(POST|PUT|PATCH|DELETE)$/i.test(request.method || '') &&
+      (path.startsWith('/api/workspace/') || path.startsWith('/api/sessions/'))) {
+    request.headers = {...(request.headers || {}), 'X-Workspace-Capability':state.browserCapability};
+  }
   if (options.body && typeof options.body !== 'string') {
     request.body = JSON.stringify(options.body);
-    request.headers = {'Content-Type':'application/json', ...(options.headers || {})};
+    request.headers = {'Content-Type':'application/json', ...(request.headers || {})};
   }
   const response = await fetch(path, request);
   let body;
   try { body = await response.json(); } catch { body = {}; }
-  if (!response.ok) throw new Error(body.error || body.detail || 'HTTP ' + response.status);
+  if (!response.ok) {
+    const error = new Error(body.error || body.detail || 'HTTP ' + response.status);
+    error.status = response.status;
+    error.detail = body;
+    throw error;
+  }
   return body;
 }
 
@@ -113,7 +131,10 @@ function saveDraft() {
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
-      groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target)}
+      groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target)},
+      snapshot:state.snapshot, sceneView:state.sceneView,
+      referenceZoom:state.referenceZoom, referencePan:state.referencePan,
+      eventCursor:state.eventCursor
     }));
   } catch { /* A full or disabled local store should not block feedback. */ }
 }
@@ -128,6 +149,16 @@ function restoreDraft() {
     state.restoredModelUrl = typeof draft.selectedModelUrl === 'string' ? draft.selectedModelUrl : null;
     state.activeReferenceId = typeof draft.activeReferenceId === 'string' ? draft.activeReferenceId : null;
     state.groupId = typeof draft.groupId === 'string' ? draft.groupId : '';
+    if (draft.snapshot?.data_url?.startsWith('data:image/jpeg;base64,') && Number.isInteger(draft.snapshot.scene_revision)) {
+      state.snapshot = draft.snapshot;
+      state.sceneView = draft.sceneView === 'live' ? 'live' : 'snapshot';
+    } else {
+      // Old drafts had scene marks without a fixed image; they cannot be mapped reliably.
+      state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
+    }
+    state.referenceZoom = Number.isFinite(draft.referenceZoom) ? clamp(draft.referenceZoom, 1, 8) : 1;
+    state.referencePan = Number.isFinite(draft.referencePan?.x) && Number.isFinite(draft.referencePan?.y)
+      ? draft.referencePan : {x:0,y:0};
     ui.groupSelect.value = state.groupId;
     ui.note.value = typeof draft.note === 'string' ? draft.note : '';
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
@@ -139,7 +170,7 @@ function restoreDraft() {
   } catch { /* Ignore a stale or corrupt local draft. */ }
 }
 
-function editable() { return state.sessionStatus === 'open' && !state.submitting && !state.uploading; }
+function editable() { return state.workspaceReady && state.sessionStatus === 'open' && !state.submitting && !state.uploading && !state.pendingSubmission; }
 function setSession(session) {
   state.sessionId = session.session_id;
   state.sessionStatus = session.status || 'open';
@@ -151,30 +182,630 @@ function setSession(session) {
   ui.note.disabled = state.sessionStatus !== 'open';
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   id('clear-annotations').disabled = state.sessionStatus !== 'open';
-  if (state.sessionStatus === 'open' && state.feedbackCount) {
-    ui.caption.textContent = '已发送 ' + state.feedbackCount + ' 轮。每次会再次发送当前保留的全部标记；可删除或清空后继续。';
-  } else if (state.sessionStatus === 'open') {
-    ui.caption.textContent = '每次会发送当前全部标记、原图、场景视角和你的话。标记会保留；不想重复发送可删除或清空。';
-  } else {
+  if (state.sessionStatus !== 'open') {
     ui.caption.textContent = '这个会话已结束。已保存的标记仍可查看。';
+  } else {
+    updateSubmitLabel();
   }
 }
 
 async function ensureSession() {
   const params = new URLSearchParams(location.search);
-  let sessionId = params.get('session_id') || params.get('session');
-  let session;
-  if (sessionId) {
-    session = await api('/api/sessions/' + encodeURIComponent(sessionId));
-  } else {
-    session = await api('/api/sessions', {method:'POST', body:{}});
-    sessionId = session.session_id;
+  const oldSession = params.get('session_id') || params.get('session');
+  const workspace = await api('/api/workspace/state' + (oldSession ? '?session_id=' + encodeURIComponent(oldSession) : ''));
+  if (!workspace.session_id || !workspace.browser_capability) throw new Error('工作台没有连接到 Codex 项目会话');
+  state.browserCapability = workspace.browser_capability;
+  state.workspaceReady = true;
+  renderWorkspace(workspace);
+  const sessionId = workspace.session_id;
+  const session = await api('/api/sessions/' + encodeURIComponent(sessionId));
+  if (params.get('session_id') !== sessionId || params.has('session')) {
+    params.delete('session');
     params.set('session_id', sessionId);
     history.replaceState(null, '', location.pathname + '?' + params.toString());
   }
   setSession(session);
   restoreDraft();
   setReferences(session.reference_images || []);
+  renderSceneView();
+  state.pendingSubmission = await readOutbox();
+  renderWorkspace(workspace);
+  await fetchEvents(true);
+}
+
+function outboxKey() { return 'visual-outbox:' + state.sessionId; }
+function openOutbox() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error('浏览器未提供本地存储'));
+    const request = indexedDB.open('visual-reconstruction-workspace', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('outbox');
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('无法打开本地存储'));
+  });
+}
+async function writeOutbox(packet) {
+  try {
+    const db = await openOutbox();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction('outbox', 'readwrite');
+      transaction.objectStore('outbox').put(packet, outboxKey());
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+    db.close();
+  } catch {
+    try { localStorage.setItem(outboxKey(), JSON.stringify(packet)); }
+    catch { throw new Error('浏览器无法保存待发送消息。请检查可用存储空间后重试。'); }
+  }
+}
+async function readOutbox() {
+  try {
+    const db = await openOutbox();
+    const packet = await new Promise((resolve, reject) => {
+      const request = db.transaction('outbox', 'readonly').objectStore('outbox').get(outboxKey());
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    if (packet) return packet;
+  } catch { /* Fall back to local storage. */ }
+  try { return JSON.parse(localStorage.getItem(outboxKey()) || 'null'); }
+  catch { return null; }
+}
+async function clearOutbox() {
+  try {
+    const db = await openOutbox();
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction('outbox', 'readwrite');
+      transaction.objectStore('outbox').delete(outboxKey());
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error);
+    });
+    db.close();
+  } catch { /* The fallback store is also cleared below. */ }
+  try { localStorage.removeItem(outboxKey()); } catch { /* Ignore unavailable local storage. */ }
+}
+
+function updateSubmitLabel() {
+  const status = state.agent?.status || 'disconnected';
+  const label = state.pendingSubmission ? '重试上一条消息'
+    : status === 'running' || status === 'awaiting_approval' ? '加入下一轮'
+    : status === 'disconnected' || status === 'error' ? '保存并等待连接'
+    : '发送到 Codex';
+  ui.submit.querySelector('span:first-child').textContent = label;
+  ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
+  ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+  ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+  id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+  if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
+  else if (status === 'running' || status === 'awaiting_approval') ui.caption.textContent = 'Codex 正在执行；这条图文消息会加入下一轮。';
+  else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
+  else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
+}
+function renderWorkspace(workspace) {
+  state.agent = workspace.agent || {status:'disconnected'};
+  state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
+  state.approvals = Array.isArray(workspace.approvals) ? workspace.approvals : [];
+  const status = state.agent.status;
+  const statusText = {
+    idle:'Codex 已连接，等待你的消息', running:'Codex 正在处理这一轮…',
+    awaiting_approval:'Codex 需要你审批后继续',
+    disconnected:'Codex 连接已断开，正在尝试恢复',
+    delivery_uncertain:'消息送达状态待核实，请勿重复创建反馈',
+    error:'Codex 会话发生错误'
+  };
+  ui.agentStatus.textContent = statusText[status] || '正在连接 Codex…';
+  if (state.agent.error) ui.agentStatus.textContent += '：' + String(state.agent.error).slice(0, 240);
+  ui.agentStatus.className = 'agent-status' + (status === 'running' ? ' running' : ['error','disconnected','delivery_uncertain'].includes(status) ? ' error' : '');
+  ui.stop.classList.toggle('hidden', !['running','awaiting_approval'].includes(status));
+  ui.pill.textContent = ({idle:'Codex 已连接',running:'Codex 执行中',awaiting_approval:'等待审批',disconnected:'连接中断',delivery_uncertain:'送达待核实',error:'连接错误'})[status] || status;
+  ui.pill.className = 'session-pill ' + (status === 'running' ? 'running' : status === 'idle' ? 'open' : status === 'awaiting_approval' ? 'queued' : 'error');
+  renderQueue();
+  renderApprovals();
+  updateSubmitLabel();
+}
+function renderQueue() {
+  ui.queue.replaceChildren();
+  for (const item of state.queue) {
+    if (!item || item.status === 'completed') continue;
+    const card = document.createElement('div');
+    card.className = 'queue-card';
+    const title = document.createElement('strong');
+    title.textContent = ({queued:'已加入下一轮',dispatching:'正在送达',running:'正在处理',blocked_stale:'请确认旧场景反馈',delivery_uncertain:'送达待核实',failed:'发送失败'})[item.status] || '待处理消息';
+    const body = document.createElement('div');
+    body.textContent = '针对场景版本 ' + (item.scene_revision ?? '—') + (item.status === 'blocked_stale' ? '，当前场景已有新版本。确认后仍按旧截图发送。' : '');
+    card.append(title, body);
+    if (item.status === 'blocked_stale' && item.feedback_id) {
+      const actions = document.createElement('div');
+      actions.className = 'queue-actions';
+      const confirm = document.createElement('button');
+      confirm.type = 'button';
+      confirm.textContent = '确认按旧截图发送';
+      confirm.addEventListener('click', async () => {
+        confirm.disabled = true;
+        try {
+          await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{confirm:true}});
+          announce('已确认；Codex 空闲后会处理这条消息。');
+          await refreshWorkspace();
+        } catch (error) { announce('确认失败：' + error.message, true); confirm.disabled = false; }
+      });
+      actions.append(confirm);
+      const discard = document.createElement('button');
+      discard.type = 'button';
+      discard.textContent = '舍弃这条';
+      discard.addEventListener('click', async () => {
+        confirm.disabled = discard.disabled = true;
+        try {
+          await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{confirm:false}});
+          await refreshWorkspace();
+        } catch (error) { announce('舍弃失败：' + error.message, true); confirm.disabled = discard.disabled = false; }
+      });
+      actions.append(discard);
+      card.append(actions);
+    }
+    if (item.status === 'delivery_uncertain' && item.feedback_id) {
+      const warning = document.createElement('div');
+      warning.textContent = 'Gateway 在发送途中中断。请先核对 Codex 会话，再选择重试或舍弃。';
+      const actions = document.createElement('div');
+      actions.className = 'queue-actions';
+      for (const [retry,label] of [[true,'确认未送达，重试'],[false,'已处理，舍弃']]) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.addEventListener('click', async () => {
+          actions.querySelectorAll('button').forEach((node) => node.disabled = true);
+          try {
+            await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{retry_uncertain:retry}});
+            await refreshWorkspace();
+          } catch (error) { announce('处理失败：' + error.message, true); actions.querySelectorAll('button').forEach((node) => node.disabled = false); }
+        });
+        actions.append(button);
+      }
+      card.append(warning, actions);
+    }
+    ui.queue.append(card);
+  }
+}
+function approvalDetails(approval) {
+  if (approval.details && typeof approval.details === 'object' && !Array.isArray(approval.details)) return approval.details;
+  try {
+    const parsed = JSON.parse(approval.prompt);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch { /* Older requests can contain a plain prompt. */ }
+  return {};
+}
+function approvalText(parent, value, className='approval-detail') {
+  if (value === undefined || value === null || value === '') return;
+  const element = document.createElement('div');
+  element.className = className;
+  element.textContent = String(value);
+  parent.append(element);
+  return element;
+}
+function approvalJsonInput(parent, initial, label='结构化 JSON 响应') {
+  const field = document.createElement('label');
+  field.className = 'approval-field';
+  const heading = document.createElement('span');
+  heading.textContent = label;
+  const editor = document.createElement('textarea');
+  editor.className = 'approval-json';
+  editor.rows = 5;
+  editor.spellcheck = false;
+  editor.value = JSON.stringify(initial, null, 2);
+  field.append(heading, editor);
+  parent.append(field);
+  return () => {
+    let value;
+    try { value = JSON.parse(editor.value); }
+    catch { throw new Error('请填写有效的 JSON。'); }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('JSON 结果必须是对象。');
+    return value;
+  };
+}
+function approvalSchemaInput(parent, name, property, required) {
+  const schema = property && typeof property === 'object' ? property : {};
+  const rawType = Array.isArray(schema.type) ? schema.type.find((item) => item !== 'null') : schema.type;
+  const type = rawType || (schema.enum ? typeof schema.enum[0] : 'string');
+  const field = document.createElement('label');
+  field.className = 'approval-field';
+  const heading = document.createElement('span');
+  heading.textContent = (schema.title || name) + (required ? ' *' : '');
+  field.append(heading);
+  let control;
+  if (Array.isArray(schema.enum)) {
+    control = document.createElement('select');
+    if (!required) {
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = '不填写';
+      control.append(blank);
+    } else if (schema.default === undefined) {
+      const blank = document.createElement('option');
+      blank.value = '';
+      blank.textContent = '请选择';
+      blank.disabled = true;
+      blank.selected = true;
+      control.append(blank);
+    }
+    schema.enum.forEach((value, index) => {
+      const option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = String(value);
+      if (schema.default === value) option.selected = true;
+      control.append(option);
+    });
+  } else if (type === 'boolean') {
+    control = document.createElement('input');
+    control.type = 'checkbox';
+    control.checked = schema.default === true;
+  } else if (type === 'object' || type === 'array') {
+    control = document.createElement('textarea');
+    control.className = 'approval-json';
+    control.rows = 3;
+    control.spellcheck = false;
+    control.placeholder = type === 'array' ? '[]' : '{}';
+    if (schema.default !== undefined) control.value = JSON.stringify(schema.default, null, 2);
+  } else if (schema.format === 'textarea' || schema.format === 'multiline') {
+    control = document.createElement('textarea');
+    control.rows = 3;
+    control.value = schema.default === undefined ? '' : String(schema.default);
+  } else {
+    control = document.createElement('input');
+    control.type = type === 'integer' || type === 'number' ? 'number'
+      : schema.format === 'email' ? 'email' : schema.format === 'uri' ? 'url' : 'text';
+    if (type === 'integer') control.step = '1';
+    else if (type === 'number') control.step = 'any';
+    control.value = schema.default === undefined ? '' : String(schema.default);
+  }
+  control.dataset.fieldName = name;
+  if (required && type !== 'boolean') control.required = true;
+  if (Number.isFinite(schema.minimum) && 'min' in control) control.min = String(schema.minimum);
+  if (Number.isFinite(schema.maximum) && 'max' in control) control.max = String(schema.maximum);
+  if (Number.isInteger(schema.minLength) && 'minLength' in control) control.minLength = schema.minLength;
+  if (Number.isInteger(schema.maxLength) && 'maxLength' in control) control.maxLength = schema.maxLength;
+  if (typeof schema.pattern === 'string' && 'pattern' in control) control.pattern = schema.pattern;
+  field.append(control);
+  if (schema.description) approvalText(field, schema.description, 'approval-help');
+  parent.append(field);
+  return () => {
+    if (!control.reportValidity()) throw new Error('请检查“' + (schema.title || name) + '”。');
+    if (type === 'boolean') return {present:true, value:control.checked};
+    const raw = control.value.trim();
+    if (!raw) {
+      if (required) throw new Error('请填写“' + (schema.title || name) + '”。');
+      return {present:false};
+    }
+    if (Array.isArray(schema.enum)) {
+      const index = Number(raw);
+      if (!Number.isInteger(index) || index < 0 || index >= schema.enum.length) throw new Error('请为“' + name + '”选择有效选项。');
+      return {present:true, value:schema.enum[index]};
+    }
+    if (type === 'integer' || type === 'number') {
+      const number = Number(raw);
+      if (!Number.isFinite(number) || (type === 'integer' && !Number.isInteger(number))) throw new Error('“' + name + '”需要数字。');
+      return {present:true, value:number};
+    }
+    if (type === 'object' || type === 'array') {
+      let value;
+      try { value = JSON.parse(raw); }
+      catch { throw new Error('“' + name + '”需要有效 JSON。'); }
+      if (type === 'array' ? !Array.isArray(value) : !value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('“' + name + '”的 JSON 类型不正确。');
+      }
+      return {present:true, value};
+    }
+    return {present:true, value:control.value};
+  };
+}
+function approvalForm(parent, schema) {
+  const properties = schema && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
+    ? schema.properties : {};
+  const required = Array.isArray(schema?.required) ? schema.required : [];
+  if ((schema?.type && schema.type !== 'object') || required.some((name) => !(name in properties))) {
+    return approvalJsonInput(parent, {}, '表单内容（JSON 对象）');
+  }
+  const entries = Object.entries(properties);
+  if (!entries.length) return () => ({});
+  const fields = entries.map(([name, property]) => [name, approvalSchemaInput(parent, name, property, required.includes(name))]);
+  return () => {
+    const content = {};
+    for (const [name, read] of fields) {
+      const result = read();
+      if (result.present) content[name] = result.value;
+    }
+    return content;
+  };
+}
+function approvalQuestions(parent, questions) {
+  const entries = Array.isArray(questions) ? questions : [];
+  const readers = entries.map((question, index) => {
+    const questionId = String(question.id || index + 1);
+    const field = document.createElement('fieldset');
+    field.className = 'approval-question';
+    const legend = document.createElement('legend');
+    legend.textContent = String(question.header || '问题 ' + (index + 1));
+    field.append(legend);
+    approvalText(field, question.question || question.prompt || question.description, 'approval-detail');
+    const options = Array.isArray(question.options) && !question.isSecret ? question.options : [];
+    if (!options.length) {
+      const input = question.isSecret ? document.createElement('input') : document.createElement('textarea');
+      if (question.isSecret) {
+        input.type = 'password';
+        input.autocomplete = 'off';
+      } else {
+        input.rows = 2;
+      }
+      input.placeholder = '填写回答';
+      input.setAttribute('aria-label', questionId + ' 回答');
+      field.append(input);
+      parent.append(field);
+      return [questionId, () => {
+        const answer = input.value.trim();
+        if (!answer) throw new Error('请回答“' + (question.header || questionId) + '”。');
+        return answer;
+      }];
+    }
+    const groupName = 'approval-' + crypto.randomUUID();
+    let otherInput = null;
+    for (const option of options) {
+      const row = document.createElement('label');
+      row.className = 'approval-option';
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = groupName;
+      radio.value = String(option.label || option.value || '');
+      row.append(radio);
+      const text = document.createElement('span');
+      text.textContent = String(option.label || option.value || '其他');
+      row.append(text);
+      if (option.description) approvalText(row, option.description, 'approval-help');
+      if (option.isOther) {
+        otherInput = document.createElement('input');
+        otherInput.type = 'text';
+        otherInput.placeholder = '填写其他答案';
+        otherInput.setAttribute('aria-label', questionId + ' 其他答案');
+        otherInput.addEventListener('focus', () => { radio.checked = true; });
+        row.append(otherInput);
+        radio.dataset.other = 'true';
+      }
+      field.append(row);
+    }
+    parent.append(field);
+    return [questionId, () => {
+      const selected = field.querySelector('input[type="radio"]:checked');
+      if (!selected) throw new Error('请选择“' + (question.header || questionId) + '”的答案。');
+      if (selected.dataset.other === 'true') {
+        const answer = otherInput?.value.trim();
+        if (!answer) throw new Error('请填写其他答案。');
+        return answer;
+      }
+      return selected.value;
+    }];
+  });
+  return () => {
+    const answers = {};
+    for (const [questionId, read] of readers) answers[questionId] = {answers:[read()]};
+    return answers;
+  };
+}
+function approvalButton(actions, label, makePayload, approval, card) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', async () => {
+    let payload;
+    try { payload = makePayload(); }
+    catch (error) { announce(error.message, true); return; }
+    actions.querySelectorAll('button').forEach((node) => node.disabled = true);
+    try {
+      await api('/api/workspace/approvals/' + encodeURIComponent(approval.approval_id) + '/respond', {method:'POST', body:payload});
+      card.remove();
+      try { await refreshWorkspace(); }
+      catch { announce('审批已送达，工作台状态会稍后刷新。'); }
+    } catch (error) {
+      announce('审批响应失败：' + error.message, true);
+      actions.querySelectorAll('button').forEach((node) => node.disabled = false);
+    }
+  });
+  actions.append(button);
+}
+function createApprovalCard(approval) {
+  const details = approvalDetails(approval);
+  const kind = approval.kind || '';
+  const card = document.createElement('div');
+  card.className = 'approval-card';
+  card.dataset.approvalId = approval.approval_id;
+  const title = document.createElement('strong');
+  const body = document.createElement('div');
+  body.className = 'approval-detail';
+  const fields = document.createElement('div');
+  fields.className = 'approval-fields';
+  const actions = document.createElement('div');
+  actions.className = 'approval-actions';
+  const addDecision = (decision, label, extra) =>
+    approvalButton(actions, label, () => ({decision, ...(extra ? extra() : {})}), approval, card);
+  if (approval.details_truncated) {
+    title.textContent = '审批内容过长';
+    approvalText(body, '请求内容超过工作台可安全展示的长度，不能在这里同意。请拒绝或取消，并让 Codex 缩短请求。');
+    approvalText(fields, approval.prompt || kind, 'approval-raw');
+    if (kind === 'item/commandExecution/requestApproval' || kind === 'item/fileChange/requestApproval' ||
+        kind === 'mcpServer/elicitation/request' || kind === 'item/permissions/requestApproval' ||
+        kind === 'item/tool/requestUserInput') {
+      addDecision('decline', '拒绝');
+      addDecision('cancel', '取消');
+    } else {
+      approvalText(fields, '此请求没有已知的安全回应格式。可以中断当前这一轮，让 Codex 重新提出更短的请求。', 'approval-help');
+      const stop = document.createElement('button');
+      stop.type = 'button';
+      stop.textContent = '停止本轮';
+      stop.addEventListener('click', async () => {
+        stop.disabled = true;
+        try {
+          await api('/api/workspace/interrupt', {method:'POST', body:{}});
+          announce('已请求中断本轮。');
+          await refreshWorkspace();
+        } catch (error) {
+          announce('中断失败：' + error.message, true);
+          stop.disabled = false;
+        }
+      });
+      actions.append(stop);
+    }
+    card.append(title, body, fields, actions);
+    return card;
+  }
+  if (kind === 'mcpServer/elicitation/request') {
+    const mode = details.mode;
+    title.textContent = 'MCP 请求用户输入 · ' + (details.serverName || '服务');
+    approvalText(body, details.message || details.title || details.description || 'MCP 服务正在等待你的回应。');
+    if (mode === 'url') {
+      const address = details.url;
+      let validUrl = false;
+      try {
+        const url = new URL(address);
+        if (!['https:','http:'].includes(url.protocol)) throw new Error('unsupported protocol');
+        validUrl = true;
+        const link = document.createElement('a');
+        link.className = 'approval-link';
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = '打开请求页面：' + url.href;
+        fields.append(link);
+      } catch { approvalText(fields, '请求中的链接无效，请拒绝或取消。', 'approval-help'); }
+      approvalText(fields, '同意打开只授权 URL 流程；完成网页操作后仍需按页面提示继续。', 'approval-help');
+      if (validUrl) addDecision('accept', '同意打开');
+    } else if (mode === 'openai/userVerification') {
+      if (details.challenge !== undefined) {
+        approvalText(fields, typeof details.challenge === 'string' ? details.challenge : JSON.stringify(details.challenge, null, 2), 'approval-raw');
+      }
+      approvalText(fields, '请先完成上面的验证步骤，再决定是否接受。', 'approval-help');
+      addDecision('accept', '接受请求');
+    } else if (['form','openai/form','openaiForm'].includes(mode)) {
+      if (details.requestedSchema && typeof details.requestedSchema === 'object' && !Array.isArray(details.requestedSchema)) {
+        const content = approvalForm(fields, details.requestedSchema);
+        addDecision('accept', '提交表单', () => ({content:content()}));
+      } else {
+        approvalText(fields, '请求没有有效的表单结构，请拒绝或取消。', 'approval-help');
+      }
+    } else {
+      approvalText(fields, '工作台暂不支持此 MCP 交互模式：' + String(mode || '未指定') + '。请拒绝或取消，并让服务改用表单或 URL。', 'approval-help');
+      approvalText(fields, JSON.stringify(details, null, 2), 'approval-raw');
+    }
+    addDecision('decline', '拒绝');
+    addDecision('cancel', '取消');
+  } else if (kind === 'item/tool/requestUserInput' || kind === 'tool/requestUserInput') {
+    title.textContent = 'Codex 需要你的回答';
+    approvalText(body, details.message || details._meta?.message || '请回答以下问题。');
+    if (details._meta?.codex_approval_kind === 'mcp_tool_call') {
+      const parameters = (details._meta.tool_params_display || []).map((item) =>
+        (item.display_name || item.name) + ': ' + String(item.value)).join('\n');
+      approvalText(body, parameters);
+    }
+    const answers = approvalQuestions(fields, details.questions);
+    addDecision('accept', '提交回答', () => ({answers:answers()}));
+    addDecision('decline', '拒绝');
+    addDecision('cancel', '取消');
+  } else if (kind === 'item/permissions/requestApproval') {
+    title.textContent = 'Codex 请求权限';
+    approvalText(body, details.reason || details.message || '请检查所请求的权限。');
+    if (details.cwd) approvalText(body, '工作目录：' + details.cwd);
+    const requested = details.permissions || details.requestedPermissions || details.requested || {};
+    approvalText(fields, '请求的权限范围（授权时将原样授予）：', 'approval-help');
+    approvalText(fields, JSON.stringify(requested, null, 2), 'approval-raw');
+    const scopeLabel = document.createElement('label');
+    scopeLabel.className = 'approval-field';
+    const scopeHeading = document.createElement('span');
+    scopeHeading.textContent = '授权时长';
+    const scope = document.createElement('select');
+    for (const [value, label] of [['turn','仅本轮'],['session','此会话']]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      scope.append(option);
+    }
+    scopeLabel.append(scopeHeading, scope);
+    fields.append(scopeLabel);
+    addDecision('accept', '授权', () => ({scope:scope.value}));
+    addDecision('decline', '拒绝');
+  } else if (kind === 'item/commandExecution/requestApproval' || kind === 'item/fileChange/requestApproval') {
+    title.textContent = kind.includes('fileChange') ? 'Codex 请求修改文件' : 'Codex 请求执行命令';
+    approvalText(body, details.reason || details.message);
+    if (details.command) approvalText(body, details.command, 'approval-raw');
+    else if (details.changes) approvalText(body, JSON.stringify(details.changes, null, 2), 'approval-raw');
+    else if (!body.textContent) approvalText(body, approval.prompt || kind);
+    addDecision('accept', '允许');
+    addDecision('decline', '拒绝');
+  } else {
+    title.textContent = 'Codex 请求结构化回应';
+    approvalText(body, kind || '未知请求');
+    approvalText(fields, JSON.stringify(details, null, 2), 'approval-raw');
+    const result = approvalJsonInput(fields, {}, '返回给 Codex 的 JSON 对象');
+    approvalButton(actions, '发送 JSON 结果', () => ({result:result()}), approval, card);
+  }
+  card.append(title, body, fields, actions);
+  return card;
+}
+function renderApprovals() {
+  const pending = new Map(state.approvals.filter((item) => item?.approval_id)
+    .map((item) => [item.approval_id, item]));
+  for (const card of [...ui.approvals.children]) {
+    if (!pending.has(card.dataset.approvalId)) card.remove();
+  }
+  const rendered = new Set([...ui.approvals.children].map((card) => card.dataset.approvalId));
+  for (const approval of pending.values()) {
+    if (!rendered.has(approval.approval_id)) ui.approvals.append(createApprovalCard(approval));
+  }
+}
+function addConversation(type, message, time) {
+  if (!message) return;
+  if (ui.conversation.firstElementChild?.classList.contains('muted')) ui.conversation.replaceChildren();
+  const card = document.createElement('div');
+  card.className = 'conversation-item' + (type === 'user' ? ' user' : type === 'error' ? ' error' : '');
+  const label = document.createElement('small');
+  label.textContent = (type === 'user' ? '你' : type === 'assistant' ? 'Codex' : '执行状态') + (time ? ' · ' + new Date(time).toLocaleTimeString() : '');
+  const content = document.createElement('div');
+  content.textContent = String(message).slice(0, 4000);
+  card.append(label, content);
+  ui.conversation.append(card);
+  while (ui.conversation.childElementCount > 100) ui.conversation.firstElementChild.remove();
+  ui.conversation.scrollTop = ui.conversation.scrollHeight;
+}
+async function fetchEvents(initial=false) {
+  const events = await api('/api/workspace/events?after=' + (initial ? 0 : state.eventCursor));
+  const items = Array.isArray(events.items) ? events.items : [];
+  for (const event of items) {
+    if (!event || state.seenEventIds.has(event.id)) continue;
+    state.seenEventIds.add(event.id);
+    const payload = event.payload || {};
+    const message = payload.text || payload.message || payload.summary || payload.prompt;
+    if (event.type === 'assistant_message' || event.type === 'assistant_text' || event.type === 'agent_message') {
+      addConversation('assistant', message, event.at);
+    } else if (event.type === 'feedback_queued') {
+      addConversation('user', payload.note || '已发送视觉反馈（含图片和标注）', event.at);
+    } else if (event.type === 'turn_started') {
+      addConversation('status', 'Codex 开始处理这一轮。', event.at);
+    } else if (event.type === 'turn_completed') {
+      addConversation('status', message || '这一轮已完成。', event.at);
+    } else if (event.type === 'turn_failed' || event.type === 'disconnected') {
+      addConversation('error', message || '执行中断，请检查连接。', event.at);
+    } else if (event.type === 'scene_published') {
+      addConversation('status', message || '新场景已发布。', event.at);
+    } else if (event.type === 'feedback_requested') {
+      addConversation('assistant', message || '请查看当前场景并给出反馈。', event.at);
+    } else if (event.type === 'approval_requested') {
+      addConversation('status', 'Codex 正在等待审批。', event.at);
+    }
+  }
+  state.eventCursor = Number.isInteger(events.next_cursor) ? events.next_cursor : state.eventCursor;
+  if (items.length) saveDraft();
+}
+async function refreshWorkspace() {
+  const workspace = await api('/api/workspace/state');
+  if (workspace.session_id !== state.sessionId) throw new Error('项目会话已改变；请刷新工作台');
+  state.browserCapability = workspace.browser_capability || state.browserCapability;
+  renderWorkspace(workspace);
+  await fetchEvents();
 }
 
 function sceneObject(objectId) { return state.sceneObjects.find((item) => item.id === objectId); }
@@ -396,10 +1027,67 @@ async function loadScene(sceneData) {
   drawOverlays();
   id('revision-label').textContent = '版本 ' + scene.revision;
   id('scene-name').textContent = scene.name || '当前场景';
-  id('scene-title').textContent = scene.name || 'Astra 搭出的结果';
+  id('scene-title').textContent = scene.name || 'Codex 的当前结果';
   if (priorRevision !== null) {
-    announce('场景已更新到版本 ' + scene.revision + '。旧场景标记已保留并标明来源版本。');
+    announce('场景已更新到版本 ' + scene.revision + '。已有标注仍绑定原截图。');
   }
+  renderSceneView();
+  saveDraft();
+}
+
+function captureLiveScene() {
+  controls.update();
+  renderer.render(threeScene, camera);
+  const source = renderer.domElement;
+  const canvas = scaledCanvas(source.width, source.height, 1440);
+  canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.88);
+}
+function freezeScene() {
+  if (!editable() || state.sceneView !== 'live') return;
+  const oldMarks = state.annotations.filter((annotation) => annotation.pane === 'scene');
+  if (oldMarks.length && !window.confirm('拍新截图会清除旧截图上的 ' + oldMarks.length + ' 条场景标记。继续？')) return;
+  const shot = captureLiveScene();
+  state.snapshot = {
+    id:crypto.randomUUID(), data_url:shot, scene_revision:state.sceneRevision,
+    camera:cameraData(), selected_object_ids:state.selectedId ? [state.selectedId] : [],
+    selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : []
+  };
+  if (oldMarks.length) state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
+  state.sceneView = 'snapshot';
+  renderSceneView();
+  renderAnnotations();
+  saveDraft();
+  announce('已固定当前视角。现在可在这张截图上标注。');
+}
+function updateSnapshotGeometry() {
+  if (!state.snapshot || !ui.snapshotImage.naturalWidth || !ui.snapshotImage.naturalHeight) return;
+  const scale = Math.min(
+    ui.sceneStage.clientWidth / ui.snapshotImage.naturalWidth,
+    ui.sceneStage.clientHeight / ui.snapshotImage.naturalHeight
+  );
+  ui.snapshotMedia.style.width = Math.max(1, ui.snapshotImage.naturalWidth * scale) + 'px';
+  ui.snapshotMedia.style.height = Math.max(1, ui.snapshotImage.naturalHeight * scale) + 'px';
+  drawOverlays();
+}
+function renderSceneView() {
+  const hasSnapshot = !!state.snapshot;
+  if (!hasSnapshot) state.sceneView = 'live';
+  const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
+  if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
+  ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
+  ui.browse.classList.toggle('hidden', !showingSnapshot);
+  ui.snapshotButton.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
+  ui.freeze.classList.toggle('hidden', showingSnapshot);
+  ui.newSceneBadge.classList.toggle('hidden', !hasSnapshot || state.snapshot.scene_revision === state.sceneRevision);
+  if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
+    ui.newSceneBadge.textContent = '新结果：版本 ' + state.sceneRevision + '；当前标注仍对应截图版本 ' + state.snapshot.scene_revision;
+  }
+  ui.compareImage.classList.toggle('hidden', showingSnapshot || !activeReference() || !ui.compareEnabled.checked);
+  controls.enabled = state.mode === 'select' && !showingSnapshot;
+  updateSnapshotGeometry();
+  updateMode();
+  updateSceneHint();
   saveDraft();
 }
 
@@ -445,6 +1133,8 @@ function renderReferenceStrip() {
     }
     button.addEventListener('click', () => {
       state.activeReferenceId = ref.id;
+      state.referenceZoom = 1;
+      state.referencePan = {x:0,y:0};
       renderReferenceStrip();
       showActiveReference();
       saveDraft();
@@ -459,7 +1149,7 @@ function showActiveReference() {
   ui.referenceEmpty.classList.toggle('hidden', hasReference);
   ui.referenceHint.classList.toggle('hidden', !hasReference || state.mode === 'select');
   ui.referenceTitle.textContent = ref?.name || '照片里的目标';
-  ui.compareImage.classList.toggle('hidden', !hasReference || !ui.compareEnabled.checked);
+  ui.compareImage.classList.toggle('hidden', !hasReference || !ui.compareEnabled.checked || state.sceneView === 'snapshot');
   ui.compareEnabled.disabled = !hasReference;
   ui.compareOpacity.disabled = !hasReference || !ui.compareEnabled.checked;
   if (!hasReference) {
@@ -480,7 +1170,28 @@ function updateReferenceGeometry() {
   const scale = Math.min(stage.clientWidth / image.naturalWidth, stage.clientHeight / image.naturalHeight);
   ui.referenceMedia.style.width = Math.max(1, image.naturalWidth * scale) + 'px';
   ui.referenceMedia.style.height = Math.max(1, image.naturalHeight * scale) + 'px';
+  updateReferenceTransform();
   drawOverlays();
+}
+function updateReferenceTransform() {
+  ui.referenceMedia.style.transform = `translate(${state.referencePan.x}px, ${state.referencePan.y}px) scale(${state.referenceZoom})`;
+}
+function setReferenceZoom(nextZoom, anchorEvent) {
+  const oldZoom = state.referenceZoom;
+  const zoom = clamp(nextZoom, 1, 8);
+  if (zoom === oldZoom) return;
+  if (anchorEvent) {
+    const rect = ui.referenceStage.getBoundingClientRect();
+    const x = anchorEvent.clientX - rect.left - rect.width / 2;
+    const y = anchorEvent.clientY - rect.top - rect.height / 2;
+    const factor = zoom / oldZoom;
+    state.referencePan.x = x - (x - state.referencePan.x) * factor;
+    state.referencePan.y = y - (y - state.referencePan.y) * factor;
+  }
+  state.referenceZoom = zoom;
+  if (zoom === 1) state.referencePan = {x:0,y:0};
+  updateReferenceTransform();
+  saveDraft();
 }
 function readFile(file) {
   return new Promise((resolve, reject) => {
@@ -534,35 +1245,33 @@ function cameraData() {
   };
 }
 function updateSceneHint() {
-  const oldCount = state.annotations.filter((annotation) =>
-    annotation.pane === 'scene' && annotation.scene_revision &&
-    annotation.scene_revision !== state.sceneRevision
-  ).length;
-  if (state.mode === 'select') {
-    ui.sceneHint.textContent = oldCount
-      ? oldCount + ' 条灰色虚线标记来自旧版本，位置可能已变化'
-      : '拖拽旋转 · 滚轮缩放 · 点击对象';
+  if (state.sceneView === 'live') {
+    ui.sceneHint.textContent = state.mode === 'select'
+      ? '拖拽旋转 · 滚轮缩放 · 点击对象 · 标注前先固定视角'
+      : '点击「标注当前视角」后，在固定截图上圈画';
+  } else if (state.mode === 'select') {
+    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「浏览新结果」可继续旋转';
   } else {
     ui.sceneHint.textContent = '在场景上' +
-      ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字'})[state.mode] +
-      ' · 按 1 返回旋转';
+      ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
+      ' · 标记绑定当前截图';
   }
 }
 function updateMode() {
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
   const drawing = state.mode !== 'select' && state.sessionStatus === 'open';
   ui.referenceCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
-  ui.sceneCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
+  ui.sceneCanvas.style.pointerEvents = drawing && state.sceneView === 'snapshot' ? 'auto' : 'none';
   ui.referenceCanvas.style.cursor = drawing ? 'crosshair' : 'default';
   ui.sceneCanvas.style.cursor = drawing ? 'crosshair' : 'default';
-  controls.enabled = state.mode === 'select';
+  controls.enabled = state.mode === 'select' && state.sceneView === 'live';
   ui.referenceHint.classList.toggle('hidden', !drawing || !activeReference());
   updateSceneHint();
   state.drag = null;
   drawOverlays();
 }
 function setMode(mode) {
-  if (!['select','point','rectangle','line','arrow','text'].includes(mode)) return;
+  if (!['select','point','rectangle','line','arrow','text','freehand'].includes(mode)) return;
   state.mode = mode;
   hideTextEditor();
   updateMode();
@@ -582,20 +1291,23 @@ function addAnnotation(annotation) {
   if (state.groupId) item.group_id = state.groupId;
   if (annotation.pane === 'reference') item.reference_image_id = state.activeReferenceId;
   else {
-    item.scene_revision = state.sceneRevision;
-    item.camera = cameraData();
-    if (state.selectedId) item.object_id = state.selectedId;
-    if (state.selectedSceneNode) item.scene_node = {...state.selectedSceneNode};
+    item.scene_revision = state.snapshot.scene_revision;
+    item.snapshot_id = state.snapshot.id;
+    item.camera = state.snapshot.camera;
+    if (state.snapshot.selected_object_ids[0]) item.object_id = state.snapshot.selected_object_ids[0];
+    if (state.snapshot.selected_scene_nodes[0]) item.scene_node = {...state.snapshot.selected_scene_nodes[0]};
   }
   if (annotation.text) item.text = annotation.text;
+  if (annotation.points) item.points = annotation.points;
   state.annotations.push(item);
   renderAnnotations();
   drawOverlays();
   saveDraft();
 }
 function annotationPointerDown(event, pane) {
-  if (!editable() || state.mode === 'select') return;
+  if (!editable() || state.mode === 'select' || state.spacePan) return;
   if (pane === 'reference' && !activeReference()) return;
+  if (pane === 'scene' && (state.sceneView !== 'snapshot' || !state.snapshot)) return;
   event.preventDefault();
   const canvas = event.currentTarget;
   const point = pointFromPointer(event, canvas);
@@ -604,12 +1316,17 @@ function annotationPointerDown(event, pane) {
     return;
   }
   canvas.setPointerCapture(event.pointerId);
-  state.drag = {pane, type:state.mode, start:point, end:point, pointerId:event.pointerId};
+  state.drag = {pane, type:state.mode, start:point, end:point, pointerId:event.pointerId,
+    points:state.mode === 'freehand' ? [point] : null};
   drawOverlays();
 }
 function annotationPointerMove(event) {
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   state.drag.end = pointFromPointer(event, event.currentTarget);
+  if (state.drag.type === 'freehand' && state.drag.points.length < 256) {
+    const last = state.drag.points.at(-1);
+    if (Math.hypot(last.x - state.drag.end.x, last.y - state.drag.end.y) > 0.003) state.drag.points.push(state.drag.end);
+  }
   drawOverlays();
 }
 function annotationPointerUp(event) {
@@ -620,6 +1337,8 @@ function annotationPointerUp(event) {
   const distance = Math.hypot(end.x - drag.start.x, end.y - drag.start.y);
   if (drag.type === 'point') {
     addAnnotation({pane:drag.pane, type:'point', coordinates:{x:drag.start.x, y:drag.start.y}});
+  } else if (drag.type === 'freehand' && drag.points.length > 1) {
+    addAnnotation({pane:drag.pane, type:'freehand', coordinates:{x:drag.start.x, y:drag.start.y}, points:drag.points});
   } else if (distance > 0.005) {
     addAnnotation({pane:drag.pane, type:drag.type, coordinates:{
       x:drag.start.x, y:drag.start.y, x2:end.x, y2:end.y
@@ -657,7 +1376,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   const y = clamp(Number(p.y) || 0, 0, 1) * height;
   const x2 = clamp(Number(p.x2) || 0, 0, 1) * width;
   const y2 = clamp(Number(p.y2) || 0, 0, 1) * height;
-  const stale = annotation.pane === 'scene' && annotation.scene_revision && annotation.scene_revision !== state.sceneRevision;
+  const stale = annotation.pane === 'scene' && state.snapshot && annotation.snapshot_id !== state.snapshot.id;
   const color = stale ? '#bdcad0' : '#ffbd78';
   const scale = Math.max(1, Math.min(width, height) / 550);
   ctx.save();
@@ -687,6 +1406,15 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
       ctx.lineTo(x2 - size * Math.cos(angle + Math.PI / 6), y2 - size * Math.sin(angle + Math.PI / 6));
       ctx.stroke();
     }
+  } else if (annotation.type === 'freehand' && Array.isArray(annotation.points) && annotation.points.length > 1) {
+    ctx.beginPath();
+    annotation.points.forEach((point, index) => {
+      const px = clamp(Number(point.x) || 0, 0, 1) * width;
+      const py = clamp(Number(point.y) || 0, 0, 1) * height;
+      if (index === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
   } else if (annotation.type === 'text' && annotation.text) {
     ctx.setLineDash([]);
     ctx.font = 'bold ' + Math.round(13 * scale) + 'px sans-serif';
@@ -708,19 +1436,22 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   ctx.restore();
 }
 function prepareCanvas(canvas) {
-  const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
+  // clientWidth is the bitmap's untransformed size. Using the transformed
+  // bounding box here would allocate enormous canvases when a photo is zoomed.
+  const logicalWidth = canvas.clientWidth;
+  const logicalHeight = canvas.clientHeight;
+  if (!logicalWidth || !logicalHeight) return null;
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
-  const width = Math.round(rect.width * ratio);
-  const height = Math.round(rect.height * ratio);
+  const width = Math.round(logicalWidth * ratio);
+  const height = Math.round(logicalHeight * ratio);
   if (canvas.width !== width || canvas.height !== height) {
     canvas.width = width;
     canvas.height = height;
   }
   const context = canvas.getContext('2d');
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
-  context.clearRect(0, 0, rect.width, rect.height);
-  return {context, width:rect.width, height:rect.height};
+  context.clearRect(0, 0, logicalWidth, logicalHeight);
+  return {context, width:logicalWidth, height:logicalHeight};
 }
 function drawOverlays() {
   for (const pane of ['reference','scene']) {
@@ -730,12 +1461,14 @@ function drawOverlays() {
     for (const annotation of state.annotations) {
       if (annotation.pane !== pane) continue;
       if (pane === 'reference' && annotation.reference_image_id !== state.activeReferenceId) continue;
+      if (pane === 'scene' && (!state.snapshot || annotation.snapshot_id !== state.snapshot.id)) continue;
       drawAnnotation(surface.context, annotation, surface.width, surface.height);
     }
     if (state.drag?.pane === pane) {
       drawAnnotation(surface.context, {
         pane, type:state.drag.type,
-        coordinates:{x:state.drag.start.x, y:state.drag.start.y, x2:state.drag.end.x, y2:state.drag.end.y}
+        coordinates:{x:state.drag.start.x, y:state.drag.start.y, x2:state.drag.end.x, y2:state.drag.end.y},
+        points:state.drag.points
       }, surface.width, surface.height, true);
     }
   }
@@ -766,8 +1499,8 @@ function renderAnnotations() {
       (annotation.pane === 'reference' ? '参考图 · ' + (ref?.name || '图片') : '当前场景') +
       ' · ' + (labels[annotation.type] || annotation.type);
     const subtitle = document.createElement('small');
-    const stale = annotation.pane === 'scene' && annotation.scene_revision && annotation.scene_revision !== state.sceneRevision;
-    subtitle.textContent = annotation.text || (stale ? '来自旧场景版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
+    const stale = annotation.pane === 'scene' && annotation.scene_revision !== state.sceneRevision;
+    subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
     if (stale) subtitle.classList.add('stale-label');
     copy.append(title, subtitle);
     const remove = document.createElement('button');
@@ -775,7 +1508,7 @@ function renderAnnotations() {
     remove.className = 'annotation-remove';
     remove.textContent = '×';
     remove.title = '删除这条标记';
-    remove.disabled = state.sessionStatus !== 'open';
+    remove.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     remove.addEventListener('click', () => {
       state.annotations = state.annotations.filter((item) => item.id !== annotation.id);
       renderAnnotations();
@@ -821,8 +1554,8 @@ async function captureReferenceAnnotations() {
       for (const annotation of marks) drawAnnotation(context, annotation, canvas.width, canvas.height);
       images.push({reference_id:ref.id, data_url:canvas.toDataURL('image/jpeg', 0.84)});
       if (marks.length) {
-        const xs = marks.flatMap((mark) => [mark.coordinates.x, mark.coordinates.x2 ?? mark.coordinates.x]);
-        const ys = marks.flatMap((mark) => [mark.coordinates.y, mark.coordinates.y2 ?? mark.coordinates.y]);
+        const xs = marks.flatMap((mark) => (mark.points?.length ? mark.points : [mark.coordinates,{x:mark.coordinates.x2 ?? mark.coordinates.x}]).map((point) => point.x));
+        const ys = marks.flatMap((mark) => (mark.points?.length ? mark.points : [mark.coordinates,{y:mark.coordinates.y2 ?? mark.coordinates.y}]).map((point) => point.y));
         const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
         const centerX = (minX + maxX) / 2, centerY = (minY + maxY) / 2;
         const halfWidth = Math.max(0.1, (maxX - minX) / 2 + 0.08);
@@ -845,49 +1578,56 @@ async function captureReferenceAnnotations() {
   }
   return {images, crops};
 }
-function captureScene() {
-  controls.update();
-  renderer.render(threeScene, camera);
-  const source = renderer.domElement;
-  const original = scaledCanvas(source.width, source.height);
-  const context = original.getContext('2d');
-  context.drawImage(source, 0, 0, original.width, original.height);
+function snapshotForFeedback() {
+  if (!state.snapshot) return null;
+  const sceneMarks = state.annotations.some((annotation) => annotation.pane === 'scene' && annotation.snapshot_id === state.snapshot.id);
+  return state.sceneView === 'snapshot' || sceneMarks ? state.snapshot : null;
+}
+async function captureScene(snapshot) {
+  const dataUrl = snapshot?.data_url || captureLiveScene();
+  const source = await loadImage(dataUrl);
+  const original = document.createElement('canvas');
+  original.width = source.naturalWidth;
+  original.height = source.naturalHeight;
+  original.getContext('2d').drawImage(source, 0, 0);
   const annotated = document.createElement('canvas');
   annotated.width = original.width;
   annotated.height = original.height;
   const annotatedContext = annotated.getContext('2d');
   annotatedContext.drawImage(original, 0, 0);
   for (const annotation of state.annotations) {
-    if (annotation.pane === 'scene') {
+    if (annotation.pane === 'scene' && snapshot && annotation.snapshot_id === snapshot.id) {
       drawAnnotation(annotatedContext, annotation, annotated.width, annotated.height);
     }
   }
   return {
-    scene_original_data_url:original.toDataURL('image/jpeg', 0.84),
+    scene_original_data_url:dataUrl,
     scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84)
   };
 }
 async function feedbackPayload() {
-  const imageBundle = captureScene();
+  const snapshot = snapshotForFeedback();
+  const imageBundle = await captureScene(snapshot);
   const annotatedReferences = await captureReferenceAnnotations();
   return {
-    scene_revision:state.sceneRevision,
-    note:ui.note.value.trim(),
+    scene_revision:snapshot?.scene_revision || state.sceneRevision,
+    latest_scene_revision:state.sceneRevision,
+    note:ui.note.value.trim() || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
     annotations:state.annotations.map((annotation) => {
       const item = {...annotation};
-      if (item.object_id && !sceneObject(item.object_id)) {
+      if (!snapshot && item.object_id && !sceneObject(item.object_id)) {
         item.previous_object_id = item.object_id;
         delete item.object_id;
       }
-      if (item.scene_node && sceneObject(item.scene_node.parent_object_id)?.type !== 'model') {
+      if (!snapshot && item.scene_node && sceneObject(item.scene_node.parent_object_id)?.type !== 'model') {
         item.previous_scene_node = item.scene_node;
         delete item.scene_node;
       }
       return item;
     }),
-    selected_object_ids:state.selectedId ? [state.selectedId] : [],
-    selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : [],
-    camera:cameraData(),
+    selected_object_ids:snapshot?.selected_object_ids || (state.selectedId ? [state.selectedId] : []),
+    selected_scene_nodes:snapshot?.selected_scene_nodes || (state.selectedSceneNode ? [{...state.selectedSceneNode}] : []),
+    camera:snapshot?.camera || cameraData(),
     reference_images:state.references.map((ref) => ({id:ref.id, url:ref.url, name:ref.name})),
     reference_annotated_data_urls:annotatedReferences.images,
     crops:annotatedReferences.crops,
@@ -895,34 +1635,56 @@ async function feedbackPayload() {
   };
 }
 async function submitFeedback() {
-  if (!editable() || !state.sessionId) return;
-  if (!state.annotations.length && !ui.note.value.trim()) {
-    announce('请在任一侧画标记，或写一句话后再发送。', true);
+  if (!state.workspaceReady || !state.sessionId || state.submitting || state.uploading) return;
+  if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length) {
+    announce('请添加参考图、画标记，或写一句话后再发送。', true);
     return;
   }
+  const chosenSnapshot = snapshotForFeedback();
+  const staleSnapshot = chosenSnapshot && chosenSnapshot.scene_revision !== state.sceneRevision;
+  if (!state.pendingSubmission && staleSnapshot &&
+      !window.confirm('这条反馈针对场景版本 ' + chosenSnapshot.scene_revision + ' 的固定截图，当前已是版本 ' + state.sceneRevision + '。仍按旧截图发送给 Codex？')) return;
   state.submitting = true;
   ui.submit.disabled = true;
   ui.submit.querySelector('span:first-child').textContent = '正在准备图片…';
   try {
-    const payload = await feedbackPayload();
+    if (!state.pendingSubmission) {
+      const payload = await feedbackPayload();
+      const key = crypto.randomUUID();
+      state.pendingSubmission = {key, payload:{...payload, idempotency_key:key,
+        confirm_stale:!!staleSnapshot}};
+      try { await writeOutbox(state.pendingSubmission); }
+      catch (error) { state.pendingSubmission = null; throw error; }
+    }
     ui.submit.querySelector('span:first-child').textContent = '正在发送…';
-    await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/feedback', {
-      method:'POST', body:payload
+    const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/feedback', {
+      method:'POST', body:state.pendingSubmission.payload
     });
+    await clearOutbox();
+    state.pendingSubmission = null;
     state.feedbackCount += 1;
     id('feedback-count-label').textContent = '已发 ' + state.feedbackCount + ' 轮';
-    ui.caption.textContent = '已发送 ' + state.feedbackCount + ' 轮。当前标记会在下次再次发送；可修改、删除或清空。';
+    const delivery = result.delivery?.status || 'queued';
+    ui.caption.textContent = '标记仍保留；再次发送前可删除或清空。';
     saveDraft();
-    announce('这一轮反馈已发给 Astra。你可以继续标记并再次发送。');
+    announce(delivery === 'running' ? '图文消息已送进当前 Codex 会话。'
+      : delivery === 'blocked_stale' ? '已保存消息；场景已更新，请在右侧确认旧截图后继续发送。'
+      : delivery === 'delivery_uncertain' ? '消息已保存，送达状态待核实。'
+      : '图文消息已加入 Codex 的下一轮。');
+    try { await refreshWorkspace(); } catch { /* The next poll will recover status. */ }
   } catch (error) {
-    if (/revision changed|scene revision/i.test(error.message)) {
-      try { await loadScene(); } catch { /* Keep the draft for the next poll. */ }
+    if (error.status === 409 && /scene revision changed/i.test(error.message)) {
+      await clearOutbox();
+      state.pendingSubmission = null;
+      try { await loadScene(); } catch { /* Poll will retry. */ }
+      announce('场景在发送时更新了，草稿已保留。请检查当前版本后再发送。', true);
+    } else {
+      announce('发送失败：' + error.message + '。可点击重试，系统会沿用同一消息编号。', true);
     }
-    announce('发送失败：' + error.message, true);
   } finally {
     state.submitting = false;
-    ui.submit.disabled = !editable();
-    ui.submit.querySelector('span:first-child').textContent = '发给 Astra';
+    updateSubmitLabel();
+    renderAnnotations();
   }
 }
 
@@ -954,6 +1716,7 @@ function resizeScene() {
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height, false);
+  updateSnapshotGeometry();
   drawOverlays();
 }
 function animate() {
@@ -972,7 +1735,11 @@ async function poll() {
     if (scene.revision !== state.sceneRevision) await loadScene(scene);
     if (session.reference_images) setReferences(session.reference_images);
     if (session.status !== state.sessionStatus || Number(session.feedback_count) !== state.feedbackCount) setSession(session);
-  } catch { /* A later poll can recover from a temporary network error. */ }
+    await refreshWorkspace();
+  } catch {
+    ui.agentStatus.textContent = '工作台连接中断，正在重试…';
+    ui.agentStatus.className = 'agent-status error';
+  }
   finally { poll.running = false; }
 }
 function bindEvents() {
@@ -984,8 +1751,44 @@ function bindEvents() {
   ui.referenceInput.addEventListener('change', () => uploadReferences(ui.referenceInput.files));
   ui.referenceImage.addEventListener('load', updateReferenceGeometry);
   ui.referenceImage.addEventListener('error', () => announce('这张参考图无法显示。', true));
+  ui.referenceZoomIn.addEventListener('click', () => setReferenceZoom(state.referenceZoom * 1.4));
+  ui.referenceZoomOut.addEventListener('click', () => setReferenceZoom(state.referenceZoom / 1.4));
+  ui.referenceZoomReset.addEventListener('click', () => {
+    state.referenceZoom = 1;
+    state.referencePan = {x:0,y:0};
+    updateReferenceTransform();
+    saveDraft();
+  });
+  ui.referenceStage.addEventListener('wheel', (event) => {
+    if (!activeReference()) return;
+    event.preventDefault();
+    setReferenceZoom(state.referenceZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), event);
+  }, {passive:false});
+  ui.referenceStage.addEventListener('pointerdown', (event) => {
+    if (!activeReference() || !(state.mode === 'select' || state.spacePan)) return;
+    event.preventDefault();
+    ui.referenceStage.setPointerCapture(event.pointerId);
+    state.referencePanning = {pointerId:event.pointerId, x:event.clientX, y:event.clientY,
+      panX:state.referencePan.x, panY:state.referencePan.y};
+  });
+  ui.referenceStage.addEventListener('pointermove', (event) => {
+    const pan = state.referencePanning;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    state.referencePan = {x:pan.panX + event.clientX - pan.x, y:pan.panY + event.clientY - pan.y};
+    updateReferenceTransform();
+  });
+  ui.referenceStage.addEventListener('pointerup', (event) => {
+    if (state.referencePanning?.pointerId !== event.pointerId) return;
+    state.referencePanning = null;
+    saveDraft();
+  });
+  ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
+  ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
+  ui.freeze.addEventListener('click', freezeScene);
+  ui.browse.addEventListener('click', () => { state.sceneView = 'live'; setMode('select'); renderSceneView(); });
+  ui.snapshotButton.addEventListener('click', () => { state.sceneView = 'snapshot'; renderSceneView(); });
   ui.compareEnabled.addEventListener('change', () => {
-    ui.compareImage.classList.toggle('hidden', !ui.compareEnabled.checked || !activeReference());
+    ui.compareImage.classList.toggle('hidden', !ui.compareEnabled.checked || !activeReference() || state.sceneView === 'snapshot');
     ui.compareOpacity.disabled = !ui.compareEnabled.checked || !activeReference();
   });
   ui.compareOpacity.addEventListener('input', () => {
@@ -1003,14 +1806,24 @@ function bindEvents() {
   }
   ui.note.addEventListener('input', saveDraft);
   ui.submit.addEventListener('click', submitFeedback);
+  ui.stop.addEventListener('click', async () => {
+    ui.stop.disabled = true;
+    try {
+      await api('/api/workspace/interrupt', {method:'POST', body:{}});
+      announce('已请求停止当前 Codex 执行。');
+      await refreshWorkspace();
+    } catch (error) { announce('停止失败：' + error.message, true); }
+    finally { ui.stop.disabled = false; }
+  });
   id('clear-annotations').addEventListener('click', () => {
-    if (state.sessionStatus !== 'open') return;
+    if (!editable()) return;
     state.annotations = [];
     renderAnnotations();
     drawOverlays();
     saveDraft();
   });
   ui.clearSelection.addEventListener('click', () => {
+    if (!editable()) return;
     state.selectedId = null;
     state.selectedSceneNode = null;
     renderSelection();
@@ -1038,15 +1851,16 @@ function bindEvents() {
   controls.addEventListener('end', saveDraft);
   document.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
-    if (event.key >= '1' && event.key <= '6') {
-      setMode(['select','point','rectangle','line','arrow','text'][Number(event.key) - 1]);
+    if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; }
+    if (event.key >= '1' && event.key <= '7') {
+      setMode(['select','point','rectangle','line','arrow','text','freehand'][Number(event.key) - 1]);
     }
     if (event.key === 'Escape') {
       state.drag = null;
       hideTextEditor();
       drawOverlays();
     }
-    if (event.key === 'Backspace' && state.annotations.length && state.sessionStatus === 'open') {
+    if (event.key === 'Backspace' && state.annotations.length && editable()) {
       event.preventDefault();
       state.annotations.pop();
       renderAnnotations();
@@ -1054,6 +1868,9 @@ function bindEvents() {
       saveDraft();
     }
   });
+  document.addEventListener('keyup', (event) => { if (event.code === 'Space') state.spacePan = false; });
+  window.addEventListener('blur', () => { state.spacePan = false; state.referencePanning = null; });
+  window.addEventListener('beforeunload', saveDraft);
   new ResizeObserver(updateReferenceGeometry).observe(ui.referenceStage);
   new ResizeObserver(resizeScene).observe(ui.sceneStage);
 }
@@ -1074,4 +1891,4 @@ try {
   ui.submit.disabled = true;
   announce('工作台启动失败：' + error.message, true);
 }
-setInterval(poll, 4000);
+setInterval(poll, 1500);

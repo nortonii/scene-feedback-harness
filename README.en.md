@@ -1,110 +1,90 @@
 **语言 / Languages:** [简体中文](README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-# Astra Visual Feedback Workbench
+# Codex Visual Reconstruction Workbench
 
-Give people and Astra a shared view of the same reference photo and current scene. Mark, draw, or point on the image or 3D view, then add a short note. The MCP tool returns the original image, annotated image, scene screenshots, and relevant context to the model. **Astra decides whether to change an object, camera, material, or reconstruction approach.** People do not need to enter coordinates or geometric constraints.
+Mark the reference image and the current 3D scene, write a sentence, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read.
 
-![Side-by-side annotations on the reference image and scene](preview.png)
+![Side-by-side annotations on a reference image and scene](preview.png)
 
-## What it does
+## How it works
 
-- View a reference image on the left and rotate, zoom, or select objects in the current 3D scene on the right. Switch between multiple reference images.
-- Add points, rectangles, lines, arrows, and text on either side. Give related marks the same number when useful. If something is missing from the scene, you can mark only the reference image.
-- Overlay the current reference image transparently on the 3D view for a visual comparison. The overlay **does not automatically align the cameras**.
-- Click “Send to Astra” and keep using the same session. When Astra updates the scene, the page refreshes automatically. Annotation drafts and the viewing angle stay in the browser for the next round.
+```text
+Browser: reference image + 3D scene + annotations + text
+                      │ User clicks “Send”
+                      ▼
+              Local Workspace Gateway
+                      │ Real image inputs and execution events
+                      ▼
+        Codex App Server: same project, same thread
+                      │ Edit source files, export GLB, call MCP tools
+                      ▼
+              Workbench refreshes the scene
+```
 
-Submitted visual feedback includes the original reference image, annotated reference image, original and annotated screenshots of the current scene, relevant crops, a note, selected object IDs, the scene revision, and the viewing camera. Clicking a part inside a GLB also includes that node's name and path. Images are returned as MCP image content; metadata is provided in both structured content and text. Absolute local paths are also included so a host can read the images if it does not forward MCP image blocks.
+The Gateway keeps one persistent Codex thread for this project. It starts `codex app-server` over stdio and sends images as `localImage` input items. The workbench does not inject messages into other Codex desktop or terminal sessions you may have open. MCP is used to read context, request a user review, and publish the scene; **the web page's Send button starts a user turn directly**.
 
-## Try it locally
+This interface helps people point out problems. It does not define a reconstruction algorithm or ask people to enter coordinates or geometric constraints. Codex can use the modeling, reconstruction, and editing tools already available in the project.
 
-You need Python 3.11+ and a browser with WebGL support. Run these commands from the root of the cloned repository:
+## What you can do on the page
+
+- Switch between reference images and pan or zoom them on the left; rotate, zoom, and select nodes in a GLB scene on the right.
+- Draw points, rectangles, lines, arrows, freehand strokes, and text on either side. Related marks can share a number; a missing object can be marked only on the reference image.
+- Click “Annotate current view” to bind scene marks to **the screenshot, camera, selected object, and scene revision at that moment**. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
+- Sending saves an immutable feedback packet: your exact words, original and annotated reference images, clean and annotated scene screenshots, selected nodes, camera, and scene revision. Marks are your hints; the original image is kept separately.
+- New feedback submitted while Codex is running joins a queue for the next turn. If the scene changes while feedback is queued, the page first asks you to confirm feedback made against the old revision. Approval requests and stop actions are also handled on the page. Your project, thread, and drafts remain available after refreshing the page.
+
+Scene input currently uses a self-contained `.glb` file. Publishing requires geometry and texture resources to be embedded in the GLB's BIN chunk. Both external URIs and data URIs are rejected: even though a data URI can be self-contained, this version accepts only BIN-embedded resources. You can submit a reference image without an initial scene. Overlaying a reference image is for visual comparison only; it does not automatically align cameras.
+
+## Quick start: room and cabinet
+
+The browser UI currently uses Chinese labels: `标注当前视角` means “Annotate current view,” and `发送到 Codex` means “Send to Codex.”
+
+You need Python 3.11+, a WebGL-capable browser, and a signed-in **`codex-cli 0.156.1`**. The App Server request and response formats were checked against JSON Schema generated by this version. Other versions produce an explicit error instead of silently using incompatible fields.
+
+Run these commands from the root of the cloned repository:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
-.venv/bin/python backend/server.py
+codex --version
+.venv/bin/python examples/room_demo/seed_demo.py
+.venv/bin/python backend/server.py --project-dir "$PWD" --data-dir "$PWD/examples/room_demo/output/data"
 ```
 
-Open <http://127.0.0.1:18765/> and upload a reference image. The right side initially shows a sample chair; it will show your own scene after you connect one. This is a standalone browser workbench and does not require a client that embeds MCP Apps. The service listens only on `127.0.0.1`. Imported images, scenes, and feedback are stored in `backend/data/`, which is ignored by Git.
+The Gateway automatically configures these five `scene_feedback` MCP tools in the project's Codex thread; you do not need to run `codex mcp add` manually. The Gateway passes its port, data directory, and project directory to that thread, preventing another project or global MCP setting from pointing it at the wrong workbench.
 
-## Connect Codex / Astra
+Open <http://127.0.0.1:18765/>. The target illustration is on the left, and the initial room GLB is on the right. Select the cabinet, point out its target position in the image, enter “The cabinet should be closer to the left wall; please adjust it according to the image on the left,” and click “Send.” The demo source parameters are in [`examples/room_demo/scene.json`](examples/room_demo/scene.json). [`build_scene.py`](examples/room_demo/build_scene.py) generates a GLB from those parameters; the result appears on the page after Codex calls `workspace_publish_scene`. `seed_demo.py` uses the separate `examples/room_demo/output/data` directory, so it does not overwrite regular workspace data.
 
-Register the MCP server from the repository root. `$PWD` expands to the absolute path of the repository:
+For your own project, run:
 
 ```bash
-codex mcp add scene_feedback -- "$PWD/.venv/bin/python" "$PWD/backend/mcp_server.py"
+.venv/bin/python backend/server.py --project-dir "/absolute/path/to/your/project" --data-dir "/absolute/path/to/private/workspace-data"
 ```
 
-Set a longer interaction timeout for `[mcp_servers.scene_feedback]` in `~/.codex/config.toml`. Edit the table created by `codex mcp add` rather than adding a second table with the same name. If you use a Codex mode that does not show approvals, you can allow automatic approval for just the tool that creates the workbench; the feedback-reading tool is declared read-only. Then reload the MCP configuration: [Codex MCP setup guide](https://learn.chatgpt.com/docs/extend/mcp).
+Add reference images in the browser. Have Codex build or export a self-contained GLB from your project's source files and publish it through MCP. The project directory and thread ID are stored in the data directory, allowing the same thread to be restored after a restart. A data directory is bound to one project and will not silently switch to another.
 
-```toml
-[mcp_servers.scene_feedback]
-tool_timeout_sec = 900
+## MCP tools
 
-[mcp_servers.scene_feedback.tools.request_visual_feedback]
-approval_mode = "approve"
-```
+| Tool | Purpose |
+| --- | --- |
+| `workspace_open` | Return or open this project's workbench URL |
+| `workspace_get_context` | Read current reference images, scene revision, and project context |
+| `workspace_get_feedback` | Read submitted feedback and its actual images |
+| `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
+| `workspace_request_feedback` | Ask the user to inspect something on the page and return immediately; their reply becomes the next user message |
 
-The recommended two-step call is:
+The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) reminds Codex to distinguish original images from annotations, edit project source files, and publish a GLB when the result is ready. The next submission does not require an MCP call to remain waiting.
 
-```text
-request_visual_feedback(
-  reference_images=["/absolute/path/reference.jpg"],
-  scene_glb_path="/absolute/path/current.glb",
-  wait_for_submit=false
-)
-→ session_id, url, next_cursor
-
-The user marks the scene at the URL and clicks “Send to Astra”
-
-wait_visual_feedback(session_id, cursor=next_cursor)
-→ image blocks + annotations/note/objects/camera/revision + a new next_cursor
-```
-
-You can also pass an existing list of scene objects with `current_scene={"objects": [...]}`, or omit the scene to keep using the workbench's current scene. `scene_glb_path` imports a GLB for preview; it does not prescribe how Astra models the scene. GLB and reference-image paths must be local to the machine running the MCP server. You can also add reference images directly in the browser.
-
-After receiving feedback, Astra uses its own modeling tools to update the scene. For the next round, call `request_visual_feedback(session_id=..., scene_glb_path="/absolute/path/updated.glb", wait_for_submit=false)`, then call `wait_visual_feedback` with the returned `next_cursor`. Reusing `session_id` keeps the page and reference images open. A browser submission cannot independently resume a Codex turn that has already ended; Astra needs an MCP call waiting for the feedback, or a custom host must start the next turn.
-
-If the host can open a local browser, `request_visual_feedback()` tries to open the page and wait for submission by default. If it cannot open the browser, the tool returns the URL immediately; you can then wait with `wait_visual_feedback`. The session stays open after a wait times out. Use `get_visual_feedback(session_id, cursor)` to check it, or wait again.
-
-## Feedback format
-
-Annotation coordinates are normalized screen coordinates (`0–1`) within the relevant image or view. They identify where the user pointed on the screen; they are neither world coordinates nor modeling commands. For example:
-
-```json
-{
-  "scene_revision": 12,
-  "note": "The top of the cabinet should be close to line ① in the left image; a lamp is also missing on the right.",
-  "selected_object_ids": ["cabinet"],
-  "annotations": [
-    {
-      "pane": "reference",
-      "reference_image_id": "<reference-id>",
-      "type": "line",
-      "group_id": "1",
-      "coordinates": {"x": 0.23, "y": 0.32, "x2": 0.68, "y2": 0.32}
-    },
-    {
-      "pane": "scene",
-      "type": "point",
-      "group_id": "1",
-      "object_id": "cabinet",
-      "coordinates": {"x": 0.54, "y": 0.46}
-    }
-  ]
-}
-```
-
-Both `group_id` and `object_id` are optional. When a node inside a GLB is selected, the feedback also includes `selected_scene_nodes`. Each node has its parent model object ID, its index path within the GLB, and its name when available. These are additional references to the image location, not instructions for the model to execute. The original and annotated images are kept separately so Astra can distinguish the photo's original content from the person's marks. If the scene revision changes, old scene marks show their source revision in the interface. Submission checks the current revision to avoid treating an old view as a new one. Retained marks are sent again in the next round; you can delete them individually or clear them all.
-
-The existing `get_scene`, `update_scene`, `replace_scene`, and `import_scene_model` tools remain available for displaying the scene or compatibility with existing callers. The workbench itself does not modify GLB meshes.
-
-## Verification and scope
+## Verification and limits
 
 ```bash
 .venv/bin/python -m unittest discover -s backend/tests -v
 ```
 
-This is a prototype for a trusted local environment. Other processes on the same machine can access the page and session API, so do not expose the local port to untrusted clients. Apply automatic approval only to a local server you trust. Codex CLI has been tested reading reference-image content from this tool's MCP image blocks. Other hosts may or may not forward the images, depending on their implementation. If a host displays only text, Astra can read the local image paths in the feedback.
+The real App Server integration was tested with two different local images: Codex recognized a red image in the first turn, then recognized a blue image in the **same thread** after stdio was closed and restarted. The `thread/read` history contains `localImage` items for both turns. This verifies that the images reached the model, rather than merely sending their file paths.
 
-Original project code is licensed under the [MIT License](LICENSE). The bundled Three.js files retain their [original MIT license](web/vendor/three/LICENSE).
+An end-to-end Selenium run also exercised two browser → Codex turns in the same thread. In the first turn, numbered rectangles were drawn on the reference image and scene and submitted from the browser. Codex received five actual image inputs, edited the demo's `scene.json`, generated a GLB, and successfully published through the project-scoped `workspace_publish_scene` MCP tool twice. Approval was handled on the page; the workbench refreshed as the scene advanced from revision 2 to 3 and then 4. The cabinet's final center was `x=-0.8`. In the second turn, another line was drawn on the reference image and submitted from the page. Codex received five more `input_image` items in the same thread and replied with a confirmation. It did not edit files or publish another scene, so the final revision remained 4.
+
+The service listens only on `127.0.0.1` and is intended for trusted local use. Codex turns in the `workspace-write` sandbox enable `networkAccess: true` to reach the local MCP Gateway. The page's control API uses a random local capability; do not proxy the port to untrusted clients. Users decide approval requests on the page; the workbench does not approve them automatically. Runtime data and demo output are excluded from Git.
+
+Project code is licensed under the [MIT License](LICENSE). The bundled Three.js files retain their [original MIT license](web/vendor/three/LICENSE).

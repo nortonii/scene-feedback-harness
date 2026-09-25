@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import mimetypes
+import os
 import re
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from core import APIError, SceneStore
+from gateway import WorkspaceGateway
 
 
 HERE = Path(__file__).resolve().parent
@@ -22,11 +24,29 @@ DEFAULT_WEB_DIR = HERE.parent / "web"
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel|references))?$")
 MEDIA_ROUTE = re.compile(r"^/(assets|screenshots|media)/([0-9a-f]{32}\.(?:glb|png|jpg))$")
+WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confirm$")
+WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
+WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 
 
-def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, web_dir: str | Path = DEFAULT_WEB_DIR) -> ThreadingHTTPServer:
+def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, web_dir: str | Path = DEFAULT_WEB_DIR, project_dir: str | Path | None = None, model: str | None = None, enable_codex: bool = False, adapter: object | None = None) -> ThreadingHTTPServer:
     store = SceneStore(data_dir)
     web_root = Path(web_dir).expanduser().resolve()
+    project_root = Path(project_dir or os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)).expanduser().resolve()
+    gateway = WorkspaceGateway(store, project_root, adapter=adapter)
+    if enable_codex and adapter is None:
+        from appserver_adapter import CodexAppServerAdapter
+        gateway.adapter = CodexAppServerAdapter(
+            project_root,
+            state_path=store.data_dir / "codex_app_server_thread.json",
+            on_event=gateway.on_adapter_event,
+            model=model or os.environ.get("SCENE_FEEDBACK_MODEL"),
+            env_overrides={
+                "SCENE_FEEDBACK_PORT": str(port),
+                "SCENE_FEEDBACK_DATA_DIR": str(store.data_dir),
+                "SCENE_FEEDBACK_PROJECT_DIR": str(project_root),
+            },
+        )
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "SceneFeedbackHarness/0.1"
@@ -44,6 +64,11 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             key = self.headers.get("X-Scene-Harness-Key", "")
             if not hmac.compare_digest(key, store.control_token):
                 raise APIError(403, "this operation requires the local MCP control key")
+
+        def _require_browser_capability(self) -> None:
+            key = self.headers.get("X-Workspace-Capability", "")
+            if not hmac.compare_digest(key, store.browser_token):
+                raise APIError(403, "this operation requires the workspace browser capability")
 
         def _read_json(self) -> dict:
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
@@ -94,7 +119,43 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             query = parse_qs(parsed.query)
 
             if self.command == "GET" and path == "/api/health":
-                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"]})
+                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True})
+            if self.command == "GET" and path == "/api/workspace/state":
+                return self._send_json(200, gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0]))
+            if self.command == "GET" and path == "/api/workspace/events":
+                gateway.ensure()
+                return self._send_json(200, store.workspace_events(self._event_cursor(query)))
+            if self.command == "GET" and path == "/api/workspace/context":
+                workspace = gateway.state()
+                return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "request_feedback": workspace["request_feedback"]})
+            feedback_match = WORKSPACE_FEEDBACK_ROUTE.fullmatch(path)
+            if self.command == "GET" and feedback_match:
+                return self._send_json(200, store.feedback_by_id(feedback_match.group(1)))
+            queue_match = WORKSPACE_QUEUE_ROUTE.fullmatch(path)
+            if self.command == "POST" and queue_match:
+                self._require_browser_capability()
+                return self._send_json(200, gateway.confirm_queue(queue_match.group(1), self._read_json()))
+            approval_match = WORKSPACE_APPROVAL_ROUTE.fullmatch(path)
+            if self.command == "POST" and approval_match:
+                self._require_browser_capability()
+                return self._send_json(200, gateway.respond_to_approval(approval_match.group(1), self._read_json()))
+            if self.command == "POST" and path == "/api/workspace/interrupt":
+                self._require_browser_capability()
+                self._read_json()
+                return self._send_json(200, gateway.interrupt())
+            if self.command == "POST" and path == "/api/workspace/request-feedback":
+                self._require_control_key()
+                payload = self._read_json()
+                gateway.ensure()
+                return self._send_json(200, store.workspace_request_feedback(payload.get("message"), object_ids=payload.get("object_ids")))
+            if self.command == "POST" and path == "/api/workspace/publish":
+                self._require_control_key()
+                payload = self._read_json()
+                gateway.ensure()
+                if "expected_revision" not in payload:
+                    raise APIError(400, "expected_revision is required")
+                scene = store.set_scene_preview(payload.get("local_path"), expected_revision=payload["expected_revision"])
+                return self._send_json(200, scene)
             if self.command == "GET" and path == "/api/scene":
                 return self._send_json(200, store.scene())
             if self.command == "PUT" and path == "/api/scene":
@@ -137,11 +198,14 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                 if self.command == "GET" and suffix == "feedback":
                     return self._send_json(200, store.feedback(session_id, self._cursor(query)))
                 if self.command == "POST" and suffix == "feedback":
-                    return self._send_json(201, store.submit_feedback(session_id, self._read_json()))
+                    self._require_browser_capability()
+                    return self._send_json(201, gateway.submit(session_id, self._read_json()))
                 if self.command == "POST" and suffix == "references":
+                    self._require_browser_capability()
                     payload = self._read_json()
                     return self._send_json(201, store.add_reference(session_id, payload.get("name"), payload.get("data_url")))
                 if self.command == "POST" and suffix == "cancel":
+                    self._require_browser_capability()
                     self._read_json()
                     return self._send_json(200, store.cancel_session(session_id))
             if self.command == "GET":
@@ -171,6 +235,13 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             except ValueError as exc:
                 raise APIError(400, "cursor must be a nonnegative integer") from exc
 
+        @staticmethod
+        def _event_cursor(query: dict) -> int:
+            try:
+                return int(query.get("after", ["0"])[0])
+            except ValueError as exc:
+                raise APIError(400, "after must be a nonnegative integer") from exc
+
         def _handle(self) -> None:
             try:
                 self._dispatch()
@@ -196,6 +267,10 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
+    server.workspace_gateway = gateway
+    server.scene_store = store
+    if enable_codex:
+        gateway.start()
     return server
 
 
@@ -204,15 +279,19 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=18765)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--web-dir", type=Path, default=DEFAULT_WEB_DIR)
+    parser.add_argument("--project-dir", type=Path, default=Path(os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)))
+    parser.add_argument("--model", default=os.environ.get("SCENE_FEEDBACK_MODEL"), help="Codex model ID for this project thread")
+    parser.add_argument("--no-codex", action="store_true", help="serve the workbench without starting Codex App Server")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    server = make_server(port=args.port, data_dir=args.data_dir, web_dir=args.web_dir)
+    server = make_server(port=args.port, data_dir=args.data_dir, web_dir=args.web_dir, project_dir=args.project_dir, model=args.model, enable_codex=not args.no_codex)
     print(f"Scene feedback UI: http://127.0.0.1:{server.server_port}/", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        server.workspace_gateway.close()
         server.server_close()
 
 

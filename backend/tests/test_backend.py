@@ -11,6 +11,7 @@ import struct
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -23,6 +24,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import APIError, SceneStore  # noqa: E402
+from gateway import WorkspaceGateway  # noqa: E402
 from server import make_server  # noqa: E402
 import mcp_server  # noqa: E402
 
@@ -46,10 +48,40 @@ def image_data_url(*, large: bool = False) -> tuple[str, bytes]:
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}", data
 
 
+def seed_chair(store: SceneStore) -> None:
+    store.replace_scene(store.scene()["revision"], [{"id": "chair_back", "type": "box", "position": [0, 0, 1], "size": [1, 1, 1]}])
+
+
 class SceneStoreTests(unittest.TestCase):
+    def test_empty_codex_thread_can_be_recreated_before_first_feedback_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SceneStore(root / "data")
+            workspace = store.ensure_workspace(root)
+            store.workspace_thread("unpersisted-thread")
+            store.workspace_thread("persisted-thread")
+            self.assertEqual(store.workspace()["thread_id"], "persisted-thread")
+            self.assertEqual(store.workspace_events()["items"][-1]["type"], "empty_thread_recreated")
+            store.submit_feedback(workspace["session_id"], {"scene_revision": 1, "note": "Start reconstruction."})
+            with self.assertRaisesRegex(APIError, "already bound"):
+                store.workspace_thread("another-thread")
+
+    def test_new_project_starts_without_invented_geometry_and_accepts_freehand(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SceneStore(temporary)
+            self.assertEqual(store.scene()["objects"], [])
+            session = store.create_session()
+            image_url, _ = image_data_url()
+            reference = store.add_reference(session["session_id"], "room.png", image_url)
+            packet = store.submit_feedback(session["session_id"], {"scene_revision": 1, "note": "Build this room.", "annotations": [{"type": "freehand", "pane": "reference", "reference_image_id": reference["id"], "coordinates": {"x": 0.1, "y": 0.2}, "points": [{"x": 0.1, "y": 0.2}, {"x": 0.3, "y": 0.4}]}]})
+            self.assertEqual(packet["annotations"][0]["type"], "freehand")
+            photo_only = store.submit_feedback(session["session_id"], {"scene_revision": 1})
+            self.assertEqual(photo_only["reference_images"][0]["id"], reference["id"])
+
     def test_feedback_persists_and_stale_revision_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = SceneStore(temporary)
+            seed_chair(store)
             session = store.create_session()
             revision = store.scene()["revision"]
             feedback = store.submit_feedback(session["session_id"], {
@@ -77,6 +109,7 @@ class SceneStoreTests(unittest.TestCase):
             source = root / "room.png"
             source.write_bytes(original)
             store = SceneStore(root / "data")
+            seed_chair(store)
             session = store.create_session([str(source)])
             reference = session["reference_images"][0]
             source.unlink()
@@ -174,6 +207,281 @@ class SceneStoreTests(unittest.TestCase):
                 })
 
 
+class FakeAdapter:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.responses: list[tuple] = []
+        self.callback = None
+        self.connected = True
+        self.starts = 0
+
+    def start(self) -> str:
+        self.starts += 1
+        self.connected = True
+        return "thread-test-persistent"
+
+    def status(self) -> dict:
+        return {"connected": self.connected, "turn_state": "idle"}
+
+    def refresh(self) -> dict:
+        self.connected = True
+        return self.status()
+
+    def start_turn(self, text: str, image_paths: list[str], message_id: str) -> dict:
+        call = {"text": text, "image_paths": image_paths, "message_id": message_id, "turn_id": f"turn-{len(self.calls) + 1}"}
+        self.calls.append(call)
+        return {"thread_id": "thread-test-persistent", "turn_id": call["turn_id"], "status": "running"}
+
+    def respond_to_request(self, request_id: str, result: dict) -> None:
+        self.responses.append((request_id, result))
+
+    def interrupt(self, turn_id: str | None = None) -> dict:
+        return {"turn_id": turn_id, "status": "interruption_requested"}
+
+    def close(self) -> None:
+        pass
+
+
+class GatewayTests(unittest.TestCase):
+    def test_mcp_registers_only_workspace_tools(self) -> None:
+        names = [tool.name for tool in asyncio.run(mcp_server.mcp.list_tools())]
+        self.assertEqual(names, ["workspace_open", "workspace_get_context", "workspace_get_feedback", "workspace_publish_scene", "workspace_request_feedback"])
+
+    @staticmethod
+    def wait_for(predicate, timeout: float = 3) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.02)
+        raise AssertionError("timed out waiting for gateway state")
+
+    @staticmethod
+    def gateway_with_adapter(root: Path) -> tuple[WorkspaceGateway, FakeAdapter]:
+        project = root / "project"
+        project.mkdir()
+        adapter = FakeAdapter()
+        gateway = WorkspaceGateway(SceneStore(root / "data"), project, adapter=adapter)
+        gateway.start()
+        return gateway, adapter
+
+    @staticmethod
+    def pending(gateway: WorkspaceGateway, request_id: str, kind: str, details: dict) -> str:
+        gateway.on_adapter_event({"method": "adapter/request_pending", "params": {"request_id": request_id, "method": kind, "params": details}})
+        return gateway.state()["approvals"][-1]["approval_id"]
+
+    def test_elicitation_nonempty_form_url_and_empty_form_responses(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gateway, adapter = self.gateway_with_adapter(Path(temporary))
+            form = {"mode": "form", "message": "Choose one", "requestedSchema": {"type": "object", "properties": {"choice": {"type": "string", "enum": ["left", "right"], "description": "x" * 4500}}, "required": ["choice"]}}
+            approval_id = self.pending(gateway, "rpc-form", "mcpServer/elicitation/request", form)
+            shown = gateway.state()["approvals"][0]
+            self.assertGreater(len(json.dumps(shown["details"])), 4000)
+            self.assertLessEqual(len(shown["prompt"]), 4000)
+            self.assertNotIn("request_id", shown)
+            self.assertEqual(SceneStore(gateway.store.data_dir).workspace()["approvals"][0]["details"], form)
+            with self.assertRaisesRegex(APIError, "required field"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {}})
+            with self.assertRaisesRegex(APIError, "offered option"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {"choice": "middle"}})
+            self.assertEqual(adapter.responses, [])
+            gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {"choice": "left"}})
+            self.assertEqual(adapter.responses[-1], ("rpc-form", {"action": "accept", "content": {"choice": "left"}}))
+
+            empty_id = self.pending(gateway, "rpc-empty", "mcpServer/elicitation/request", {"mode": "form", "message": "Okay?", "requestedSchema": {"type": "object", "properties": {}}})
+            gateway.respond_to_approval(empty_id, {"decision": "accept"})
+            self.assertEqual(adapter.responses[-1], ("rpc-empty", {"action": "accept", "content": {}}))
+
+            url_id = self.pending(gateway, "rpc-url", "mcpServer/elicitation/request", {"mode": "url", "url": "https://example.test/verify", "message": "Open verification"})
+            gateway.respond_to_approval(url_id, {"decision": "accept"})
+            self.assertEqual(adapter.responses[-1], ("rpc-url", {"action": "accept"}))
+            verify_id = self.pending(gateway, "rpc-verify", "mcpServer/elicitation/request", {"mode": "openai/userVerification", "message": "Verify"})
+            gateway.respond_to_approval(verify_id, {"decision": "decline"})
+            self.assertEqual(adapter.responses[-1], ("rpc-verify", {"action": "decline"}))
+            openai_id = self.pending(gateway, "rpc-openai", "mcpServer/elicitation/request", {"mode": "openai/form", "message": "Describe", "requestedSchema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"]}})
+            gateway.respond_to_approval(openai_id, {"decision": "accept", "content": {"note": "move the shelf"}})
+            self.assertEqual(adapter.responses[-1], ("rpc-openai", {"action": "accept", "content": {"note": "move the shelf"}}))
+            legacy_id = self.pending(gateway, "rpc-legacy", "mcpServer/elicitation/request", {"mode": "openaiForm", "message": "Confirm", "requestedSchema": {"type": "object", "properties": {}}})
+            gateway.respond_to_approval(legacy_id, {"decision": "accept"})
+            self.assertEqual(adapter.responses[-1], ("rpc-legacy", {"action": "accept", "content": {}}))
+
+    def test_form_nullable_bounds_and_offered_choices(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gateway, adapter = self.gateway_with_adapter(Path(temporary))
+            schema = {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "minimum": None, "maximum": 2.0},
+                    "color": {"type": "string", "oneOf": [{"const": "red", "title": "Red"}, {"const": "blue", "title": "Blue"}]},
+                    "tags": {"type": "array", "items": {"type": "string", "enum": ["near", "far"]}, "minItems": 1},
+                },
+                "required": ["amount", "color", "tags"],
+            }
+            approval_id = self.pending(gateway, "rpc-choices", "mcpServer/elicitation/request", {"mode": "form", "message": "Choose", "requestedSchema": schema})
+            with self.assertRaisesRegex(APIError, "maximum"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {"amount": 3, "color": "red", "tags": ["near"]}})
+            with self.assertRaisesRegex(APIError, "offered option"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {"amount": 1, "color": "green", "tags": ["near"]}})
+            with self.assertRaisesRegex(APIError, "unoffered choice"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {"amount": 1, "color": "red", "tags": ["elsewhere"]}})
+            self.assertEqual(adapter.responses, [])
+            gateway.respond_to_approval(approval_id, {"decision": "accept", "content": {"amount": 1, "color": "red", "tags": ["near"]}})
+            self.assertEqual(adapter.responses[-1], ("rpc-choices", {"action": "accept", "content": {"amount": 1, "color": "red", "tags": ["near"]}}))
+
+    def test_permission_response_never_grants_beyond_requested_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gateway, adapter = self.gateway_with_adapter(Path(temporary))
+            requested = {"network": {"enabled": True}, "fileSystem": {"read": ["/tmp/reference"]}}
+            details = {"permissions": requested, "reason": "read reference image"}
+            approval_id = self.pending(gateway, "rpc-permit", "item/permissions/requestApproval", details)
+            with self.assertRaisesRegex(APIError, "exactly match"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "permissions": {"network": {"enabled": True}, "fileSystem": {"read": ["/"]}}})
+            self.assertEqual(adapter.responses, [])
+            gateway.respond_to_approval(approval_id, {"decision": "accept", "permissions": requested, "scope": "turn"})
+            self.assertEqual(adapter.responses[-1], ("rpc-permit", {"permissions": requested, "scope": "turn"}))
+            decline_id = self.pending(gateway, "rpc-deny", "item/permissions/requestApproval", details)
+            gateway.respond_to_approval(decline_id, {"decision": "decline"})
+            self.assertEqual(adapter.responses[-1], ("rpc-deny", {"permissions": {}, "scope": "turn"}))
+
+    def test_user_input_answers_and_decline_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gateway, adapter = self.gateway_with_adapter(Path(temporary))
+            details = {"questions": [{"id": "layout", "header": "Layout", "question": "Which?", "options": [{"label": "Left", "description": "Use left"}]}, {"id": "material", "header": "Material", "question": "Which?", "options": None}]}
+            approval_id = self.pending(gateway, "rpc-questions", "item/tool/requestUserInput", details)
+            with self.assertRaisesRegex(APIError, "every requested question"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "answers": {"layout": {"answers": ["Left"]}}})
+            answers = {"layout": {"answers": ["Left"]}, "material": {"answers": ["wood"]}}
+            gateway.respond_to_approval(approval_id, {"decision": "accept", "answers": answers})
+            self.assertEqual(adapter.responses[-1], ("rpc-questions", {"answers": answers}))
+            decline_id = self.pending(gateway, "rpc-skip", "item/tool/requestUserInput", details)
+            gateway.respond_to_approval(decline_id, {"decision": "decline"})
+            self.assertEqual(adapter.responses[-1], ("rpc-skip", {"answers": {"layout": {"answers": []}, "material": {"answers": []}}}))
+
+    def test_oversized_approval_details_fail_closed_but_allow_decline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gateway, adapter = self.gateway_with_adapter(Path(temporary))
+            details = {"questions": [{"id": "secret", "header": "Secret", "question": "x" * 70_000}]}
+            approval_id = self.pending(gateway, "rpc-large", "item/tool/requestUserInput", details)
+            shown = gateway.state()["approvals"][0]
+            self.assertTrue(shown["details_truncated"])
+            self.assertIsNone(shown["details"])
+            with self.assertRaisesRegex(APIError, "too large"):
+                gateway.respond_to_approval(approval_id, {"decision": "accept", "answers": {"secret": {"answers": ["yes"]}}})
+            self.assertEqual(adapter.responses, [])
+            gateway.respond_to_approval(approval_id, {"decision": "decline"})
+            self.assertEqual(adapter.responses[-1], ("rpc-large", {"answers": {"secret": {"answers": []}}}))
+            unknown_id = self.pending(gateway, "rpc-unknown", "unknown/request", {"description": "x" * 70_000})
+            with self.assertRaisesRegex(APIError, "interrupt this turn from the workbench"):
+                gateway.respond_to_approval(unknown_id, {"decision": "decline"})
+            self.assertEqual(len(adapter.responses), 1)
+            known_size_unknown_id = self.pending(gateway, "rpc-unknown-short", "unknown/request", {"description": "unsupported request"})
+            with self.assertRaisesRegex(APIError, "interrupt this turn from the workbench"):
+                gateway.respond_to_approval(known_size_unknown_id, {"decision": "decline"})
+            self.assertEqual(len(adapter.responses), 1)
+            many_questions = {"questions": [{"id": f"q{index}", "question": "x" * 700} for index in range(101)]}
+            many_id = self.pending(gateway, "rpc-many", "item/tool/requestUserInput", many_questions)
+            with self.assertRaisesRegex(APIError, "interrupt this turn from the workbench"):
+                gateway.respond_to_approval(many_id, {"decision": "decline"})
+            self.assertEqual(len(adapter.responses), 1)
+
+    def test_empty_thread_recreation_updates_gateway_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            gateway, adapter = self.gateway_with_adapter(Path(temporary))
+            self.assertEqual(gateway.state()["thread_id"], "thread-test-persistent")
+            gateway.on_adapter_event({"method": "adapter/empty_thread_recreated", "params": {"old_thread_id": "thread-test-persistent", "thread_id": "thread-new-empty"}})
+            self.assertEqual(gateway.state()["thread_id"], "thread-new-empty")
+            self.assertTrue(any(event["type"] == "empty_thread_recreated" for event in gateway.store.workspace_events()["items"]))
+
+    def test_direct_image_turn_idempotency_queue_stale_gate_and_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            store = SceneStore(root / "data")
+            adapter = FakeAdapter()
+            gateway = WorkspaceGateway(store, project, adapter=adapter)
+            gateway.start()
+            session_id = gateway.state()["session_id"]
+            data_url, original = image_data_url()
+            reference = store.add_reference(session_id, "room.png", data_url)
+            first_payload = {"idempotency_key": "first-message-0001", "scene_revision": 1, "note": "Build the cabinet shown in the photo.", "reference_annotated_data_urls": [{"reference_id": reference["id"], "data_url": data_url}]}
+            first = gateway.submit(session_id, first_payload)
+            self.wait_for(lambda: len(adapter.calls) == 1)
+            self.assertEqual(adapter.calls[0]["message_id"], first["feedback_id"])
+            self.assertEqual(len(adapter.calls[0]["image_paths"]), 2)
+            self.assertEqual(Path(adapter.calls[0]["image_paths"][0]).read_bytes(), original)
+            duplicate = gateway.submit(session_id, first_payload)
+            self.assertEqual(duplicate["feedback_id"], first["feedback_id"])
+            self.assertEqual(len(gateway.state()["queue"]), 1)
+            with self.assertRaisesRegex(APIError, "another submission"):
+                gateway.submit(session_id, {**first_payload, "note": "different"})
+            second = gateway.submit(session_id, {"idempotency_key": "second-message-0001", "scene_revision": 1, "note": "Make it taller."})
+            self.assertEqual(len(adapter.calls), 1)
+            model = root / "updated.glb"
+            tiny_glb(model)
+            scene = store.set_scene_preview(str(model), expected_revision=1)
+            self.assertEqual(scene["revision"], 2)
+            gateway.on_adapter_event({"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}})
+            self.wait_for(lambda: any(item["feedback_id"] == second["feedback_id"] and item["status"] == "blocked_stale" for item in gateway.state()["queue"]))
+            self.assertEqual(len(adapter.calls), 1)
+            gateway.confirm_queue(second["feedback_id"], {"confirm": True})
+            self.wait_for(lambda: len(adapter.calls) == 2)
+            self.assertIn("较早的冻结场景截图", adapter.calls[1]["text"])
+            gateway.on_adapter_event({"method": "adapter/request_pending", "params": {"request_id": "rpc-3", "method": "item/commandExecution/requestApproval", "params": {"command": "true"}}})
+            approval = gateway.state()["approvals"][0]
+            self.assertEqual(gateway.state()["agent"]["status"], "awaiting_approval")
+            gateway.respond_to_approval(approval["approval_id"], {"decision": "decline"})
+            self.assertEqual(adapter.responses, [("rpc-3", {"decision": "decline"})])
+            gateway.on_adapter_event({"method": "adapter/request_pending", "params": {"request_id": "rpc-4", "method": "mcpServer/elicitation/request", "params": {"mode": "form", "message": "Allow workspace_publish_scene?", "requestedSchema": {"type": "object", "properties": {}}, "_meta": {"codex_approval_kind": "mcp_tool_call"}}}})
+            approval = gateway.state()["approvals"][0]
+            gateway.respond_to_approval(approval["approval_id"], {"decision": "accept"})
+            self.assertEqual(adapter.responses[-1], ("rpc-4", {"action": "accept", "content": {}}))
+            gateway.on_adapter_event({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "I updated the cabinet source and published the GLB."}}})
+            self.assertTrue(any(event["type"] == "assistant_message" for event in store.workspace_events()["items"]))
+            gateway.on_adapter_event({"method": "turn/completed", "params": {"turn": {"id": "turn-2", "status": "completed"}}})
+            self.assertEqual(gateway.state()["thread_id"], "thread-test-persistent")
+            self.assertEqual(gateway.state()["agent"]["status"], "idle")
+
+    def test_disconnect_during_turn_never_replays_without_explicit_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            store = SceneStore(root / "data")
+            adapter = FakeAdapter()
+            gateway = WorkspaceGateway(store, project, adapter=adapter)
+            gateway.start()
+            session_id = gateway.state()["session_id"]
+            packet = gateway.submit(session_id, {"idempotency_key": "disconnect-message-0001", "scene_revision": 1, "note": "Look at this room."})
+            self.wait_for(lambda: gateway.state()["queue"][0]["status"] == "running")
+            gateway.on_adapter_event({"method": "adapter/disconnected", "params": {}})
+            self.assertEqual(gateway.state()["queue"][0]["status"], "delivery_uncertain")
+            gateway.on_adapter_event({"method": "adapter/reconnected", "params": {}})
+            gateway.wake()
+            time.sleep(0.1)
+            self.assertEqual(len(adapter.calls), 1)
+            self.assertEqual(SceneStore(store.data_dir).workspace()["queue"][0]["feedback_id"], packet["feedback_id"])
+            self.assertEqual(gateway.state()["agent"]["status"], "delivery_uncertain")
+            gateway.confirm_queue(packet["feedback_id"], {"retry_uncertain": True})
+            self.wait_for(lambda: len(adapter.calls) == 2)
+
+    def test_idle_disconnect_reconnects_to_the_same_thread_before_next_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            store = SceneStore(root / "data")
+            adapter = FakeAdapter()
+            gateway = WorkspaceGateway(store, project, adapter=adapter)
+            gateway.start()
+            adapter.connected = False
+            gateway.on_adapter_event({"method": "adapter/disconnected", "params": {}})
+            gateway.submit(gateway.state()["session_id"], {"idempotency_key": "reconnect-message-0001", "scene_revision": 1, "note": "Continue after reconnect."})
+            self.wait_for(lambda: len(adapter.calls) == 1)
+            self.assertEqual(adapter.starts, 2)
+            self.assertEqual(gateway.state()["thread_id"], "thread-test-persistent")
+
+
 class HTTPTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -182,11 +490,13 @@ class HTTPTests(unittest.TestCase):
         web_dir.mkdir()
         (web_dir / "index.html").write_text("<html>viewer</html>", encoding="utf-8")
         self.server = make_server(port=0, data_dir=root / "data", web_dir=web_dir)
+        seed_chair(self.server.scene_store)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.base = f"http://127.0.0.1:{self.server.server_port}"
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.token = (root / "data" / "control_token").read_text(encoding="ascii").strip()
+        self.browser_token = (root / "data" / "browser_token").read_text(encoding="ascii").strip()
 
     def tearDown(self) -> None:
         self.server.shutdown()
@@ -194,8 +504,10 @@ class HTTPTests(unittest.TestCase):
         self.thread.join(timeout=3)
         self.temporary.cleanup()
 
-    def request(self, method: str, path: str, payload: dict | None = None, *, key: bool = False, origin: str | None = None):
+    def request(self, method: str, path: str, payload: dict | None = None, *, key: bool = False, browser: bool = True, origin: str | None = None):
         headers = {"Accept": "application/json"}
+        if browser:
+            headers["X-Workspace-Capability"] = self.browser_token
         body = None
         if payload is not None:
             body = json.dumps(payload).encode()
@@ -220,9 +532,11 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, session = self.request("POST", "/api/sessions", {})
         self.assertEqual(status, 201)
+        status, denied = self.request("POST", f"/api/sessions/{session['session_id']}/feedback", {"idempotency_key": "another-key-0001", "scene_revision": scene["revision"], "note": "Ignored"}, browser=False)
+        self.assertEqual(status, 403)
         self.assertIn(f"127.0.0.1:{self.server.server_port}", session["url"])
         status, feedback = self.request("POST", f"/api/sessions/{session['session_id']}/feedback", {
-            "scene_revision": scene["revision"], "annotations": [{"type": "target_box", "object_id": "chair_back", "center": [0, 0, 1.8], "size": [1, 0.2, 1.6], "anchor": "bottom"}], "note": "Taller"
+            "idempotency_key": "test-taller-0001", "scene_revision": scene["revision"], "annotations": [{"type": "target_box", "object_id": "chair_back", "center": [0, 0, 1.8], "size": [1, 0.2, 1.6], "anchor": "bottom"}], "note": "Taller"
         })
         self.assertEqual(status, 201)
         status, result = self.request("GET", f"/api/sessions/{session['session_id']}/feedback")
@@ -247,6 +561,19 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(asset, model.read_bytes())
 
+    def test_workspace_publish_requires_expected_revision(self) -> None:
+        model = Path(self.temporary.name) / "room.glb"
+        tiny_glb(model)
+        status, current = self.request("GET", "/api/scene")
+        self.assertEqual(status, 200)
+        status, published = self.request("POST", "/api/workspace/publish", {"local_path": str(model), "expected_revision": current["revision"]}, key=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(published["revision"], current["revision"] + 1)
+        status, conflict = self.request("POST", "/api/workspace/publish", {"local_path": str(model), "expected_revision": current["revision"]}, key=True)
+        self.assertEqual(status, 409)
+        status, after = self.request("GET", "/api/scene")
+        self.assertEqual(after, published)
+
     def test_browser_upload_and_large_two_reference_visual_packet(self) -> None:
         image_url, image_bytes = image_data_url(large=True)
         self.assertGreater(len(image_bytes) * 4 // 3 * 4, 8 * 1024 * 1024)
@@ -263,7 +590,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual((status, original), (200, image_bytes))
         status, scene = self.request("GET", "/api/scene")
         status, feedback = self.request("POST", f"/api/sessions/{session['session_id']}/feedback", {
-            "scene_revision": scene["revision"], "note": "Align the furniture with marks 1 and 2.",
+            "idempotency_key": "test-large-packet-0001", "scene_revision": scene["revision"], "note": "Align the furniture with marks 1 and 2.",
             "reference_annotated_data_urls": [{"reference_id": item["id"], "data_url": image_url} for item in references],
             "scene_original_data_url": image_url, "scene_annotated_data_url": image_url,
         })
@@ -278,36 +605,30 @@ class HTTPTests(unittest.TestCase):
 
     def test_mcp_tool_returns_actual_images_after_visual_submission(self) -> None:
         data_url, image_bytes = image_data_url()
-        source = Path(self.temporary.name) / "photo.png"
-        source.write_bytes(image_bytes)
         with patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "DATA_DIR", Path(self.temporary.name) / "data"):
-            opened = asyncio.run(mcp_server.mcp.call_tool("request_visual_feedback", {"reference_images": [str(source)], "wait_for_submit": False, "open_browser": False}))
-            self.assertEqual(opened.structured_content["reference_images"][0]["name"], "photo.png")
+            opened = asyncio.run(mcp_server.mcp.call_tool("workspace_open", {"open_browser": False}))
             session_id = opened.structured_content["session_id"]
+            status, reference = self.request("POST", f"/api/sessions/{session_id}/references", {"name": "photo.png", "data_url": data_url})
+            self.assertEqual(status, 201)
             status, scene = self.request("GET", "/api/scene")
             self.assertEqual(status, 200)
-            status, submitted = self.request("POST", f"/api/sessions/{session_id}/feedback", {"scene_revision": scene["revision"], "note": "Move this edge", "scene_original_data_url": data_url, "scene_annotated_data_url": data_url})
+            status, submitted = self.request("POST", f"/api/sessions/{session_id}/feedback", {"idempotency_key": "test-mcp-image-0001", "scene_revision": scene["revision"], "note": "Move this edge", "reference_annotated_data_urls": [{"reference_id": reference["id"], "data_url": data_url}], "scene_original_data_url": data_url, "scene_annotated_data_url": data_url})
             self.assertEqual(status, 201)
-            result = asyncio.run(mcp_server.mcp.call_tool("get_visual_feedback", {"session_id": session_id, "cursor": 0}))
-            self.assertEqual(sum(block.type == "image" for block in result.content), 3)
-            self.assertEqual(result.structured_content["next_cursor"], 1)
+            result = asyncio.run(mcp_server.mcp.call_tool("workspace_get_feedback", {"feedback_id": submitted["feedback_id"]}))
+            self.assertEqual(sum(block.type == "image" for block in result.content), 4)
+            self.assertEqual(result.structured_content["items"][0]["feedback_id"], submitted["feedback_id"])
+            context = asyncio.run(mcp_server.mcp.call_tool("workspace_get_context", {}))
+            self.assertEqual(context.structured_content["thread_id"], None)
+            self.assertEqual(sum(block.type == "image" for block in context.content), 1)
 
-    def test_invalid_reused_session_does_not_replace_scene(self) -> None:
+    def test_invalid_workspace_publish_does_not_replace_scene(self) -> None:
         model = Path(self.temporary.name) / "preview.glb"
         tiny_glb(model)
-        status, session = self.request("POST", "/api/sessions", {})
-        self.assertEqual(status, 201)
         status, before = self.request("GET", "/api/scene")
         self.assertEqual(status, 200)
-        invalid_calls = (
-            {"session_id": "0" * 32, "scene_glb_path": str(model)},
-            {"session_id": session["session_id"], "reference_images": [], "scene_glb_path": str(model)},
-            {"session_id": session["session_id"], "cursor": -1, "scene_glb_path": str(model)},
-        )
         with patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "DATA_DIR", Path(self.temporary.name) / "data"):
-            for arguments in invalid_calls:
-                with self.assertRaises(ValueError):
-                    asyncio.run(mcp_server.request_visual_feedback(**arguments, open_browser=False, wait_for_submit=False))
+            with self.assertRaises(ValueError):
+                mcp_server.workspace_publish_scene(str(model), expected_revision=before["revision"] + 1)
         status, after = self.request("GET", "/api/scene")
         self.assertEqual(after, before)
 
