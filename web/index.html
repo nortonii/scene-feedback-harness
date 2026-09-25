@@ -2,89 +2,55 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <meta name="theme-color" content="#101820" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#10141b" />
-    <title>场景反馈 · 3D 空间标注</title>
+    <title>Astra 视觉反馈工作台</title>
     <link rel="stylesheet" href="./styles.css" />
-    <script type="importmap">
-      {
-        "imports": {
-          "three": "./vendor/three/build/three.module.min.js",
-          "three/addons/": "./vendor/three/examples/jsm/"
-        }
-      }
-    </script>
-    <script>
-      (() => {
-        let pendingError = '';
-        function reveal(message) {
-          pendingError = /webgl/i.test(message || '')
-            ? '浏览器无法创建 WebGL 上下文。请启用图形加速后重新打开。'
-            : (message || '未知错误');
-          const pill = document.getElementById('session-pill');
-          const toast = document.getElementById('toast');
-          if (!pill || !toast) return;
-          pill.textContent = '界面错误';
-          pill.className = 'session-pill cancelled';
-          toast.textContent = `界面启动失败：${pendingError}`;
-          toast.className = 'toast show error';
-        }
-        window.addEventListener('error', (event) => reveal(event.message || event.error?.message || '脚本加载失败'));
-        window.addEventListener('unhandledrejection', (event) => reveal(event.reason?.message || String(event.reason)));
-        document.addEventListener('DOMContentLoaded', () => { if (pendingError) reveal(pendingError); });
-      })();
-    </script>
+    <script type="importmap">{"imports":{"three":"./vendor/three/build/three.module.min.js","three/addons/":"./vendor/three/examples/jsm/"}}</script>
     <script type="module" src="./app.js"></script>
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
-          <div class="brand-copy"><strong>场景反馈</strong><small>3D 空间标注工作台</small></div>
-        </div>
-        <div class="topbar-center"><span class="live-dot"></span><span id="scene-name">当前场景</span><span class="slash">/</span><span id="revision-label">版本 —</span></div>
-        <div class="topbar-actions"><span id="session-pill" class="session-pill">连接中</span><button id="help-button" class="icon-button" title="操作快捷键" aria-label="操作快捷键">?</button></div>
+        <div class="brand"><div class="brand-mark" aria-hidden="true">✳</div><div><strong>Astra 视觉反馈</strong><small>一起看图，一起改场景</small></div></div>
+        <div class="scene-meta"><span id="scene-name">当前场景</span><span class="meta-separator">/</span><span id="revision-label">版本 —</span><span class="meta-separator">/</span><span id="feedback-count-label">已发 0 轮</span></div>
+        <div class="top-actions"><span id="session-pill" class="session-pill">连接中</span><button id="help-button" class="icon-button" type="button" aria-label="查看操作帮助">?</button></div>
       </header>
 
-      <aside class="left-panel">
-        <div class="panel-heading"><span class="eyebrow">工作台</span><h1>标出你想要的形状。</h1><p>用对象 ID 和空间坐标，给 Codex 准确的修改指令。</p></div>
-        <section class="panel-section">
-          <div class="section-title"><span>01</span><h2>选择工具</h2></div>
-          <div class="tool-list" role="group" aria-label="反馈工具">
-            <button class="tool-button active" data-tool="select" type="button"><span class="tool-glyph select-glyph">⌖</span><span><strong>选择对象</strong><small>查看并定位几何体</small></span><kbd>1</kbd></button>
-            <button class="tool-button" data-tool="line" type="button"><span class="tool-glyph line-glyph">╱</span><span><strong>绘制辅助线</strong><small>依次点击两个 3D 点</small></span><kbd>2</kbd></button>
-            <button class="tool-button" data-tool="box" type="button"><span class="tool-glyph box-glyph">□</span><span><strong>设置目标框</strong><small>指定尺寸和位置</small></span><kbd>3</kbd></button>
-          </div>
-        </section>
-        <section class="panel-section object-section">
-          <div class="section-title"><span>02</span><h2>场景对象</h2><span id="object-count" class="count-chip">0</span></div>
-          <div id="object-list" class="object-list"><div class="empty-state">正在加载场景对象…</div></div>
-        </section>
-        <div class="left-footer"><span class="key-icon">◉</span><span>旋转：拖拽 · 平移：右键拖拽 · 缩放：滚轮</span></div>
+      <aside class="tool-panel">
+        <div class="panel-intro"><span class="eyebrow">01 / 指给 Astra 看</span><h1>圈出不对的地方</h1><p>在参考图或当前场景上标记，再写一句你希望怎样改。</p></div>
+        <div class="section-label">画笔</div>
+        <div class="tool-list" role="group" aria-label="标注工具">
+          <button class="tool-button active" type="button" data-tool="select"><span class="tool-icon">⌖</span><span><strong>查看 / 选对象</strong><small>旋转场景，点击对象</small></span><kbd>1</kbd></button>
+          <button class="tool-button" type="button" data-tool="point"><span class="tool-icon">●</span><span><strong>点一下</strong><small>指出这里</small></span><kbd>2</kbd></button>
+          <button class="tool-button" type="button" data-tool="rectangle"><span class="tool-icon">▢</span><span><strong>框起来</strong><small>圈出区域</small></span><kbd>3</kbd></button>
+          <button class="tool-button" type="button" data-tool="line"><span class="tool-icon">╱</span><span><strong>画线</strong><small>标出边缘或高度</small></span><kbd>4</kbd></button>
+          <button class="tool-button" type="button" data-tool="arrow"><span class="tool-icon">↗</span><span><strong>画箭头</strong><small>指出方向</small></span><kbd>5</kbd></button>
+          <button class="tool-button" type="button" data-tool="text"><span class="tool-icon">T</span><span><strong>文字标注</strong><small>在图上留一句话</small></span><kbd>6</kbd></button>
+        </div>
+        <div class="pair-section"><label for="group-select">对应编号 <span>可选</span></label><select id="group-select" aria-label="可选的对应编号"><option value="">不编号</option><option value="1">①</option><option value="2">②</option><option value="3">③</option><option value="4">④</option><option value="5">⑤</option><option value="6">⑥</option><option value="7">⑦</option><option value="8">⑧</option><option value="9">⑨</option></select><p>需要对照时，在两边选同一个编号；只标一边也可以。</p></div>
+        <div class="object-section"><div class="section-label">场景对象 <span id="object-count">0</span></div><div id="object-list" class="object-list"><p class="muted">正在加载…</p></div></div>
       </aside>
 
-      <main class="viewport-panel">
-        <div id="viewport" class="viewport" aria-label="交互式 3D 场景视口"></div>
-        <div class="viewport-top"><div class="viewport-title"><span class="view-kicker">3D 视口</span><strong id="viewport-scene-title">场景总览</strong></div><div class="view-actions"><button id="frame-button" class="view-button" title="聚焦选中对象">⌗ <span>聚焦</span></button><button id="grid-button" class="view-button active" title="显示或隐藏网格">▦ <span>网格</span></button><button id="reset-button" class="view-button" title="重置视角">↺ <span>重置视角</span></button></div></div>
-        <div id="viewport-hint" class="viewport-hint"><span class="hint-icon">↖</span><span>点击对象开始标注</span></div>
-        <div class="axis-widget" aria-hidden="true"><span class="axis-z">Z</span><span class="axis-y">Y</span><span class="axis-x">X</span></div>
-        <div class="viewport-bottom"><span class="coordinate-label">世界坐标 · Z 轴朝上</span><span id="cursor-label">X — &nbsp; Y — &nbsp; Z —</span></div>
-        <div id="toast" class="toast" role="status" aria-live="polite"></div>
+      <main class="workspace">
+        <section class="visual-pane reference-pane" aria-label="参考图片">
+          <div class="pane-head"><div><span class="eyebrow">参考图</span><h2 id="reference-title">照片里的目标</h2></div><label class="compact-button upload-button" for="reference-input">＋ 添加参考图<input id="reference-input" type="file" accept="image/png,image/jpeg" multiple /></label></div>
+          <div id="reference-stage" class="stage reference-stage"><div id="reference-media" class="reference-media hidden"><img id="reference-image" alt="当前参考图片" /><canvas id="reference-annotations" aria-label="参考图片标注层"></canvas></div><div id="reference-empty" class="reference-empty"><div class="empty-graphic">▧</div><strong>先放一张参考图</strong><p>可以从电脑添加图片；有多个视角时也能逐张切换。</p><label class="primary-small" for="reference-input">选择图片</label></div><div id="reference-hint" class="stage-hint hidden">在图片上圈出想让 Astra 注意的地方</div></div>
+          <div id="reference-strip" class="reference-strip"><span class="muted">还没有参考图</span></div>
+        </section>
+
+        <section class="visual-pane scene-pane" aria-label="当前三维场景">
+          <div class="pane-head"><div><span class="eyebrow">当前场景</span><h2 id="scene-title">Astra 搭出的结果</h2></div><div class="pane-actions"><button id="frame-button" class="compact-button" type="button" title="聚焦选中对象">⌗ 聚焦</button><button id="reset-button" class="compact-button" type="button" title="重置视角">↺ 视角</button></div></div>
+          <div id="scene-stage" class="stage scene-stage"><div id="viewport" class="viewport" aria-label="可旋转的 3D 场景"></div><canvas id="scene-annotations" class="scene-annotations" aria-label="场景截图标注层"></canvas><img id="compare-image" class="compare-image hidden" alt="参考图叠层，仅用于视觉对比" /><div id="scene-hint" class="stage-hint">拖拽旋转 · 滚轮缩放 · 点击对象</div><div id="selected-chip" class="selected-chip hidden"></div></div>
+          <div class="compare-row"><label class="check-label"><input id="compare-enabled" type="checkbox" /> 叠图对比</label><label class="opacity-control" for="compare-opacity">透明度 <input id="compare-opacity" type="range" min="0" max="100" value="45" disabled /><span id="opacity-value">45%</span></label><span class="compare-caption">视觉对照，未做相机配准</span></div>
+        </section>
       </main>
 
-      <aside class="right-panel">
-        <div class="inspector-head"><span class="eyebrow">属性面板</span><h2 id="inspector-title">未选择对象</h2><p id="inspector-subtitle">在视口或左侧列表中选择一个对象。</p></div>
-        <div id="selection-empty" class="selection-empty"><div class="empty-illustration"><span class="cube-front"></span><span class="cube-top"></span><span class="cube-side"></span></div><strong>先选择一个对象</strong><span>然后设置目标框，或绘制辅助线。</span></div>
-        <div id="selection-controls" class="selection-controls hidden">
-          <div class="inspector-section"><div class="label-row"><span>对象 ID</span><button id="copy-id" class="text-button" type="button">复制</button></div><code id="object-id">—</code><div class="type-row"><span id="object-type">—</span><span id="object-dimensions">—</span></div></div>
-          <div class="inspector-section target-section"><div class="section-header"><div><span class="eyebrow">目标几何</span><h3>包围框</h3></div><label class="switch" title="把目标框加入反馈"><input id="target-enabled" type="checkbox" /><span></span></label></div><p>设置目标尺寸与中心位置。琥珀色线框显示你的要求。</p><div class="field-heading">尺寸 <span>世界单位</span></div><div class="axis-fields"><label><span class="axis-letter x">X</span><input id="size-x" type="number" min="0.001" step="0.05" inputmode="decimal" /></label><label><span class="axis-letter y">Y</span><input id="size-y" type="number" min="0.001" step="0.05" inputmode="decimal" /></label><label><span class="axis-letter z">Z</span><input id="size-z" type="number" min="0.001" step="0.05" inputmode="decimal" /></label></div><div class="field-heading position-heading">中心位置 <span>世界单位</span></div><div class="axis-fields"><label><span class="axis-letter x">X</span><input id="position-x" type="number" step="0.05" inputmode="decimal" /></label><label><span class="axis-letter y">Y</span><input id="position-y" type="number" step="0.05" inputmode="decimal" /></label><label><span class="axis-letter z">Z</span><input id="position-z" type="number" step="0.05" inputmode="decimal" /></label></div><div class="target-actions"><label class="anchor-select">固定点 <select id="anchor-select"><option value="center">中心</option><option value="bottom">底部</option></select></label><button id="reset-target" class="text-button" type="button">重置</button></div></div>
-        </div>
-        <div class="feedback-section"><div class="section-header feedback-heading"><div><span class="eyebrow">标注列表</span><h3>反馈 <span id="annotation-count" class="count-chip">0</span></h3></div><button id="clear-annotations" class="text-button" type="button">清空</button></div><div id="annotation-list" class="annotation-list"><div class="feedback-empty">辅助线和目标包围框会显示在这里。</div></div></div>
-        <div class="submit-section"><label for="feedback-note" class="field-heading">给 Codex 的备注 <span>可选</span></label><textarea id="feedback-note" rows="3" placeholder="哪里需要修改？哪些部分需要保持对齐？"></textarea><div class="submit-actions"><button id="cancel-button" class="secondary-button" type="button">取消</button><button id="submit-button" class="primary-button" type="button"><span>提交反馈</span><span class="arrow">↗</span></button></div><p id="submit-caption">提交后，反馈会返回等待中的 Codex 工具调用。</p></div>
-      </aside>
+      <aside class="feedback-panel"><div class="feedback-head"><span class="eyebrow">02 / 发给 Astra</span><h2>把你看到的告诉它</h2><p>无需写坐标或操作命令。对象、视角和图片会随反馈一并发送。</p></div><div class="selection-card"><div class="section-label">已选对象 <span>可选</span></div><div id="selection-summary" class="selection-summary muted">未选对象也能提交。比如：参考图里缺了一个东西。</div><button id="clear-selection" type="button" class="text-button hidden">取消选择</button></div><div class="annotation-section"><div class="section-heading"><span class="section-label">保留的标记 <span id="annotation-count">0</span></span><button id="clear-annotations" type="button" class="text-button">清空</button></div><div id="annotation-list" class="annotation-list"><div class="muted">你画的点、框、线和文字会显示在这里。</div></div></div><div class="composer"><label for="feedback-note" class="section-label">补充一句话 <span>可选</span></label><textarea id="feedback-note" rows="4" placeholder="例如：柜子顶部应该跟左图①的线齐平。右侧还缺一盏灯。"></textarea><button id="submit-button" class="submit-button" type="button"><span>发给 Astra</span><span aria-hidden="true">↗</span></button><p id="submit-caption">每次会发送当前可见的全部标记、原图、场景视角和你的话。标记会保留；不想重复发送可删除或清空。</p></div></aside>
     </div>
 
-    <dialog id="help-dialog"><div class="dialog-head"><h2>快捷操作</h2><button id="close-help" class="icon-button" aria-label="关闭">×</button></div><div class="shortcut-row"><span>选择对象</span><kbd>1</kbd></div><div class="shortcut-row"><span>绘制辅助线</span><kbd>2</kbd></div><div class="shortcut-row"><span>设置目标框</span><kbd>3</kbd></div><div class="shortcut-row"><span>删除最后一条线</span><kbd>Backspace</kbd></div><div class="shortcut-row"><span>旋转 / 平移 / 缩放</span><span>拖拽 / 右键拖拽 / 滚轮</span></div><p>在辅助线模式下，先选择对象，再依次点击两个表面点或网格点。辅助线会绑定到该对象 ID。</p></dialog>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <div id="text-editor" class="text-editor hidden"><input id="annotation-text" type="text" maxlength="200" placeholder="这处要怎么改？" aria-label="标注文字" /><button id="save-text" type="button">添加</button><button id="cancel-text" type="button" aria-label="取消">×</button></div>
+    <dialog id="help-dialog"><div class="dialog-head"><h2>怎么使用</h2><button id="close-help" class="icon-button" type="button" aria-label="关闭">×</button></div><p>左边是参考图，右边是当前 3D 场景。使用 1–6 切换工具。选择「查看 / 选对象」时可拖动旋转场景，右键拖动平移，滚轮缩放；点击对象会自动记录它的 ID。</p><p>在任一侧画点、框、线、箭头或文字。标记可以只出现在参考图上。需要表示两边对应时，给标记选择同一个编号即可。</p><p>叠图仅帮你肉眼比较，未自动对齐相机。提交时请告诉 Astra 你想改变什么。</p></dialog>
   </body>
 </html>

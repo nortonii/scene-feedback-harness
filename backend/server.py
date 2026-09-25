@@ -19,9 +19,9 @@ from core import APIError, SceneStore
 HERE = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = HERE / "data"
 DEFAULT_WEB_DIR = HERE.parent / "web"
-MAX_REQUEST_BYTES = 8 * 1024 * 1024
-SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel))?$")
-MEDIA_ROUTE = re.compile(r"^/(assets|screenshots)/([0-9a-f]{32}\.(?:glb|png|jpg))$")
+MAX_REQUEST_BYTES = 64 * 1024 * 1024
+SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel|references))?$")
+MEDIA_ROUTE = re.compile(r"^/(assets|screenshots|media)/([0-9a-f]{32}\.(?:glb|png|jpg))$")
 
 
 def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, web_dir: str | Path = DEFAULT_WEB_DIR) -> ThreadingHTTPServer:
@@ -105,13 +105,19 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                 self._require_control_key()
                 payload = self._read_json()
                 return self._send_json(200, store.update_scene(payload.get("expected_revision"), payload.get("changes")))
+            if self.command == "POST" and path == "/api/scene/preview":
+                self._require_control_key()
+                payload = self._read_json()
+                return self._send_json(200, store.set_scene_preview(payload.get("local_path")))
             if self.command == "POST" and path == "/api/models/import":
                 self._require_control_key()
                 payload = self._read_json()
                 return self._send_json(201, store.import_model(payload.get("local_path"), object_id=payload.get("object_id"), name=payload.get("name"), position=payload.get("position"), size=payload.get("size")))
             if self.command == "POST" and path == "/api/sessions":
-                self._read_json()
-                session = store.create_session()
+                payload = self._read_json()
+                if "reference_images" in payload:
+                    self._require_control_key()
+                session = store.create_session(payload.get("reference_images"), reference_session_id=payload.get("reference_session_id"))
                 session["url"] = f"http://127.0.0.1:{self.server.server_port}/?session_id={session['session_id']}"
                 return self._send_json(201, session)
             if self.command == "GET" and path == "/api/sessions":
@@ -132,6 +138,9 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                     return self._send_json(200, store.feedback(session_id, self._cursor(query)))
                 if self.command == "POST" and suffix == "feedback":
                     return self._send_json(201, store.submit_feedback(session_id, self._read_json()))
+                if self.command == "POST" and suffix == "references":
+                    payload = self._read_json()
+                    return self._send_json(201, store.add_reference(session_id, payload.get("name"), payload.get("data_url")))
                 if self.command == "POST" and suffix == "cancel":
                     self._read_json()
                     return self._send_json(200, store.cancel_session(session_id))
@@ -143,6 +152,8 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                         return self._send_file(store.assets_dir / name)
                     if directory == "screenshots" and name.endswith((".png", ".jpg")):
                         return self._send_file(store.screenshots_dir / name)
+                    if directory == "media" and name.endswith((".png", ".jpg")):
+                        return self._send_file(store.media_dir / name)
                     raise APIError(404, "file not found")
                 if path == "/":
                     return self._send_file(web_root / "index.html")
