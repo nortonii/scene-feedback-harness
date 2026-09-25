@@ -1,3 +1,5 @@
+**语言 / Languages:** **简体中文** · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
+
 # Astra 视觉反馈工作台
 
 让人和 Astra 对着同一张参考图、同一个当前场景交流。你在图片或 3D 视图上圈、画、指，再补一句话；MCP 将原图、标注图、场景截图和必要的上下文交回模型。**Astra 自行判断该改物体、相机、材质还是重建方式**。工作台不要求人填写坐标或几何约束。
@@ -35,9 +37,10 @@ python3 -m venv .venv
 codex mcp add scene_feedback -- "$PWD/.venv/bin/python" "$PWD/backend/mcp_server.py"
 ```
 
-在 `~/.codex/config.toml` 中为 `[mcp_servers.scene_feedback]` 设置较长的交互等待时间。若使用不会弹出审批的 Codex 模式，可只给创建工作台的工具设置自动放行；读取反馈的工具已声明为只读。然后重新加载 MCP 配置：[Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp)。
+在 `~/.codex/config.toml` 中为 `[mcp_servers.scene_feedback]` 设置较长的交互等待时间。修改 `codex mcp add` 已生成的配置节，不要再添加一个同名节。若使用不会弹出审批的 Codex 模式，可只给创建工作台的工具设置自动放行；读取反馈的工具已声明为只读。然后重新加载 MCP 配置：[Codex MCP 配置说明](https://learn.chatgpt.com/docs/extend/mcp)。
 
 ```toml
+[mcp_servers.scene_feedback]
 tool_timeout_sec = 900
 
 [mcp_servers.scene_feedback.tools.request_visual_feedback]
