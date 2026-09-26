@@ -84,7 +84,7 @@ codex mcp add scene_feedback_external \
 
 `codex mcp add`가 만든 `~/.codex/config.toml`의 `[mcp_servers.scene_feedback_external]` 항목 아래에 `tool_timeout_sec = 900`을 설정하세요. 이미지 전송 시간을 남기도록 검토 도구의 `timeout_sec`는 기본값인 600 이하로 지정하세요. 기존 작업의 MCP 도구 목록을 새로 읽도록 **Codex 데스크톱 앱을 재시작**하세요. 그 작업에서 “进入人工调试模式”(사람이 직접 검토하는 모드로 들어가기)라고 말하거나 프로젝트 안의 참고 이미지 경로와 현재 GLB 경로를 전달해 `request_visual_feedback`을 호출하라고 명시하세요(초기 장면이 없으면 GLB는 생략 가능). 도구가 `session_id`, `next_cursor`, URL만 반환하면 <http://127.0.0.1:18768/>을 열고 그 `session_id`와 `cursor=next_cursor`로 `wait_visual_feedback`을 호출하세요. 참고 이미지를 추가해 표시하면 됩니다. 이 모드에서 브라우저의 보내기 버튼은 대기 중인 MCP 검토만 완료하며 **새 사용자 턴을 시작하지 않습니다**.
 
-`PROJECT`는 기존 작업의 프로젝트 디렉터리와 일치해야 하며, `DATA`는 그 프로젝트만 사용하는 비공개 디렉터리입니다. 예제에서는 기본 모드와 섞이지 않도록 포트, 데이터 디렉터리, MCP 이름을 분리했습니다. 게시된 장면은 여전히 `workspace_publish_scene`으로 페이지에 반영할 수 있습니다.
+`PROJECT`는 검토할 재구성 프로젝트의 루트이며 참고 이미지와 GLB가 그 안에 있어야 합니다. Codex 작업 디렉터리의 하위 디렉터리여도 됩니다. `DATA`는 그 프로젝트만 사용하는 비공개 디렉터리입니다. 예제에서는 기본 모드와 섞이지 않도록 포트, 데이터 디렉터리, MCP 이름을 분리했습니다. 게시된 장면은 여전히 `workspace_publish_scene`으로 페이지에 반영할 수 있습니다.
 
 ## MCP 도구
 

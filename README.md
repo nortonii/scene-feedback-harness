@@ -82,7 +82,7 @@ codex mcp add scene_feedback_external \
 
 在 `~/.codex/config.toml` 中，由 `codex mcp add` 创建的 `[mcp_servers.scene_feedback_external]` 表下设置 `tool_timeout_sec = 900`；审图工具的 `timeout_sec` 用默认 600 或更小值，留出传输图像的时间。**重启 Codex 桌面应用**，让现有任务刷新 MCP 工具目录。然后在该任务中说「进入人工调试模式」，或明确要求它调用 `request_visual_feedback`，传入项目内的参考图片路径及现有 GLB 路径（没有初始场景时可省略 GLB）。如果工具只返回 `session_id`、`next_cursor` 和地址，就打开 <http://127.0.0.1:18768/>，并以 `cursor=next_cursor` 调用 `wait_visual_feedback(session_id, cursor)`。添加参考图并标注；浏览器的发送按钮此时只完成等待中的 MCP 审图请求，**不会另外启动用户回合**。
 
-`PROJECT` 应与现有任务的项目目录一致；`DATA` 是该项目专用的私有目录。示例使用独立的端口、数据目录和 MCP 名称，避免混用上面的默认模式。已发布的场景仍可通过 `workspace_publish_scene` 更新到页面。
+`PROJECT` 是要审查的工程根目录，传入的参考图和 GLB 必须位于其中；它可以是 Codex 任务工作目录的子目录。`DATA` 是该项目专用的私有目录。示例使用独立的端口、数据目录和 MCP 名称，避免混用上面的默认模式。已发布的场景仍可通过 `workspace_publish_scene` 更新到页面。
 
 ## MCP 工具
 

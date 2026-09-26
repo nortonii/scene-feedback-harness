@@ -84,7 +84,7 @@ codex mcp add scene_feedback_external \
 
 `codex mcp add` が作成した `~/.codex/config.toml` の `[mcp_servers.scene_feedback_external]` に `tool_timeout_sec = 900` を設定します。画像転送の余裕を残すため、確認ツールの `timeout_sec` は既定値の 600 以下にしてください。既存タスクの MCP ツール一覧を更新するため、**Codex デスクトップアプリを再起動**します。そのタスクで「进入人工调试模式」（人による確認モードに入る）と伝えるか、プロジェクト内の参照画像のパスと現在の GLB のパスを渡して `request_visual_feedback` を呼ぶよう明示します（初期シーンがなければ GLB は省略できます）。ツールが `session_id`、`next_cursor`、URL だけを返した場合は <http://127.0.0.1:18768/> を開き、その `session_id` と `cursor=next_cursor` で `wait_visual_feedback` を呼びます。参照画像を追加して印を付けてください。このモードでブラウザーの送信ボタンが完了させるのは待機中の MCP 確認だけであり、**別のユーザーターンは開始しません**。
 
-`PROJECT` は既存タスクのプロジェクトディレクトリと一致させ、`DATA` にはそのプロジェクト専用の非公開ディレクトリを指定してください。例では標準モードと混ざらないよう、ポート、データディレクトリ、MCP 名を分けています。公開したシーンは引き続き `workspace_publish_scene` でページへ反映できます。
+`PROJECT` は確認する再構成プロジェクトのルートです。参照画像と GLB はその中に置きます。Codex タスクの作業ディレクトリのサブディレクトリでも構いません。`DATA` にはそのプロジェクト専用の非公開ディレクトリを指定してください。例では標準モードと混ざらないよう、ポート、データディレクトリ、MCP 名を分けています。公開したシーンは引き続き `workspace_publish_scene` でページへ反映できます。
 
 ## MCP ツール
 

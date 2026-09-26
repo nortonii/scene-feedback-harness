@@ -84,7 +84,7 @@ codex mcp add scene_feedback_external \
 
 In `~/.codex/config.toml`, set `tool_timeout_sec = 900` under the `[mcp_servers.scene_feedback_external]` table created by `codex mcp add`. Use the review tools' default `timeout_sec` of 600 or less, leaving time to transfer images. **Restart Codex desktop** so the existing task refreshes its MCP tool catalog. In that task, say “进入人工调试模式” (“enter human review mode”) or explicitly ask it to call `request_visual_feedback` with project-local reference image paths and the current GLB path (omit the GLB if no initial scene exists). If the tool returns only `session_id`, `next_cursor`, and a URL, open <http://127.0.0.1:18768/> and call `wait_visual_feedback` with `cursor=next_cursor` for that `session_id`. Add reference images and mark up the scene. In this mode, the browser's Send button completes the pending MCP review; it **does not start another user turn**.
 
-`PROJECT` must match the existing task's project directory; `DATA` is a private directory dedicated to that project. The example uses a separate port, data directory, and MCP server name to keep it apart from the default mode above. Published scenes can still update the page through `workspace_publish_scene`.
+`PROJECT` is the reconstruction root under review; the reference images and GLB must be inside it. It may be a subdirectory of the Codex task's working directory. `DATA` is a private directory dedicated to that project. The example uses a separate port, data directory, and MCP server name to keep it apart from the default mode above. Published scenes can still update the page through `workspace_publish_scene`.
 
 ## MCP tools
 
