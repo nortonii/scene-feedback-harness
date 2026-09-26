@@ -9,10 +9,25 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from appserver_adapter import TurnBusyError, UncertainDeliveryError
-from shared_thread_bridge import SharedThreadBridge, SharedThreadNotIdle, SharedThreadTimeout, UncertainTurnDelivery
+from shared_thread_bridge import (
+    SharedThreadBridge,
+    SharedThreadBridgeError,
+    SharedThreadNotIdle,
+    SharedThreadRPCRejected,
+    SharedThreadTimeout,
+    UncertainTurnDelivery,
+)
 
 
 _RECONCILE_INTERVAL_SEC = 5.0
+
+
+class DeliveryNotReadyError(TurnBusyError):
+    """No turn/start was sent; the desktop task can be tried later."""
+
+
+class DeliveryRejectedError(RuntimeError):
+    """App Server explicitly rejected turn/start; no turn was created."""
 
 
 class SharedDesktopAdapter:
@@ -38,6 +53,7 @@ class SharedDesktopAdapter:
         self._closed = False
         self._turn_state = "idle"
         self._active_turn_id: str | None = None
+        self._uncertain_feedback_id: str | None = None
 
     def start(self) -> str:
         with self._lock:
@@ -55,30 +71,31 @@ class SharedDesktopAdapter:
         with self._turn_lock:
             with self._lock:
                 if self._closed:
-                    raise RuntimeError("shared desktop adapter is closed")
+                    raise DeliveryNotReadyError("shared desktop adapter is closed")
                 if self._turn_state != "idle":
-                    raise TurnBusyError(f"shared desktop turn state is {self._turn_state}")
-                self._turn_state = "waiting_for_idle"
+                    raise DeliveryNotReadyError(f"shared desktop turn state is {self._turn_state}")
+                self._turn_state = "starting"
             bridge: SharedThreadBridge | None = None
             try:
-                while True:
-                    with self._lock:
-                        if self._closed:
-                            raise RuntimeError("shared desktop adapter is closed")
-                    try:
-                        bridge = SharedThreadBridge.connect_for_thread(self.thread_id, subscribe=True)
-                    except SharedThreadNotIdle:
-                        time.sleep(1)
-                        continue
-                    # Another client can start a turn between the subscription
-                    # and this second idle check. No turn/start was sent yet.
-                    try:
-                        turn_id = bridge.start_turn(text, image_paths, client_user_message_id=message_id)
-                        break
-                    except SharedThreadNotIdle:
-                        bridge.close()
-                        bridge = None
-                        time.sleep(1)
+                try:
+                    bridge = SharedThreadBridge.connect_for_thread(self.thread_id, subscribe=True)
+                    # A second idle check in start_turn catches a competing
+                    # desktop turn.  The dispatcher should schedule a later
+                    # attempt instead of keeping its queue worker blocked.
+                    turn_id = bridge.start_turn(text, image_paths, client_user_message_id=message_id)
+                except SharedThreadNotIdle as exc:
+                    raise DeliveryNotReadyError(str(exc)) from exc
+                except SharedThreadRPCRejected as exc:
+                    if exc.method == "turn/start":
+                        raise DeliveryRejectedError(str(exc)) from exc
+                    raise DeliveryNotReadyError(str(exc)) from exc
+                except UncertainTurnDelivery:
+                    raise
+                except SharedThreadBridgeError as exc:
+                    # Discovery, subscription and the pre-send thread/read
+                    # are safe to retry: bridge.start_turn wraps any error
+                    # after sending as UncertainTurnDelivery.
+                    raise DeliveryNotReadyError(str(exc)) from exc
                 with self._lock:
                     if self._closed:
                         raise UncertainDeliveryError("adapter closed after Codex accepted the turn")
@@ -86,6 +103,7 @@ class SharedDesktopAdapter:
                     self._connected = True
                     self._active_turn_id = turn_id
                     self._turn_state = "active"
+                    self._uncertain_feedback_id = None
                     self._reader = threading.Thread(target=self._read_loop, args=(bridge,), daemon=True, name="shared-codex-events")
                     self._reader.start()
                 return {"thread_id": self.thread_id, "turn_id": turn_id, "status": "inProgress"}
@@ -93,7 +111,12 @@ class SharedDesktopAdapter:
                 if bridge is not None and bridge is not self._bridge:
                     bridge.close()
                 with self._lock:
-                    self._turn_state = "unknown" if isinstance(exc, (UncertainTurnDelivery, UncertainDeliveryError)) else "idle"
+                    uncertain = isinstance(exc, (UncertainTurnDelivery, UncertainDeliveryError))
+                    self._turn_state = "unknown" if uncertain else "idle"
+                    if uncertain:
+                        self._uncertain_feedback_id = message_id
+                    elif isinstance(exc, DeliveryNotReadyError):
+                        self._connected = False
                 if isinstance(exc, UncertainTurnDelivery):
                     raise UncertainDeliveryError(str(exc)) from exc
                 raise
@@ -123,6 +146,7 @@ class SharedDesktopAdapter:
                                     with self._lock:
                                         self._active_turn_id = None
                                         self._turn_state = "idle"
+                                        self._pending_requests.clear()
                                     self.on_event({"method": "turn/completed", "params": {"threadId": self.thread_id, "turn": saved_turn}})
                                     return
                     continue
@@ -141,12 +165,18 @@ class SharedDesktopAdapter:
                     params = message.get("params") or {}
                     if isinstance(params, dict) and params.get("threadId") not in {None, self.thread_id}:
                         continue
+                    if message["method"] == "serverRequest/resolved":
+                        request_id = params.get("requestId") if isinstance(params, dict) else None
+                        if request_id is not None:
+                            with self._lock:
+                                self._pending_requests.pop(str(request_id), None)
                     if message["method"] == "turn/completed":
                         if bridge.active_turn_id:
                             continue
                         with self._lock:
                             self._active_turn_id = None
                             self._turn_state = "idle"
+                            self._pending_requests.clear()
                         self.on_event(message)
                         return
                     self.on_event(message)
@@ -160,6 +190,7 @@ class SharedDesktopAdapter:
             with self._lock:
                 if self._bridge is bridge:
                     self._bridge = None
+                    self._connected = False
                     self._pending_requests.clear()
                     for event, result in self._pending_rpc.values():
                         result["error"] = "shared Codex connection closed"
@@ -178,6 +209,51 @@ class SharedDesktopAdapter:
             return None
         finally:
             bridge.close()
+
+    def lookup_feedback(self, feedback_id: str) -> list[dict[str, Any]]:
+        """Find exactly the turns whose user message carries this client ID.
+
+        A duplicate ID can have multiple turns: clientUserMessageId records an
+        ID but is not a server-side deduplication promise.
+        """
+        if not isinstance(feedback_id, str) or not feedback_id:
+            raise ValueError("feedback_id must be nonempty text")
+        bridge = SharedThreadBridge.connect_for_thread(self.thread_id, require_idle=False)
+        try:
+            thread = bridge.read_thread(include_turns=True)
+            matches: list[dict[str, Any]] = []
+            for turn in thread.get("turns") or []:
+                if not isinstance(turn, dict):
+                    continue
+                items = turn.get("items") or []
+                if any(isinstance(item, dict) and item.get("type") == "userMessage" and item.get("clientId") == feedback_id for item in items):
+                    matches.append(turn)
+            return matches
+        finally:
+            bridge.close()
+
+    def inspect_thread_status(self) -> str:
+        """Read the daemon's runtime task status, independent of local state."""
+        bridge = SharedThreadBridge.connect_for_thread(self.thread_id, require_idle=False)
+        try:
+            status = bridge.read_thread().get("status") or {}
+            kind = status.get("type") if isinstance(status, dict) else None
+            if not isinstance(kind, str) or not kind:
+                raise SharedThreadBridgeError("thread/read returned no runtime status")
+            with self._lock:
+                self._connected = True
+            return kind
+        finally:
+            bridge.close()
+
+    def release_uncertain(self) -> None:
+        """Allow a new attempt after the gateway has resolved an old one."""
+        with self._lock:
+            if self._bridge is not None:
+                raise TurnBusyError("cannot release uncertainty while a turn connection is active")
+            self._active_turn_id = None
+            self._uncertain_feedback_id = None
+            self._turn_state = "idle"
 
     def respond_to_request(self, request_id: int | str, result: dict[str, Any]) -> None:
         with self._lock:
@@ -210,7 +286,7 @@ class SharedDesktopAdapter:
         # An uncertain turn must be inspected in the original task before
         # retrying.  A now-idle task alone does not prove it never received it.
         with self._lock:
-            if self._turn_state == "unknown":
+            if self._turn_state == "unknown" and (self._uncertain_feedback_id or self._active_turn_id):
                 return self.status()
         bridge = SharedThreadBridge.connect_for_thread(self.thread_id, require_idle=False)
         try:

@@ -17,6 +17,7 @@ from shared_thread_bridge import (  # noqa: E402
     SharedThreadBridge,
     SharedThreadBridgeError,
     SharedThreadNotIdle,
+    SharedThreadRPCRejected,
     SharedThreadTimeout,
     UncertainTurnDelivery,
     _private_socket_candidates,
@@ -28,9 +29,11 @@ THREAD_ID = "01a0d906-146e-7762-a1f9-49baeda8e270"
 
 
 class FakeWebSocket:
-    def __init__(self, status: str = "idle", *, fail_turn_receive: bool = False) -> None:
+    def __init__(self, status: str = "idle", *, fail_turn_receive: bool = False, reject_turn: bool = False, reject_error: str = "invalid input") -> None:
         self.status = status
         self.fail_turn_receive = fail_turn_receive
+        self.reject_turn = reject_turn
+        self.reject_error = reject_error
         self.turns: list[dict] = []
         self.sent: list[dict] = []
         self.responses: deque[dict] = deque()
@@ -51,6 +54,8 @@ class FakeWebSocket:
             self.responses.append({"id": request_id, "result": {"thread": thread}})
         elif method == "thread/resume":
             self.responses.append({"id": request_id, "result": {"thread": {"id": THREAD_ID, "status": {"type": self.status}}}})
+        elif method == "turn/start" and self.reject_turn:
+            self.responses.append({"id": request_id, "error": {"code": -32602, "message": self.reject_error}})
         elif method == "turn/start" and not self.fail_turn_receive:
             self.responses.append({"id": 99, "method": "item/commandExecution/requestApproval", "params": {"threadId": THREAD_ID, "turnId": "turn-1"}})
             self.responses.append({"id": request_id, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
@@ -212,6 +217,33 @@ class SharedThreadBridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(UncertainTurnDelivery, "inspect task history"):
             bridge.start_turn("feedback", client_user_message_id="feedback-1")
         self.assertEqual(len([item for item in ws.sent if item.get("method") == "turn/start"]), 1)
+
+    def test_explicit_turn_rejection_is_not_uncertain(self) -> None:
+        ws = FakeWebSocket(reject_turn=True)
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        with self.assertRaisesRegex(SharedThreadRPCRejected, "invalid input"):
+            bridge.start_turn("feedback", client_user_message_id="feedback-1")
+        self.assertEqual(len([item for item in ws.sent if item.get("method") == "turn/start"]), 1)
+        self.assertIsNone(bridge.active_turn_id)
+
+    def test_competing_turn_after_idle_check_is_retryable(self) -> None:
+        ws = FakeWebSocket(reject_turn=True)
+        original_send = ws.send
+
+        def send(data: str) -> None:
+            if json.loads(data).get("method") == "turn/start":
+                ws.status = "active"
+            original_send(data)
+
+        ws.send = send
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        with self.assertRaises(SharedThreadNotIdle):
+            bridge.start_turn("feedback", client_user_message_id="feedback-1")
+
+    def test_busy_rpc_rejection_is_retryable_even_when_competing_turn_finishes(self) -> None:
+        bridge = SharedThreadBridge(FakeWebSocket(reject_turn=True, reject_error="turn already in progress"), THREAD_ID)
+        with self.assertRaises(SharedThreadNotIdle):
+            bridge.start_turn("feedback", client_user_message_id="feedback-1")
 
     def test_idle_event_read_timeout_is_distinct_from_disconnection(self) -> None:
         bridge = SharedThreadBridge(FakeWebSocket(), THREAD_ID)

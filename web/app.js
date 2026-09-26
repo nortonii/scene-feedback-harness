@@ -295,7 +295,7 @@ function updateSubmitLabel() {
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
     const label = state.pendingSubmission ? '重试同一条反馈'
-      : bound && ['running', 'awaiting_approval'].includes(status) ? '加入原任务下一轮'
+      : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入原任务下一轮'
       : bound ? '发送到原 Codex 任务' : '保存视觉反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
@@ -304,7 +304,7 @@ function updateSubmitLabel() {
     id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
       ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
-      : bound && ['running', 'awaiting_approval'].includes(status)
+      : bound && ['running', 'awaiting_approval', 'waiting'].includes(status)
         ? '原任务正在执行；这条图文反馈会加入下一轮。'
       : bound && status === 'delivery_uncertain'
         ? '请先核对原 Codex 任务中的送达情况；新反馈会先保存。'
@@ -314,7 +314,7 @@ function updateSubmitLabel() {
     return;
   }
   const label = state.pendingSubmission ? '重试上一条消息'
-    : status === 'running' || status === 'awaiting_approval' ? '加入下一轮'
+    : ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
     : status === 'disconnected' || status === 'error' ? '保存并等待连接'
     : '发送到 Codex';
   ui.submit.querySelector('span:first-child').textContent = label;
@@ -323,7 +323,7 @@ function updateSubmitLabel() {
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
-  else if (status === 'running' || status === 'awaiting_approval') ui.caption.textContent = 'Codex 正在执行；这条图文消息会加入下一轮。';
+  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
   else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
   else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
 }
@@ -342,6 +342,7 @@ function renderWorkspace(workspace) {
   const statusText = {
     idle:'Codex 已连接，等待你的消息', running:'Codex 正在处理这一轮…',
     awaiting_approval:'Codex 需要你审批后继续',
+    waiting:'反馈已保存，等待 Codex 空闲后自动发送',
     disconnected:'Codex 连接已断开，正在尝试恢复',
     delivery_uncertain:'消息送达状态待核实，请勿重复创建反馈',
     error:'Codex 会话发生错误'
@@ -350,8 +351,8 @@ function renderWorkspace(workspace) {
   if (state.agent.error) ui.agentStatus.textContent += '：' + String(state.agent.error).slice(0, 240);
   ui.agentStatus.className = 'agent-status' + (status === 'running' ? ' running' : ['error','disconnected','delivery_uncertain'].includes(status) ? ' error' : '');
   ui.stop.classList.toggle('hidden', !['running','awaiting_approval'].includes(status));
-  ui.pill.textContent = ({idle:'Codex 已连接',running:'Codex 执行中',awaiting_approval:'等待审批',disconnected:'连接中断',delivery_uncertain:'送达待核实',error:'连接错误'})[status] || status;
-  ui.pill.className = 'session-pill ' + (status === 'running' ? 'running' : status === 'idle' ? 'open' : status === 'awaiting_approval' ? 'queued' : 'error');
+  ui.pill.textContent = ({idle:'Codex 已连接',running:'Codex 执行中',awaiting_approval:'等待审批',waiting:'等待自动重试',disconnected:'连接中断',delivery_uncertain:'送达待核实',error:'连接错误'})[status] || status;
+  ui.pill.className = 'session-pill ' + (status === 'running' ? 'running' : status === 'idle' ? 'open' : ['awaiting_approval', 'waiting'].includes(status) ? 'queued' : 'error');
   renderQueue();
   renderApprovals();
   updateSubmitLabel();
@@ -366,6 +367,7 @@ function renderExternalWorkspace(workspace) {
     idle:'已连接原 Codex 任务，可以发送图文反馈。',
     running:'原 Codex 任务正在处理视觉反馈。',
     awaiting_approval:'原 Codex 任务需要审批后继续。',
+    waiting:'反馈已保存，等待原 Codex 任务空闲或连接恢复后自动发送。',
     delivery_uncertain:'反馈送达状态待核实，请先查看原 Codex 任务。',
     disconnected:'暂时无法连接原 Codex 任务；反馈会先保存。',
     error:'原 Codex 任务连接或执行出错。'
@@ -381,10 +383,10 @@ function renderExternalWorkspace(workspace) {
   ui.agentStatus.className = 'agent-status' + (status === 'running' ? ' running'
     : ['error', 'disconnected', 'delivery_uncertain'].includes(status) ? ' error' : '');
   ui.pill.textContent = bound ? ({idle:'原任务已连接',running:'原任务执行中',awaiting_approval:'等待审批',
-    delivery_uncertain:'送达待核实',disconnected:'连接中断',error:'连接错误'})[status] || '连接原任务'
+    waiting:'等待自动重试',delivery_uncertain:'送达待核实',disconnected:'连接中断',error:'连接错误'})[status] || '连接原任务'
     : '等待 MCP 读取';
   ui.pill.className = 'session-pill ' + (status === 'running' ? 'running'
-    : status === 'awaiting_approval' ? 'queued'
+    : ['awaiting_approval', 'waiting'].includes(status) ? 'queued'
     : ['error', 'disconnected', 'delivery_uncertain'].includes(status) ? 'error' : 'open');
   ui.stop.classList.toggle('hidden', !bound || !['running', 'awaiting_approval'].includes(status));
   if (bound) {
@@ -420,20 +422,30 @@ function renderQueue({boundExternal=false}={}) {
   ui.queue.replaceChildren();
   const latest = state.queue.at(-1);
   for (const item of state.queue) {
-    if (!item || (item.status === 'completed' && (!boundExternal || item !== latest))) continue;
+    if (!item || ((item.status === 'completed' || item.status === 'discarded') && (!boundExternal || item !== latest))) continue;
+    const retryableFailed = item.status === 'failed' && !item.turn_id;
     const card = document.createElement('div');
-    card.className = 'queue-card';
+    card.className = 'queue-card' + (item.status === 'queued' && item.error ? ' retrying'
+      : item.status === 'delivery_uncertain' ? ' uncertain'
+      : item.status === 'failed' ? ' failed' : '');
     const title = document.createElement('strong');
-    title.textContent = ({queued:boundExternal ? '等待送入原任务' : '已加入下一轮',dispatching:'正在送达',running:'正在处理',
-      completed:'这一轮已完成',awaiting_mcp:'等待反馈通道读取',returned_to_mcp:'MCP 已读取反馈',
-      blocked_stale:'请确认旧场景反馈',delivery_uncertain:'送达待核实',failed:'发送失败'})[item.status] || '待处理消息';
+    title.textContent = ({queued:item.error ? '等待自动重试' : boundExternal ? '等待送入原任务' : '已加入下一轮',dispatching:'正在送达',running:'正在处理',
+      completed:'这一轮已完成',interrupted:'Codex 回合已中断',discarded:'这条反馈已舍弃',
+      awaiting_mcp:'等待反馈通道读取',returned_to_mcp:'MCP 已读取反馈',
+      blocked_stale:'请确认旧场景反馈',delivery_uncertain:item.quarantined_at ? '送达待核实 · 已隔离' : '送达待核实',
+      failed:retryableFailed ? '发送失败' : 'Codex 回合失败'})[item.status] || '待处理消息';
     const body = document.createElement('div');
     body.textContent = '针对场景版本 ' + (item.scene_revision ?? '—') + (item.status === 'blocked_stale'
       ? '，当前场景已有新版本。确认后仍按旧截图发送。'
+      : item.status === 'queued' && item.error ? '，反馈已保存；连接恢复或原任务空闲后会自动重试。'
       : boundExternal && item.status === 'queued' ? '，反馈已保存，等待原任务空闲后送入。'
       : boundExternal && item.status === 'running' ? '，图文反馈已送入原 Codex 任务。'
+      : retryableFailed ? '，反馈仍保存在工作台，可在问题解决后手动重试。'
+      : item.status === 'failed' ? '，反馈已送入原任务，但该回合执行失败；请检查原任务后再提交新的反馈。'
+      : item.status === 'interrupted' ? '，反馈已送入原任务，但回合中断；请在原任务中查看原因。'
+      : item.status === 'discarded' ? '，这条反馈不会再次发送。'
       : '');
-    if (item.status === 'failed' && item.error) body.textContent += '：' + String(item.error).slice(0, 240);
+    if (item.error && ['queued','failed'].includes(item.status)) body.textContent += ' 最近一次原因：' + String(item.error).slice(0, 240);
     card.append(title, body);
     if (item.status === 'blocked_stale' && item.feedback_id) {
       const actions = document.createElement('div');
@@ -465,10 +477,14 @@ function renderQueue({boundExternal=false}={}) {
     }
     if (item.status === 'delivery_uncertain' && item.feedback_id) {
       const warning = document.createElement('div');
-      warning.textContent = '发送途中连接中断。请先核对 Codex 任务，再选择重试或舍弃。';
+      warning.className = 'queue-warning';
+      warning.textContent = item.quarantined_at
+        ? '这条反馈的送达结果仍无法确认，已暂时隔离；新反馈可以继续发送。请先核对原 Codex 任务，确认没有收到这条反馈后再重试。'
+        : '这条反馈是否进入原 Codex 任务尚不确定；连接可用时工作台会尝试核对。请先查看原任务，确认没有收到后再重试。';
+      if (item.error) warning.textContent += ' 当前原因：' + String(item.error).slice(0, 240);
       const actions = document.createElement('div');
       actions.className = 'queue-actions';
-      for (const [retry,label] of [[true,'确认未送达，重试'],[false,'已处理，舍弃']]) {
+      for (const [retry,label] of [[true,'确认未收到，重试'],[false,'已处理，舍弃']]) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
@@ -482,6 +498,23 @@ function renderQueue({boundExternal=false}={}) {
         actions.append(button);
       }
       card.append(warning, actions);
+    }
+    if (retryableFailed && item.feedback_id) {
+      const actions = document.createElement('div');
+      actions.className = 'queue-actions';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.textContent = '重试这条反馈';
+      retry.addEventListener('click', async () => {
+        retry.disabled = true;
+        try {
+          await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{retry_failed:true}});
+          announce('已加入队列；连接恢复或原任务空闲后会发送。');
+          await refreshWorkspace();
+        } catch (error) { announce('重试失败：' + error.message, true); retry.disabled = false; }
+      });
+      actions.append(retry);
+      card.append(actions);
     }
     ui.queue.append(card);
   }

@@ -52,6 +52,6 @@
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <div id="text-editor" class="text-editor hidden"><input id="annotation-text" type="text" maxlength="200" placeholder="这处要怎么改？" aria-label="标注文字" /><button id="save-text" type="button">添加</button><button id="cancel-text" type="button" aria-label="取消">×</button></div>
-    <dialog id="help-dialog"><div class="dialog-head"><h2>怎么使用</h2><button id="close-help" class="icon-button" type="button" aria-label="关闭">×</button></div><p>左边是参考图，右边是当前 3D 场景。使用 1–7 切换工具。参考图可滚轮缩放，按住空格拖拽平移；选择「查看 / 选对象」时可拖动旋转场景、右键平移、滚轮缩放。</p><p>选择带相机位姿的参考图时，场景会切到对应拍摄机位。手动旋转后，可点「对齐参考视角」重新对齐；「叠图对比」方便检查轮廓。没有相机位姿的图片仍可手动对照。</p><p>在场景里点击「标注当前视角」，固定此刻的截图、视角、选中对象与版本。你可以在固定截图上画点、框、线、箭头、自由线或文字；新结果到来后旧标记仍对应原截图。</p><p>标记可以只出现在参考图上。需要表示两边对应时，给标记选择同一个编号即可。绑定原 Codex 任务后，反馈会送入该任务；使用普通 MCP 模式时，反馈先保存，待 MCP 工具读取后交回 Codex。页面会显示当前送达状态。</p></dialog>
+    <dialog id="help-dialog"><div class="dialog-head"><h2>怎么使用</h2><button id="close-help" class="icon-button" type="button" aria-label="关闭">×</button></div><p>左边是参考图，右边是当前 3D 场景。使用 1–7 切换工具。参考图可滚轮缩放，按住空格拖拽平移；选择「查看 / 选对象」时可拖动旋转场景、右键平移、滚轮缩放。</p><p>选择带相机位姿的参考图时，场景会切到对应拍摄机位。手动旋转后，可点「对齐参考视角」重新对齐；「叠图对比」方便检查轮廓。没有相机位姿的图片仍可手动对照。</p><p>在场景里点击「标注当前视角」，固定此刻的截图、视角、选中对象与版本。你可以在固定截图上画点、框、线、箭头、自由线或文字；新结果到来后旧标记仍对应原截图。</p><p>标记可以只出现在参考图上。需要表示两边对应时，给标记选择同一个编号即可。绑定原 Codex 任务后，反馈会送入该任务；使用普通 MCP 模式时，反馈先保存，待 MCP 工具读取后交回 Codex。页面会显示当前送达状态。</p><p>显示「等待自动重试」时无需重复点击发送。「送达待核实」表示系统无法判断原任务是否收到；先在原任务中核对，确认未收到后再重试。明确的发送失败可用该反馈卡片上的按钮重试。</p></dialog>
   </body>
 </html>

@@ -7,10 +7,14 @@ import base64
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from appserver_adapter import TurnBusyError
 from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
+from shared_thread_adapter import DeliveryNotReadyError, DeliveryRejectedError
+from shared_thread_bridge import SharedThreadNotIdle
 
 
 class WorkspaceGateway:
@@ -21,7 +25,15 @@ class WorkspaceGateway:
         self.external_review = external_review
         self._worker_lock = threading.Lock()
         self._worker_running = False
+        self._worker_thread: threading.Thread | None = None
         self._started = False
+        self._supervisor_lock = threading.Lock()
+        self._supervisor_stop = threading.Event()
+        self._supervisor_thread: threading.Thread | None = None
+        self._adapter_initialized = False
+
+    _RECONCILE_INTERVAL_SEC = 5.0
+    _UNCERTAIN_GRACE_SEC = 30.0
 
     def ensure(self, preferred_session_id: str | None = None) -> dict[str, Any]:
         workspace = self.store.ensure_workspace(self.project_dir, preferred_session_id=preferred_session_id)
@@ -57,6 +69,19 @@ class WorkspaceGateway:
             return
         if self.adapter is None:
             self.store.workspace_agent(status="disconnected", error="Codex App Server is not configured")
+            return
+        if self.external_review:
+            # A request that was waiting for an MCP call is still a durable
+            # browser submission when this service becomes directly bound.
+            with self.store.lock:
+                workspace = self.store.state["workspace"]
+                for item in workspace["queue"]:
+                    if item["status"] == "awaiting_mcp":
+                        item["status"] = "queued"
+                self.store._save()
+            self._supervise_once()
+            self._supervisor_thread = threading.Thread(target=self._supervisor_loop, daemon=True, name="workspace-supervisor")
+            self._supervisor_thread.start()
             return
         try:
             thread_id = self.adapter.start()
@@ -108,8 +133,197 @@ class WorkspaceGateway:
             self.store.workspace_event("disconnected", {"message": str(exc)[:500]})
 
     def close(self) -> None:
+        with self._worker_lock:
+            self._started = False
+            worker = self._worker_thread
+        self._supervisor_stop.set()
+        if self._supervisor_thread is not None and self._supervisor_thread is not threading.current_thread():
+            self._supervisor_thread.join(timeout=30)
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=30)
         if self.adapter is not None:
             self.adapter.close()
+
+    def _supervisor_loop(self) -> None:
+        while not self._supervisor_stop.wait(self._RECONCILE_INTERVAL_SEC):
+            try:
+                self._supervise_once()
+            except Exception:
+                logging.exception("Workspace supervisor failed; retrying")
+
+    def _supervise_once(self) -> None:
+        if not self._started or self.adapter is None or not self.external_review:
+            return
+        if not self._supervisor_lock.acquire(blocking=False):
+            return
+        try:
+            try:
+                if not self._adapter_initialized or not self.adapter.status().get("connected"):
+                    self.store.workspace_thread(self.adapter.start())
+                    self._adapter_initialized = True
+            except Exception as exc:
+                error = str(exc)[:500]
+                with self.store.lock:
+                    workspace = self.store.state["workspace"]
+                    active_id = workspace.get("active_feedback_id")
+                    if not active_id and workspace["agent"].get("status") != "disconnected":
+                        workspace["agent"] = {"status": "disconnected", "turn_id": None, "error": error}
+                        self.store._save()
+                        self.store.workspace_event("disconnected", {"message": error})
+                if active_id:
+                    self._mark_uncertain(active_id, "Cannot inspect the Codex task while disconnected; checking again.")
+                return
+            with self.store.lock:
+                workspace = self.store.state["workspace"]
+                active_id = workspace.get("active_feedback_id")
+                active = next((item for item in workspace["queue"] if item["feedback_id"] == active_id), None)
+                active = copy.deepcopy(active) if active else None
+                quarantined = [item["feedback_id"] for item in workspace["queue"] if item["status"] == "delivery_uncertain" and item.get("quarantined_at") and item["feedback_id"] != active_id]
+            if active:
+                self._reconcile_active(active)
+            elif active_id:
+                with self.store.lock:
+                    if self.store.state["workspace"].get("active_feedback_id") == active_id:
+                        self.store.state["workspace"]["active_feedback_id"] = None
+                        self.store._save()
+            for feedback_id in quarantined:
+                self._reconcile_quarantined(feedback_id)
+            with self.store.lock:
+                workspace = self.store.state["workspace"]
+                if not workspace.get("active_feedback_id"):
+                    pending = any(item["status"] == "queued" for item in workspace["queue"])
+                    if workspace["agent"].get("status") == "disconnected" or (workspace["agent"].get("status") == "waiting" and not pending):
+                        workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                        self.store._save()
+                else:
+                    pending = False
+            if pending:
+                self.wake()
+        finally:
+            self._supervisor_lock.release()
+
+    def _matching_turn(self, feedback_id: str, turn_id: str | None) -> tuple[dict[str, Any] | None, bool]:
+        """Return an exact saved turn, and whether multiple deliveries exist."""
+        if hasattr(self.adapter, "lookup_feedback"):
+            matches = self.adapter.lookup_feedback(feedback_id)
+            if len(matches) > 1:
+                return None, True
+            if matches:
+                return matches[0], False
+        if turn_id and hasattr(self.adapter, "lookup_turn"):
+            return self.adapter.lookup_turn(turn_id), False
+        return None, False
+
+    def _apply_reconciled_turn(self, feedback_id: str, turn: dict[str, Any]) -> None:
+        turn_id = turn.get("id")
+        outcome = turn.get("status")
+        if not isinstance(turn_id, str) or outcome not in {"inProgress", "completed", "failed", "interrupted"}:
+            return
+        terminal = outcome != "inProgress"
+        with self.store.lock:
+            workspace = self.store.state["workspace"]
+            item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == feedback_id), None)
+            if item is None or item["status"] == "discarded":
+                return
+            if not terminal and workspace.get("active_feedback_id") not in {None, feedback_id}:
+                return
+            target_status = "running" if not terminal else outcome
+            if item["status"] == target_status and item.get("turn_id") == turn_id:
+                return
+            item["status"] = target_status
+            item["turn_id"] = turn_id
+            item["error"] = None if outcome == "completed" else item.get("error")
+            item.pop("quarantined_at", None)
+            item.pop("uncertain_since", None)
+            if terminal:
+                if workspace.get("active_feedback_id") == feedback_id:
+                    workspace["active_feedback_id"] = None
+                    workspace["approvals"] = []
+                    workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+            else:
+                workspace["active_feedback_id"] = feedback_id
+                workspace["agent"] = {"status": "running", "turn_id": turn_id, "error": None}
+            self.store._save()
+            self.store.workspace_event("turn_reconciled", {"feedback_id": feedback_id, "turn_id": turn_id, "status": item["status"]})
+        if terminal and hasattr(self.adapter, "release_uncertain"):
+            try:
+                self.adapter.release_uncertain()
+            except Exception:
+                logging.exception("Could not reset reconciled adapter state")
+
+    def _reconcile_active(self, item: dict[str, Any]) -> None:
+        feedback_id = item["feedback_id"]
+        if item["status"] == "dispatching":
+            with self._worker_lock:
+                if self._worker_running:
+                    return
+        try:
+            turn, duplicate = self._matching_turn(feedback_id, item.get("turn_id"))
+            if turn and not duplicate:
+                self._apply_reconciled_turn(feedback_id, turn)
+                return
+            if not duplicate and item["status"] == "running" and self.adapter.status().get("turn_state") in {"active", "running"}:
+                return
+            runtime_status = self.adapter.inspect_thread_status() if hasattr(self.adapter, "inspect_thread_status") else self.adapter.refresh().get("turn_state")
+        except Exception:
+            logging.exception("Could not reconcile feedback %s", feedback_id)
+            return
+        self._mark_uncertain(feedback_id, "Multiple Codex turns carry this feedback ID; inspect the task before retrying." if duplicate else "Delivery could not be confirmed in the Codex task; checking again.")
+        with self.store.lock:
+            current = next((entry for entry in self.store.state["workspace"]["queue"] if entry["feedback_id"] == feedback_id), None)
+            since = current.get("uncertain_since") if current else None
+        if runtime_status != "idle" or not since:
+            return
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
+        except (TypeError, ValueError):
+            age = 0
+        if age < self._UNCERTAIN_GRACE_SEC:
+            return
+        with self.store.lock:
+            workspace = self.store.state["workspace"]
+            current = next((entry for entry in workspace["queue"] if entry["feedback_id"] == feedback_id), None)
+            if workspace.get("active_feedback_id") != feedback_id or current is None or current["status"] != "delivery_uncertain":
+                return
+            current["quarantined_at"] = _now()
+            workspace["active_feedback_id"] = None
+            workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+            self.store._save()
+            self.store.workspace_event("uncertain_feedback_quarantined", {"feedback_id": feedback_id})
+        if hasattr(self.adapter, "release_uncertain"):
+            try:
+                self.adapter.release_uncertain()
+            except Exception:
+                logging.exception("Could not release quarantined delivery")
+
+    def _reconcile_quarantined(self, feedback_id: str) -> None:
+        if not hasattr(self.adapter, "lookup_feedback"):
+            return
+        try:
+            turn, duplicate = self._matching_turn(feedback_id, None)
+        except Exception:
+            logging.exception("Could not inspect quarantined feedback %s", feedback_id)
+            return
+        if duplicate:
+            self._mark_uncertain(feedback_id, "Multiple Codex turns carry this feedback ID; inspect the task before retrying.")
+        elif turn:
+            self._apply_reconciled_turn(feedback_id, turn)
+
+    def _mark_uncertain(self, feedback_id: str, message: str) -> None:
+        with self.store.lock:
+            workspace = self.store.state["workspace"]
+            item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == feedback_id), None)
+            if item is None or item["status"] in {"completed", "failed", "interrupted", "discarded"}:
+                return
+            changed = item["status"] != "delivery_uncertain"
+            item["status"] = "delivery_uncertain"
+            item["error"] = message
+            item.setdefault("uncertain_since", _now())
+            if workspace.get("active_feedback_id") == feedback_id:
+                workspace["agent"] = {"status": "delivery_uncertain", "turn_id": item.get("turn_id"), "error": message}
+            self.store._save()
+            if changed:
+                self.store.workspace_event("delivery_uncertain", {"feedback_id": feedback_id, "message": message})
 
     def submit(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         workspace = self.ensure(preferred_session_id=session_id)
@@ -300,15 +514,35 @@ class WorkspaceGateway:
             return result
 
     def confirm_queue(self, feedback_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        if payload.get("retry_uncertain") is True:
+        retry_requested = payload.get("retry_uncertain") is True or payload.get("retry_failed") is True
+        if retry_requested:
             if self.adapter is None:
                 raise APIError(503, "Codex App Server is unavailable")
+            with self.store.lock:
+                workspace = self.store.state["workspace"]
+                item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == feedback_id), None)
+                if item is None:
+                    raise APIError(404, "queued feedback not found")
+                if item["status"] not in {"delivery_uncertain", "failed"}:
+                    raise APIError(409, "feedback is not awaiting retry")
+                if workspace.get("active_feedback_id") not in {None, feedback_id}:
+                    raise APIError(409, "another feedback is active")
             try:
-                status = self.adapter.refresh()
+                turn, duplicate = self._matching_turn(feedback_id, item.get("turn_id"))
+                if duplicate:
+                    raise APIError(409, "multiple Codex turns already contain this feedback ID")
+                if turn:
+                    self._apply_reconciled_turn(feedback_id, turn)
+                    raise APIError(409, "feedback already reached the Codex task; its status was reconciled")
+                runtime_status = self.adapter.inspect_thread_status() if hasattr(self.adapter, "inspect_thread_status") else self.adapter.refresh().get("turn_state")
+                if runtime_status != "idle":
+                    raise APIError(409, "Codex task is active; retry after it becomes idle")
+                if hasattr(self.adapter, "release_uncertain"):
+                    self.adapter.release_uncertain()
+            except APIError:
+                raise
             except Exception as exc:
                 raise APIError(503, f"cannot reconcile Codex thread before retry: {exc}") from exc
-            if status.get("turn_state") != "idle":
-                raise APIError(409, "Codex turn is still active or uncertain; inspect the thread before retrying")
         with self.store.lock:
             workspace = self.store.state["workspace"]
             item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == feedback_id), None)
@@ -327,16 +561,27 @@ class WorkspaceGateway:
             elif item["status"] == "delivery_uncertain":
                 if payload.get("retry_uncertain") is True:
                     item["status"] = "queued"
-                    workspace["active_feedback_id"] = None
-                    workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                    item["error"] = None
+                    item.pop("quarantined_at", None)
+                    item.pop("uncertain_since", None)
+                    if workspace.get("active_feedback_id") == feedback_id:
+                        workspace["active_feedback_id"] = None
+                        workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
                     kind = "uncertain_feedback_retry_requested"
                 elif payload.get("retry_uncertain") is False:
                     item["status"] = "discarded"
-                    workspace["active_feedback_id"] = None
-                    workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                    if workspace.get("active_feedback_id") == feedback_id:
+                        workspace["active_feedback_id"] = None
+                        workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
                     kind = "uncertain_feedback_discarded"
                 else:
                     raise APIError(400, "retry_uncertain must be true or false")
+            elif item["status"] == "failed" and payload.get("retry_failed") is True:
+                item["status"] = "queued"
+                item["error"] = None
+                item.pop("uncertain_since", None)
+                item.pop("quarantined_at", None)
+                kind = "failed_feedback_retry_requested"
             else:
                 raise APIError(409, "feedback is not awaiting confirmation")
             self.store._save()
@@ -352,11 +597,18 @@ class WorkspaceGateway:
             if self._worker_running:
                 return
             self._worker_running = True
-        threading.Thread(target=self._dispatch, daemon=True, name="workspace-dispatch").start()
+            self._worker_thread = threading.Thread(target=self._dispatch, daemon=True, name="workspace-dispatch")
+            self._worker_thread.start()
 
     def _dispatch(self) -> None:
+        send_attempted = False
+        defer_retry = False
         try:
             if not self.adapter.status().get("connected"):
+                if self.external_review:
+                    # The supervisor reconnects periodically. Do not claim a
+                    # queued packet while the transport is unavailable.
+                    return
                 try:
                     thread_id = self.adapter.start()
                     self.store.workspace_thread(thread_id)
@@ -385,6 +637,7 @@ class WorkspaceGateway:
                     self.store.workspace_event("stale_feedback_confirmation_required", {"feedback_id": item["feedback_id"], "captured_revision": item["scene_revision"], "current_revision": revision})
                     return
                 item["status"] = "dispatching"
+                item["error"] = None
                 workspace["active_feedback_id"] = item["feedback_id"]
                 workspace["agent"] = {"status": "running", "turn_id": None, "error": None}
                 self.store._save()
@@ -393,6 +646,7 @@ class WorkspaceGateway:
                 if item["scene_revision"] != revision:
                     feedback["submitted_from_stale_snapshot"] = True
             text, image_paths = self._turn_input(feedback)
+            send_attempted = True
             response = self.adapter.start_turn(text, image_paths, message_id=feedback["feedback_id"])
             with self.store.lock:
                 workspace = self.store.state["workspace"]
@@ -400,31 +654,39 @@ class WorkspaceGateway:
                 if current["status"] == "dispatching":
                     current["status"] = "running"
                     current["turn_id"] = response.get("turn_id")
+                    current["error"] = None
+                    current.pop("uncertain_since", None)
                     workspace["agent"] = {"status": "running", "turn_id": response.get("turn_id"), "error": None}
                     self.store._save()
                     self.store.workspace_event("turn_started", {"feedback_id": feedback["feedback_id"], "turn_id": response.get("turn_id")})
         except Exception as exc:
             error = str(exc)[:500]
-            uncertain = exc.__class__.__name__ in {"UncertainDeliveryError", "TurnBusyError"}
+            not_ready = isinstance(exc, (DeliveryNotReadyError, TurnBusyError, SharedThreadNotIdle))
+            rejected = isinstance(exc, DeliveryRejectedError)
+            uncertain = not not_ready and send_attempted and not rejected
+            defer_retry = not_ready
             with self.store.lock:
                 workspace = self.store.state["workspace"]
                 active_id = workspace.get("active_feedback_id")
                 item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == active_id), None)
                 if item:
-                    item["status"] = "delivery_uncertain" if uncertain else "failed"
+                    item["status"] = "queued" if not_ready else "delivery_uncertain" if uncertain else "failed"
                     item["error"] = error
+                    if uncertain:
+                        item.setdefault("uncertain_since", _now())
                 workspace["active_feedback_id"] = active_id if uncertain else None
-                workspace["agent"] = {"status": "delivery_uncertain" if uncertain else "error", "turn_id": None, "error": error}
+                workspace["agent"] = {"status": "delivery_uncertain" if uncertain else "waiting" if not_ready else "error", "turn_id": None, "error": error}
                 self.store._save()
-                self.store.workspace_event("delivery_uncertain" if uncertain else "turn_failed", {"feedback_id": active_id, "message": error})
-            logging.exception("Could not deliver workspace feedback")
+                self.store.workspace_event("delivery_uncertain" if uncertain else "delivery_waiting" if not_ready else "turn_failed", {"feedback_id": active_id, "message": error})
+            if not not_ready:
+                logging.exception("Could not deliver workspace feedback")
         finally:
             with self._worker_lock:
                 self._worker_running = False
             with self.store.lock:
                 workspace = self.store.state.get("workspace", {})
                 pending = not workspace.get("active_feedback_id") and any(item["status"] == "queued" for item in workspace.get("queue", []))
-            if pending and self.adapter.status().get("connected"):
+            if pending and not defer_retry and self.adapter.status().get("connected"):
                 self.wake()
 
     def _turn_input(self, feedback: dict[str, Any]) -> tuple[str, list[str]]:
@@ -517,8 +779,8 @@ class WorkspaceGateway:
                     active_id = workspace.get("active_feedback_id")
                     item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == active_id), None)
                     known_turn_id = item.get("turn_id") if item else None
-                    if known_turn_id and turn_id and known_turn_id != turn_id:
-                        self.store.workspace_event("codex_event", {"method": method, "turn_id": turn_id, "status": outcome, "message": "completion did not match the active turn"})
+                    if not known_turn_id or not turn_id or known_turn_id != turn_id:
+                        self.store.workspace_event("codex_event", {"method": method, "turn_id": turn_id, "status": outcome, "message": "completion did not match a known active turn"})
                         return
                     if item:
                         item["status"] = outcome if outcome in {"completed", "failed", "interrupted"} else "failed"
@@ -549,6 +811,7 @@ class WorkspaceGateway:
                         if item and item["status"] in {"dispatching", "running"}:
                             item["status"] = "delivery_uncertain"
                             item["error"] = "Codex App Server disconnected during a turn; inspect the thread before retrying."
+                            item.setdefault("uncertain_since", _now())
                         workspace["agent"] = {"status": "delivery_uncertain", "turn_id": item.get("turn_id") if item else None, "error": item.get("error") if item else None}
                     else:
                         workspace["agent"] = {"status": "disconnected", "turn_id": None, "error": "Codex App Server disconnected"}

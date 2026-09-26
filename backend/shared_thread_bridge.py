@@ -41,6 +41,15 @@ class UncertainTurnDelivery(SharedThreadBridgeError):
     """turn/start may have reached Codex; inspect history before any retry."""
 
 
+class SharedThreadRPCRejected(SharedThreadBridgeError):
+    """App Server answered a JSON-RPC request with an explicit error."""
+
+    def __init__(self, method: str, error: Any) -> None:
+        self.method = method
+        self.error = error
+        super().__init__(f"{method} failed: {error}")
+
+
 def _private_socket_candidates(socket_dir: Path | None = None) -> list[Path]:
     """Find sockets in the current user's private Codex daemon directory."""
     if not hasattr(os, "getuid"):
@@ -205,7 +214,7 @@ class SharedThreadBridge:
             message = self._receive()
             if message.get("id") == request_id:
                 if "error" in message:
-                    raise SharedThreadBridgeError(f"{method} failed: {message['error']}")
+                    raise SharedThreadRPCRejected(method, message["error"])
                 result = message.get("result")
                 if not isinstance(result, dict):
                     raise SharedThreadBridgeError(f"{method} returned an invalid response")
@@ -264,6 +273,21 @@ class SharedThreadBridge:
             raise SharedThreadNotIdle(f"Codex task status is {status!r}")
         try:
             result = self._rpc("turn/start", params)
+        except SharedThreadRPCRejected as exc:
+            # An explicit JSON-RPC rejection means this request was not
+            # accepted.  A competing client may have started a turn after
+            # our idle check; that case can be retried when it becomes idle.
+            error_text = str(exc.error).lower()
+            busy_error = any(phrase in error_text for phrase in (
+                "turn already", "already in progress", "already active", "thread busy", "turn busy",
+            ))
+            try:
+                status_after = self.read_thread().get("status", {})
+            except SharedThreadBridgeError:
+                status_after = {}
+            if busy_error or status_after.get("type") == "active":
+                raise SharedThreadNotIdle("another Codex turn started before feedback delivery") from exc
+            raise
         except SharedThreadBridgeError as exc:
             # The socket may have dropped after the request was sent.  There
             # is no server-side deduplication guarantee for turn/start.

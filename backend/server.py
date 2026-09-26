@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hmac
 from http.cookies import CookieError, SimpleCookie
 import ipaddress
@@ -15,6 +16,11 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - this server requires Unix file locking
+    fcntl = None
 
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
@@ -31,7 +37,32 @@ WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 
 
-def make_server(
+class _DataDirLock:
+    """Keep a second server from overwriting this data directory's state."""
+
+    def __init__(self, data_dir: str | Path):
+        if fcntl is None:
+            raise RuntimeError("scene-feedback server requires Unix fcntl file locking")
+        directory = Path(data_dir).expanduser().resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        self.path = directory / ".scene-feedback-server.lock"
+        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(self._fd)
+            self._fd = None
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise RuntimeError(f"another scene-feedback server is already using data directory {directory}") from exc
+            raise
+
+    def close(self) -> None:
+        if self._fd is not None:
+            fd, self._fd = self._fd, None
+            os.close(fd)
+
+
+def _make_server_unlocked(
     *,
     port: int = 18765,
     data_dir: str | Path = DEFAULT_DATA_DIR,
@@ -397,7 +428,61 @@ def make_server(
     server.scene_store = store
     server.browser_url = lambda session_id: browser_url(session_id, server.server_port)
     if enable_codex or external_review:
-        gateway.start()
+        try:
+            gateway.start()
+        except BaseException:
+            gateway.close()
+            server.server_close()
+            raise
+    return server
+
+
+def make_server(
+    *,
+    port: int = 18765,
+    data_dir: str | Path = DEFAULT_DATA_DIR,
+    web_dir: str | Path = DEFAULT_WEB_DIR,
+    project_dir: str | Path | None = None,
+    model: str | None = None,
+    enable_codex: bool = False,
+    external_review: bool = False,
+    shared_thread_id: str | None = None,
+    adapter: object | None = None,
+    listen_host: str = "127.0.0.1",
+    public_base_url: str | None = None,
+) -> ThreadingHTTPServer:
+    """Create one server for a data directory, releasing its lock on close."""
+    data_lock = _DataDirLock(data_dir)
+    try:
+        server = _make_server_unlocked(
+            port=port,
+            data_dir=data_dir,
+            web_dir=web_dir,
+            project_dir=project_dir,
+            model=model,
+            enable_codex=enable_codex,
+            external_review=external_review,
+            shared_thread_id=shared_thread_id,
+            adapter=adapter,
+            listen_host=listen_host,
+            public_base_url=public_base_url,
+        )
+    except BaseException:
+        data_lock.close()
+        raise
+
+    original_close = server.server_close
+
+    def close_with_data_lock() -> None:
+        try:
+            server.workspace_gateway.close()
+        finally:
+            try:
+                original_close()
+            finally:
+                data_lock.close()
+
+    server.server_close = close_with_data_lock
     return server
 
 
@@ -435,7 +520,6 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        server.workspace_gateway.close()
         server.server_close()
 
 

@@ -15,8 +15,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from appserver_adapter import UncertainDeliveryError  # noqa: E402
 from core import APIError, SceneStore  # noqa: E402
 from gateway import WorkspaceGateway  # noqa: E402
-from shared_thread_adapter import SharedDesktopAdapter  # noqa: E402
-from shared_thread_bridge import SharedThreadTimeout, UncertainTurnDelivery  # noqa: E402
+from shared_thread_adapter import (  # noqa: E402
+    DeliveryNotReadyError,
+    DeliveryRejectedError,
+    SharedDesktopAdapter,
+)
+from shared_thread_bridge import (  # noqa: E402
+    SharedThreadBridgeError,
+    SharedThreadNotIdle,
+    SharedThreadRPCRejected,
+    SharedThreadTimeout,
+    UncertainTurnDelivery,
+)
 
 
 THREAD_ID = "01a0d906-146e-7762-a1f9-49baeda8e270"
@@ -116,6 +126,80 @@ class FakeBoundAdapter:
 
 
 class SharedDesktopAdapterTests(unittest.TestCase):
+    def test_busy_or_unavailable_preflight_returns_promptly_without_sending(self) -> None:
+        for error in (SharedThreadNotIdle("task busy"), SharedThreadBridgeError("daemon unavailable")):
+            with self.subTest(error=type(error).__name__):
+                adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+                with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", side_effect=error) as connect:
+                    started_at = time.monotonic()
+                    with self.assertRaises(DeliveryNotReadyError):
+                        adapter.start_turn("feedback", [], message_id="feedback-1")
+                    self.assertLess(time.monotonic() - started_at, 0.5)
+                    self.assertEqual(connect.call_count, 1)
+                self.assertEqual(adapter.status()["turn_state"], "idle")
+                adapter.close()
+
+    def test_explicit_rejection_is_not_reported_as_uncertain(self) -> None:
+        bridge = FakeBridge()
+        def reject(_text, _images, *, client_user_message_id):
+            raise SharedThreadRPCRejected("turn/start", {"message": "invalid input"})
+        bridge.start_turn = reject
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge):
+            adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+            with self.assertRaises(DeliveryRejectedError):
+                adapter.start_turn("feedback", [], message_id="feedback-1")
+            self.assertEqual(adapter.status()["turn_state"], "idle")
+            self.assertTrue(bridge.closed)
+            adapter.close()
+
+    def test_competing_turn_after_subscription_is_not_ready(self) -> None:
+        bridge = FakeBridge()
+        def busy(_text, _images, *, client_user_message_id):
+            raise SharedThreadNotIdle("another turn started")
+        bridge.start_turn = busy
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge):
+            adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+            with self.assertRaises(DeliveryNotReadyError):
+                adapter.start_turn("feedback", [], message_id="feedback-1")
+            self.assertEqual(adapter.status()["turn_state"], "idle")
+            self.assertTrue(bridge.closed)
+            adapter.close()
+
+    def test_pre_send_rpc_rejection_is_not_ready(self) -> None:
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", side_effect=SharedThreadRPCRejected("thread/resume", {"message": "unavailable"})):
+            adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+            with self.assertRaises(DeliveryNotReadyError):
+                adapter.start_turn("feedback", [], message_id="feedback-1")
+            self.assertEqual(adapter.status()["turn_state"], "idle")
+            adapter.close()
+
+    def test_lookup_feedback_matches_exact_client_id_and_returns_all_turns(self) -> None:
+        daemon = {"status": "idle", "turns": [
+            {"id": "turn-1", "status": "completed", "items": [{"type": "userMessage", "clientId": "feedback-1", "content": []}]},
+            {"id": "turn-2", "status": "completed", "items": [{"type": "userMessage", "clientId": "other", "content": [{"type": "text", "text": "feedback-1"}]}]},
+            {"id": "turn-3", "status": "failed", "items": [{"type": "userMessage", "clientId": "feedback-1", "content": []}]},
+        ]}
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", side_effect=lambda *_args, **_kwargs: FakeBridge(daemon=daemon)):
+            adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+            self.assertEqual([turn["id"] for turn in adapter.lookup_feedback("feedback-1")], ["turn-1", "turn-3"])
+            self.assertEqual(adapter.lookup_feedback("missing"), [])
+            self.assertEqual(adapter.inspect_thread_status(), "idle")
+            daemon["status"] = "active"
+            self.assertEqual(adapter.inspect_thread_status(), "active")
+            adapter.close()
+
+    def test_release_uncertain_requires_no_live_turn_connection(self) -> None:
+        bridge = FakeBridge(uncertain=True)
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge):
+            adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+            with self.assertRaises(UncertainDeliveryError):
+                adapter.start_turn("feedback", [], message_id="feedback-1")
+            self.assertEqual(adapter.status()["turn_state"], "unknown")
+            self.assertEqual(adapter.refresh()["turn_state"], "unknown")
+            adapter.release_uncertain()
+            self.assertEqual(adapter.status()["turn_state"], "idle")
+            adapter.close()
+
     def test_silent_socket_reconciles_only_the_exact_completed_turn(self) -> None:
         daemon = {"status": "idle", "turns": []}
         bridges: list[FakeBridge] = []
@@ -165,8 +249,12 @@ class SharedDesktopAdapterTests(unittest.TestCase):
             active.incoming.put({"id": 99, "method": "item/commandExecution/requestApproval", "params": {"threadId": THREAD_ID, "turnId": "turn-1", "command": "echo inspect"}})
             wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
             self.assertEqual(events[-1]["method"], "adapter/request_pending")
-            adapter.respond_to_request(99, {"decision": "decline"})
-            self.assertEqual(active.responses, [(99, {"decision": "decline"})])
+            active.incoming.put({"method": "serverRequest/resolved", "params": {"threadId": THREAD_ID, "requestId": 99}})
+            wait_for(lambda: adapter.status()["pending_requests"] == [])
+            active.incoming.put({"id": 100, "method": "item/commandExecution/requestApproval", "params": {"threadId": THREAD_ID, "turnId": "turn-1", "command": "echo inspect"}})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
+            adapter.respond_to_request(100, {"decision": "decline"})
+            self.assertEqual(active.responses, [(100, {"decision": "decline"})])
             active.incoming.put({"method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": "turn-1", "status": "completed"}}})
             wait_for(lambda: adapter.status()["turn_state"] == "idle" and active.closed)
             self.assertTrue(any(event["method"] == "turn/completed" for event in events))

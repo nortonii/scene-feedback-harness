@@ -464,6 +464,7 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(gateway.state()["agent"]["status"], "delivery_uncertain")
             gateway.confirm_queue(packet["feedback_id"], {"retry_uncertain": True})
             self.wait_for(lambda: len(adapter.calls) == 2)
+            gateway.close()
 
     def test_idle_disconnect_reconnects_to_the_same_thread_before_next_submission(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -480,6 +481,7 @@ class GatewayTests(unittest.TestCase):
             self.wait_for(lambda: len(adapter.calls) == 1)
             self.assertEqual(adapter.starts, 2)
             self.assertEqual(gateway.state()["thread_id"], "thread-test-persistent")
+            gateway.close()
 
 
 class HTTPTests(unittest.TestCase):
