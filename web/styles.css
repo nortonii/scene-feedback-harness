@@ -95,6 +95,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .thumb.active { border-color: #efb779; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; }
 .thumb .thumb-count { position: absolute; right: 1px; bottom: 1px; border-radius: 3px; padding: 1px 4px; color: #fff; background: #b97642; font-size: 9px; }
+.thumb .thumb-camera { position: absolute; left: 1px; bottom: 1px; border-radius: 3px; padding: 1px 3px; color: #d7f3e8; background: #29604f; font-size: 9px; font-weight: 700; }
 .scene-stage { background: radial-gradient(circle at 50% 40%, #293b46 0, #1b2933 58%, #111d26 100%); }
 .viewport { position: absolute; inset: 0; }
 .viewport canvas { display: block; width: 100%; height: 100%; outline: none; }
@@ -105,6 +106,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .scene-stage .stage-hint { z-index: 5; }
 .new-scene-badge { position: absolute; top: 11px; right: 12px; z-index: 6; max-width: 65%; padding: 7px 9px; border-radius: 5px; background: #3c3327ee; color: #f4d4a7; border: 1px solid #a57a48; font-size: 10px; line-height: 1.4; }
 .emphasis-button { border-color: #ad835b; color: #ffcea3; }
+.align-button { border-color: #558579; color: #c4f1de; }
+.align-button.aligned { border-color: #65b696; background: #235243; color: #e2fff0; }
 .selected-chip { position: absolute; top: 11px; left: 12px; z-index: 5; color: #e7f9f7; background: #1d4450dc; border: 1px solid #6fa8b0; border-radius: 5px; font-size: 10px; padding: 6px 8px; pointer-events: none; max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compare-row { flex: none; min-height: 77px; padding: 9px 12px; display: flex; align-content: center; align-items: center; flex-wrap: wrap; gap: 7px 10px; color: #b9c8ce; background: #1c2932; border-top: 1px solid #354550; font-size: 10px; }
 .check-label, .opacity-control { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }

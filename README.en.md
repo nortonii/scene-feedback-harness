@@ -33,7 +33,13 @@ This interface helps people point out problems. It does not define a reconstruct
 - Sending saves an immutable feedback packet: your exact words, original and annotated reference images, clean and annotated scene screenshots, selected nodes, camera, and scene revision. Marks are your hints; the original image is kept separately.
 - New feedback submitted while Codex is running joins a queue for the next turn. If the scene changes while feedback is queued, the page first asks you to confirm feedback made against the old revision. Approval requests and stop actions are also handled on the page. Your project, thread, and drafts remain available after refreshing the page.
 
-Scene input currently uses a self-contained `.glb` file. Publishing requires geometry and texture resources to be embedded in the GLB's BIN chunk. Both external URIs and data URIs are rejected: even though a data URI can be self-contained, this version accepts only BIN-embedded resources. You can submit a reference image without an initial scene. Overlaying a reference image is for visual comparison only; it does not automatically align cameras.
+Scene input currently uses a self-contained `.glb` file. Publishing requires geometry and texture resources to be embedded in the GLB's BIN chunk. Both external URIs and data URIs are rejected: even though a data URI can be self-contained, this version accepts only BIN-embedded resources. You can submit a reference image without an initial scene.
+
+## Align to a reference camera
+
+Selecting a reference with camera metadata automatically moves the 3D view to its capture pose. After orbiting manually, click `对齐参考视角` (“Align to reference view”) to return to that camera, then use the overlay to compare outlines. When an undistorted copy is supplied, the overlay uses it to match the pinhole camera projection; the original reference remains separate for viewing and feedback. References without calibration can still be compared manually. Approximate intrinsics can leave residual alignment error near the image edges.
+
+Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the GLB world) and pixel-based `intrinsics` (`width`, `height`, `fx`, `fy`, `cx`, `cy`). Attach `camera` and optional `alignment_image_data_url` to an existing image by its `reference_id` through the protected `POST /api/workspace/reference-cameras` endpoint. A `reference_cameras.json` manifest in the private workbench data directory matches camera metadata by filename prefix on future imports ([example](examples/reference_cameras.example.json)); send `{"apply_manifest":true}` to the same endpoint to apply it to existing images. Camera poses and the published GLB must use the same world coordinates.
 
 ## Quick start: room and cabinet
 

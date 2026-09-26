@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "name_prefix": "camera_A_",
+      "camera": {
+        "camera_to_world": [
+          [1, 0, 0, 0],
+          [0, 1, 0, 0],
+          [0, 0, 1, 2],
+          [0, 0, 0, 1]
+        ],
+        "intrinsics": {
+          "width": 1920,
+          "height": 1080,
+          "fx": 1200,
+          "fy": 1200,
+          "cx": 960,
+          "cy": 540
+        },
+        "calibration_status": "example values; replace with this camera's real calibration"
+      }
+    }
+  ]
+}

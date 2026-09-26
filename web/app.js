@@ -15,6 +15,7 @@ const ui = {
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
+  alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
   compareImage:id('compare-image'), compareEnabled:id('compare-enabled'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
@@ -37,6 +38,8 @@ const state = {
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
+  alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
+  restoredCameraSignature:null,
   annotations:[], mode:'select', groupId:'', drag:null, textPending:null,
   snapshot:null, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
   referencePanning:null, spacePan:false,
@@ -92,6 +95,7 @@ const pointer = new THREE.Vector2();
 const gltfLoader = new GLTFLoader();
 let selectionHelper = null;
 let pointerDown = null;
+let orbitStart = null;
 
 function announce(message, error=false) {
   clearTimeout(state.toastTimer);
@@ -133,7 +137,10 @@ function saveDraft() {
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
-      groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target)},
+      groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
+        up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
+        alignmentExact:state.alignmentExact,
+        referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
       snapshot:state.snapshot, sceneView:state.sceneView,
       referenceZoom:state.referenceZoom, referencePan:state.referencePan,
       eventCursor:state.eventCursor
@@ -165,8 +172,14 @@ function restoreDraft() {
     ui.note.value = typeof draft.note === 'string' ? draft.note : '';
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
       camera.position.set(...draft.camera.position);
+      if (draft.camera.up?.length === 3) camera.up.set(...draft.camera.up);
+      if (Number.isFinite(draft.camera.fov) && draft.camera.fov > 1 && draft.camera.fov < 179) camera.fov = draft.camera.fov;
       controls.target.set(...draft.camera.target);
       controls.update();
+      state.alignedReferenceId = typeof draft.camera.alignedReferenceId === 'string' ? draft.camera.alignedReferenceId : null;
+      state.alignmentExact = !!draft.camera.alignmentExact;
+      state.restoredCameraForReference = !!state.alignedReferenceId;
+      state.restoredCameraSignature = draft.camera.referenceCameraSignature || null;
       state.firstFrame = false;
     }
   } catch { /* Ignore a stale or corrupt local draft. */ }
@@ -977,8 +990,109 @@ function nodeReference(objectId, hitObject) {
   if (chosen.name?.trim()) reference.node_name = chosen.name.trim().slice(0, 160);
   return reference;
 }
+function referenceCamera(ref) {
+  const raw = ref?.camera;
+  const intrinsic = raw?.intrinsics || raw;
+  const matrix = raw?.camera_to_world;
+  if (!Array.isArray(matrix) || matrix.length !== 4 ||
+      matrix.some((row) => !Array.isArray(row) || row.length !== 4 || row.some((n) => typeof n !== 'number' || !Number.isFinite(n)))) return null;
+  if (!intrinsic || !['width','height','fx','fy','cx','cy'].every((key) =>
+      typeof intrinsic[key] === 'number' && Number.isFinite(intrinsic[key]))) return null;
+  if (intrinsic.width <= 0 || intrinsic.height <= 0 || intrinsic.fx <= 0 || intrinsic.fy <= 0 ||
+      Math.abs(matrix[3][0]) > 1e-5 || Math.abs(matrix[3][1]) > 1e-5 ||
+      Math.abs(matrix[3][2]) > 1e-5 || Math.abs(matrix[3][3] - 1) > 1e-5) return null;
+  return {raw, intrinsic, matrix};
+}
+function updateAlignmentStatus() {
+  const ref = activeReference();
+  const pose = referenceCamera(ref);
+  ui.alignReference.disabled = !pose;
+  ui.alignReference.classList.toggle('aligned', !!pose && state.alignedReferenceId === ref?.id && state.alignmentExact);
+  if (!ref) {
+    ui.alignReference.textContent = '对齐参考视角';
+    ui.alignReference.title = '请先选择参考图';
+    ui.alignmentStatus.textContent = '选择带相机位姿的参考图，可让场景自动切换到同一视角。';
+    return;
+  }
+  if (!pose) {
+    ui.alignReference.textContent = '对齐参考视角';
+    ui.alignReference.title = '当前参考图没有可用的相机位姿';
+    ui.alignmentStatus.textContent = '这张图没有可用的相机位姿；仍可手动旋转场景对照。';
+    return;
+  }
+  const current = state.alignedReferenceId === ref.id;
+  ui.alignReference.textContent = current && state.alignmentExact ? '✓ 已对齐机位' : '对齐参考视角';
+  ui.alignReference.title = current ? '重新应用这张参考图的相机位姿' : '切换到这张参考图的拍摄机位';
+  const caveats = [];
+  if (pose.raw?.calibration_status?.includes('proxy')) caveats.push('内参为近似值');
+  if (Array.isArray(pose.raw?.distortion) && pose.raw.distortion.some((n) => Math.abs(n) > 1e-8) &&
+      !pose.raw.image_undistorted && !ref.alignment_image_url) caveats.push('镜头畸变未校正');
+  const caveat = caveats.length ? '；' + caveats.join('，') + '，边缘可能有偏差' : '';
+  if (current && state.alignmentExact) {
+    ui.alignmentStatus.textContent = '已按参考图机位对齐' + (ref.alignment_image_url ? '；右侧叠图使用去畸变图' : '') + caveat + '。';
+  } else if (current) {
+    ui.alignmentStatus.textContent = '已手动调整视角；点击「对齐参考视角」恢复拍摄机位' + caveat + '。';
+  } else {
+    ui.alignmentStatus.textContent = '这张图有相机位姿；点击「对齐参考视角」切换机位' + caveat + '。';
+  }
+}
+function alignmentOverlayUrl(ref) {
+  return state.alignedReferenceId === ref?.id && ref?.alignment_image_url || ref?.url;
+}
+function leaveReferenceCamera() {
+  if (!state.alignedReferenceId) return;
+  state.alignedReferenceId = null;
+  state.alignmentExact = false;
+  camera.up.set(0, 0, 1);
+  camera.fov = 44;
+  camera.updateProjectionMatrix();
+  controls.update();
+  resizeScene();
+  showActiveReference();
+  saveDraft();
+}
+function alignActiveReference({showLive=true, notify=false}={}) {
+  const ref = activeReference();
+  const pose = referenceCamera(ref);
+  if (!pose) {
+    updateAlignmentStatus();
+    return false;
+  }
+  // Clear any remaining damped orbit motion before placing the recorded camera.
+  const damping = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
+  controls.enableDamping = damping;
+  const matrix = new THREE.Matrix4().set(...pose.matrix.flat());
+  const rotation = new THREE.Quaternion().setFromRotationMatrix(matrix);
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(rotation);
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(rotation);
+  const position = new THREE.Vector3().setFromMatrixPosition(matrix);
+  const box = new THREE.Box3();
+  for (const root of state.objectNodes.values()) box.expandByObject(root);
+  const sceneCenter = box.isEmpty() ? new THREE.Vector3(0, 0, 0) : box.getCenter(new THREE.Vector3());
+  const distance = clamp(sceneCenter.sub(position).dot(forward), 0.5, 100);
+  camera.position.copy(position);
+  camera.up.copy(up);
+  camera.quaternion.copy(rotation);
+  controls.target.copy(position).addScaledVector(forward, distance);
+  controls.update();
+  state.alignedReferenceId = ref.id;
+  state.alignmentExact = true;
+  state.firstFrame = false;
+  if (showLive && state.sceneView === 'snapshot') {
+    state.sceneView = 'live';
+    renderSceneView();
+  }
+  showActiveReference();
+  resizeScene();
+  saveDraft();
+  if (notify) announce('已切换到「' + (ref.name || '参考图') + '」的拍摄机位。');
+  return true;
+}
 function frameBox(box) {
   if (!box || box.isEmpty()) return;
+  leaveReferenceCamera();
   const center = box.getCenter(new THREE.Vector3());
   const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.45);
   const distance = Math.max(radius / Math.sin(camera.fov * Math.PI / 360) * 1.25, 2.5);
@@ -1168,15 +1282,29 @@ function renderSceneView() {
 }
 
 function setReferences(references) {
-  const currentIds = state.references.map((ref) => ref.id).join(',');
-  const nextIds = references.map((ref) => ref.id).join(',');
-  if (currentIds === nextIds) return;
+  if (JSON.stringify(state.references) === JSON.stringify(references)) return;
+  const previousActive = activeReference();
+  const previousCamera = JSON.stringify(previousActive?.camera || null);
   state.references = references;
   if (!references.some((ref) => ref.id === state.activeReferenceId)) {
     state.activeReferenceId = references[0]?.id || null;
   }
   renderReferenceStrip();
   showActiveReference();
+  const current = activeReference();
+  if (referenceCamera(current)) {
+    if (state.restoredCameraForReference && state.alignedReferenceId === current.id &&
+        state.restoredCameraSignature === JSON.stringify(current.camera)) {
+      resizeScene();
+      updateAlignmentStatus();
+    } else if (previousActive?.id !== current.id || previousCamera !== JSON.stringify(current.camera)) {
+      alignActiveReference({showLive:!!previousActive});
+    }
+  } else if (state.alignedReferenceId) {
+    leaveReferenceCamera();
+  }
+  state.restoredCameraForReference = false;
+  state.restoredCameraSignature = null;
   renderAnnotations();
   saveDraft();
 }
@@ -1200,6 +1328,13 @@ function renderReferenceStrip() {
     image.src = ref.url;
     image.alt = '';
     button.append(image);
+    if (referenceCamera(ref)) {
+      const cameraBadge = document.createElement('span');
+      cameraBadge.className = 'thumb-camera';
+      cameraBadge.textContent = '机位';
+      button.append(cameraBadge);
+      button.title = (ref.name || '参考图') + ' · 有相机位姿';
+    }
     const count = state.annotations.filter((a) => a.pane === 'reference' && a.reference_image_id === ref.id).length;
     if (count) {
       const badge = document.createElement('span');
@@ -1213,6 +1348,8 @@ function renderReferenceStrip() {
       state.referencePan = {x:0,y:0};
       renderReferenceStrip();
       showActiveReference();
+      if (referenceCamera(ref)) alignActiveReference({notify:true});
+      else leaveReferenceCamera();
       saveDraft();
     });
     ui.referenceStrip.append(button);
@@ -1225,6 +1362,7 @@ function showActiveReference() {
   ui.referenceEmpty.classList.toggle('hidden', hasReference);
   ui.referenceHint.classList.toggle('hidden', !hasReference || state.mode === 'select');
   ui.referenceTitle.textContent = ref?.name || '照片里的目标';
+  updateAlignmentStatus();
   ui.compareImage.classList.toggle('hidden', !hasReference || !ui.compareEnabled.checked || state.sceneView === 'snapshot');
   ui.compareEnabled.disabled = !hasReference;
   ui.compareOpacity.disabled = !hasReference || !ui.compareEnabled.checked;
@@ -1234,7 +1372,8 @@ function showActiveReference() {
     return;
   }
   ui.referenceImage.src = ref.url;
-  ui.compareImage.src = ref.url;
+  const compareUrl = alignmentOverlayUrl(ref);
+  if (ui.compareImage.getAttribute('src') !== compareUrl) ui.compareImage.src = compareUrl;
   ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
   if (ui.referenceImage.complete) updateReferenceGeometry();
 }
@@ -1302,6 +1441,8 @@ async function uploadReferences(files) {
       state.activeReferenceId = state.references[state.references.length - 1]?.id || state.activeReferenceId;
       renderReferenceStrip();
       showActiveReference();
+      if (referenceCamera(activeReference())) alignActiveReference();
+      else leaveReferenceCamera();
       saveDraft();
     }
     announce('已添加 ' + images.length + ' 张参考图。');
@@ -1315,10 +1456,20 @@ async function uploadReferences(files) {
 }
 
 function cameraData() {
-  return {
+  const result = {
     position:array(camera.position), target:array(controls.target),
     up:array(camera.up), fov:camera.fov, aspect:camera.aspect
   };
+  const ref = activeReference();
+  const pose = state.alignedReferenceId === ref?.id && referenceCamera(ref);
+  if (pose) {
+    result.reference_image_id = ref.id;
+    result.alignment_exact = state.alignmentExact;
+    result.intrinsics = {...pose.intrinsic};
+    result.projection = 'pinhole';
+    if (pose.raw.calibration_status) result.calibration_status = pose.raw.calibration_status;
+  }
+  return result;
 }
 function updateSceneHint() {
   if (state.sceneView === 'live') {
@@ -1685,9 +1836,13 @@ async function feedbackPayload() {
   const snapshot = snapshotForFeedback();
   const imageBundle = await captureScene(snapshot);
   const annotatedReferences = await captureReferenceAnnotations();
+  const submittedCamera = snapshot?.camera || cameraData();
   return {
     scene_revision:snapshot?.scene_revision || state.sceneRevision,
     latest_scene_revision:state.sceneRevision,
+    active_reference_id:state.activeReferenceId,
+    aligned_reference_id:submittedCamera.alignment_exact && submittedCamera.reference_image_id === state.activeReferenceId
+      ? state.activeReferenceId : null,
     note:ui.note.value.trim() || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
     annotations:state.annotations.map((annotation) => {
       const item = {...annotation};
@@ -1703,7 +1858,7 @@ async function feedbackPayload() {
     }),
     selected_object_ids:snapshot?.selected_object_ids || (state.selectedId ? [state.selectedId] : []),
     selected_scene_nodes:snapshot?.selected_scene_nodes || (state.selectedSceneNode ? [{...state.selectedSceneNode}] : []),
-    camera:snapshot?.camera || cameraData(),
+    camera:submittedCamera,
     reference_images:state.references.map((ref) => ({id:ref.id, url:ref.url, name:ref.name})),
     reference_annotated_data_urls:annotatedReferences.images,
     crops:annotatedReferences.crops,
@@ -1801,9 +1956,47 @@ function resizeScene() {
   const width = ui.sceneStage.clientWidth;
   const height = ui.sceneStage.clientHeight;
   if (!width || !height) return;
-  camera.aspect = width / height;
-  camera.updateProjectionMatrix();
-  renderer.setSize(width, height, false);
+  const ref = activeReference();
+  const pose = state.alignedReferenceId === ref?.id && referenceCamera(ref);
+  if (pose) {
+    const overlay = ui.compareImage;
+    const sourceMatches = overlay.getAttribute('src') === alignmentOverlayUrl(ref);
+    const imageWidth = sourceMatches && overlay.naturalWidth || pose.intrinsic.width;
+    const imageHeight = sourceMatches && overlay.naturalHeight || pose.intrinsic.height;
+    const scale = Math.min(width / imageWidth, height / imageHeight);
+    const viewWidth = Math.max(1, Math.round(imageWidth * scale));
+    const viewHeight = Math.max(1, Math.round(imageHeight * scale));
+    ui.viewport.style.left = (width - viewWidth) / 2 + 'px';
+    ui.viewport.style.top = (height - viewHeight) / 2 + 'px';
+    ui.viewport.style.right = 'auto';
+    ui.viewport.style.bottom = 'auto';
+    ui.viewport.style.width = viewWidth + 'px';
+    ui.viewport.style.height = viewHeight + 'px';
+    camera.near = 0.005;
+    camera.far = 2000;
+    camera.fov = 2 * Math.atan(pose.intrinsic.height / (2 * pose.intrinsic.fy)) * 180 / Math.PI;
+    camera.aspect = imageWidth / imageHeight;
+    camera.updateProjectionMatrix();
+    const {width:iw, height:ih, fx, fy, cx, cy} = pose.intrinsic;
+    const near = camera.near;
+    camera.projectionMatrix.makePerspective(
+      -cx * near / fx, (iw - cx) * near / fx,
+      cy * near / fy, -(ih - cy) * near / fy,
+      near, camera.far, renderer.coordinateSystem
+    );
+    camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+    renderer.setSize(viewWidth, viewHeight, false);
+  } else {
+    ui.viewport.style.left = '0';
+    ui.viewport.style.top = '0';
+    ui.viewport.style.right = '0';
+    ui.viewport.style.bottom = '0';
+    ui.viewport.style.width = '100%';
+    ui.viewport.style.height = '100%';
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    renderer.setSize(width, height, false);
+  }
   updateSnapshotGeometry();
   drawOverlays();
 }
@@ -1839,6 +2032,8 @@ function bindEvents() {
   ui.referenceInput.addEventListener('change', () => uploadReferences(ui.referenceInput.files));
   ui.referenceImage.addEventListener('load', updateReferenceGeometry);
   ui.referenceImage.addEventListener('error', () => announce('这张参考图无法显示。', true));
+  ui.compareImage.addEventListener('load', resizeScene);
+  ui.alignReference.addEventListener('click', () => alignActiveReference({notify:true}));
   ui.referenceZoomIn.addEventListener('click', () => setReferenceZoom(state.referenceZoom * 1.4));
   ui.referenceZoomOut.addEventListener('click', () => setReferenceZoom(state.referenceZoom / 1.4));
   ui.referenceZoomReset.addEventListener('click', () => {
@@ -1936,7 +2131,22 @@ function bindEvents() {
     pointerDown = null;
     if (distance < 5) handleSceneClick(event);
   });
-  controls.addEventListener('end', saveDraft);
+  controls.addEventListener('start', () => {
+    orbitStart = {position:camera.position.clone(), target:controls.target.clone(), quaternion:camera.quaternion.clone()};
+  });
+  controls.addEventListener('end', () => {
+    const moved = orbitStart && (
+      camera.position.distanceToSquared(orbitStart.position) > 1e-10 ||
+      controls.target.distanceToSquared(orbitStart.target) > 1e-10 ||
+      1 - Math.abs(camera.quaternion.dot(orbitStart.quaternion)) > 1e-10
+    );
+    orbitStart = null;
+    if (moved && state.alignedReferenceId && state.alignmentExact) {
+      state.alignmentExact = false;
+      updateAlignmentStatus();
+    }
+    saveDraft();
+  });
   document.addEventListener('keydown', (event) => {
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
     if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; }

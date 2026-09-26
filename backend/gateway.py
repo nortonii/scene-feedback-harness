@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from core import APIError, MAX_REFERENCES, SceneStore, _now
+from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
 
 
 class WorkspaceGateway:
@@ -127,6 +127,7 @@ class WorkspaceGateway:
         workspace = self.ensure()
         if not isinstance(paths, list) or len(paths) > MAX_REFERENCES:
             raise APIError(400, "reference_images must be an array of at most 8 paths")
+        manifest = self._reference_camera_manifest()
         prepared = []
         for path in paths:
             source = self._project_file(path)
@@ -134,21 +135,102 @@ class WorkspaceGateway:
             # Camera exports often share names such as 000480.jpg. Keep the
             # view name visible in the browser's reference strip.
             label = f"{source.parent.name}_{source.name}"[-180:]
-            prepared.append((label, data))
+            prepared.append((label, data, self._manifest_camera(label, data, manifest)))
         with self.store.lock:
             session_id = workspace["session_id"]
             current = self.store.state["sessions"][session_id]["reference_images"]
             existing = {(entry["name"], (self.store.media_dir / entry["url"].rsplit("/", 1)[-1]).read_bytes()): entry for entry in current}
-            novel = [(name, data) for name, data in prepared if (name, data) not in existing]
-            if len(current) + len({(name, data) for name, data in novel}) > MAX_REFERENCES:
+            novel = [(name, data, camera) for name, data, camera in prepared if (name, data) not in existing]
+            if len(current) + len({(name, data) for name, data, _ in novel}) > MAX_REFERENCES:
                 raise APIError(400, "workspace may contain at most 8 reference images")
-            for name, data in novel:
+            for name, data, _ in novel:
                 if (name, data) in existing:
                     continue
                 mime = self.store._image_kind(data)[1]
                 data_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
                 existing[(name, data)] = self.store.add_reference(session_id, name, data_url)
+            camera_updates = list({existing[(name, data)]["id"]: {"reference_id": existing[(name, data)]["id"], "camera": camera}
+                                   for name, data, camera in prepared if camera is not None and existing[(name, data)].get("camera") != camera}.values())
+            if camera_updates:
+                self.store.set_reference_cameras(session_id, camera_updates)
             return {"session_id": session_id, "reference_images": copy.deepcopy(self.store.state["sessions"][session_id]["reference_images"])}
+
+    def _reference_camera_manifest(self) -> list[tuple[str, dict[str, Any]]]:
+        """Load optional filename-prefix camera mapping from the private data dir.
+
+        Each entry describes a fixed calibrated camera; it intentionally does
+        not contain a frame-specific alignment image. A new frame must receive
+        its own undistorted image through set_reference_cameras.
+        """
+        path = self.store.data_dir / "reference_cameras.json"
+        if not path.exists():
+            return []
+        try:
+            if path.stat().st_size > 1_000_000:
+                raise APIError(400, "reference camera manifest exceeds 1 MB")
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise APIError(400, "reference camera manifest cannot be read") from exc
+        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1 or not isinstance(manifest.get("entries"), list):
+            raise APIError(400, "reference camera manifest must have schema_version 1 and entries")
+        entries = []
+        seen = set()
+        for entry in manifest["entries"]:
+            if not isinstance(entry, dict):
+                raise APIError(400, "reference camera entry must be an object")
+            prefix = entry.get("name_prefix")
+            if not isinstance(prefix, str) or not 1 <= len(prefix) <= 180 or any(ord(char) < 32 for char in prefix) or "/" in prefix or "\\" in prefix or prefix in seen:
+                raise APIError(400, "reference camera name_prefix must be unique short file text")
+            seen.add(prefix)
+            entries.append((prefix, self.store._normalize_reference_camera(entry.get("camera"))))
+        return entries
+
+    def _manifest_camera(self, name: str, image_bytes: bytes, entries: list[tuple[str, dict[str, Any]]]) -> dict[str, Any] | None:
+        matches = [(len(prefix), camera) for prefix, camera in entries if name.startswith(prefix)]
+        if not matches:
+            return None
+        camera = max(matches, key=lambda item: item[0])[1]
+        intrinsics = camera["intrinsics"]
+        if self.store._image_dimensions(image_bytes) != (intrinsics["width"], intrinsics["height"]):
+            raise APIError(400, "reference camera manifest image dimensions do not match")
+        return camera
+
+    def apply_reference_camera_manifest(self) -> dict[str, Any]:
+        """Attach a project-specific camera manifest to references already imported."""
+        workspace = self.ensure()
+        entries = self._reference_camera_manifest()
+        if not entries:
+            raise APIError(404, "reference camera manifest is not installed")
+        session_id = workspace["session_id"]
+        session = self.store.get_session(session_id)
+        updates = []
+        for reference in session["reference_images"]:
+            data = (self.store.media_dir / reference["url"].rsplit("/", 1)[-1]).read_bytes()
+            camera = self._manifest_camera(reference["name"], data, entries)
+            if camera is not None and reference.get("camera") != camera:
+                updates.append({"reference_id": reference["id"], "camera": camera})
+        if updates:
+            return self.store.set_reference_cameras(session_id, updates)
+        return {"session_id": session_id, "reference_images": session["reference_images"]}
+
+    def set_reference_cameras(self, cameras: Any) -> dict[str, Any]:
+        workspace = self.ensure()
+        return self.store.set_reference_cameras(workspace["session_id"], cameras)
+
+    def add_reference_data_url(self, session_id: str, name: Any, data_url: Any) -> dict[str, Any]:
+        """Browser uploads also receive camera metadata when their names match."""
+        camera = None
+        entries = self._reference_camera_manifest()
+        if entries:
+            if not isinstance(name, str):
+                raise APIError(400, "name must be a file name")
+            data = self.store._decode_image_data_url(data_url, max_bytes=MAX_REFERENCE_BYTES)
+            camera = self._manifest_camera(name, data, entries)
+        reference = self.store.add_reference(session_id, name, data_url)
+        if camera is not None:
+            result = self.store.set_reference_cameras(session_id, [{"reference_id": reference["id"], "camera": camera}])
+            return next(item for item in result["reference_images"] if item["id"] == reference["id"])
+        return reference
 
     def begin_external_request(self, *, session_id: Any = None, message: Any = None, cursor: Any = None) -> dict[str, Any]:
         if not self.external_review:
@@ -327,6 +409,13 @@ class WorkspaceGateway:
             lines.append("选中 GLB 节点：" + json.dumps(feedback["selected_scene_nodes"], ensure_ascii=False))
         if feedback.get("camera"):
             lines.append("冻结视角：" + json.dumps(feedback["camera"], ensure_ascii=False))
+        reference_names = {item["id"]: item["name"] for item in feedback.get("reference_images", [])}
+        active_id = feedback.get("active_reference_id")
+        aligned_id = feedback.get("aligned_reference_id")
+        if active_id in reference_names:
+            lines.append(f"当前查看的参考图：{reference_names[active_id]} (ID {active_id})")
+        if aligned_id in reference_names:
+            lines.append(f"场景截图已按这张参考图的标定相机视角对齐：{reference_names[aligned_id]} (ID {aligned_id})。请把两张图作为同一视角比较；镜头畸变和标定误差仍可能造成少量像素偏差。")
         if feedback.get("annotations"):
             lines.append("标记数据：" + json.dumps(feedback["annotations"], ensure_ascii=False))
         lines += ["", "附件顺序："]
@@ -345,6 +434,8 @@ class WorkspaceGateway:
         annotated = {entry["reference_id"]: entry["url"] for entry in feedback.get("reference_annotated_images", [])}
         for reference in feedback.get("reference_images", []):
             add(f"参考原图 {reference['name']} (ID {reference['id']})", reference["url"])
+            if reference["id"] == aligned_id and reference.get("alignment_image_url"):
+                add(f"去畸变对齐图 {reference['name']} (ID {reference['id']})", reference["alignment_image_url"])
             if reference["id"] in annotated:
                 add(f"带用户标记的参考图 {reference['name']} (ID {reference['id']})", annotated[reference["id"]])
         for key, label in (("scene_original_url", "冻结视角的干净场景截图"), ("scene_annotated_url", "带用户标记和高亮的场景截图")):

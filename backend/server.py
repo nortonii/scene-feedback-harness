@@ -228,6 +228,14 @@ def make_server(
                 self._require_control_key()
                 payload = self._read_json()
                 return self._send_json(200, gateway.add_reference_paths(payload.get("reference_images")))
+            if self.command == "POST" and path == "/api/workspace/reference-cameras":
+                self._require_control_key()
+                payload = self._read_json()
+                if payload.get("apply_manifest") is True and "cameras" not in payload:
+                    return self._send_json(200, gateway.apply_reference_camera_manifest())
+                if "cameras" not in payload or "apply_manifest" in payload:
+                    raise APIError(400, "provide cameras or apply_manifest")
+                return self._send_json(200, gateway.set_reference_cameras(payload["cameras"]))
             if self.command == "POST" and path == "/api/workspace/external/request":
                 self._require_control_key()
                 payload = self._read_json()
@@ -312,7 +320,7 @@ def make_server(
                 if self.command == "POST" and suffix == "references":
                     self._require_browser_capability()
                     payload = self._read_json()
-                    return self._send_json(201, store.add_reference(session_id, payload.get("name"), payload.get("data_url")))
+                    return self._send_json(201, gateway.add_reference_data_url(session_id, payload.get("name"), payload.get("data_url")))
                 if self.command == "POST" and suffix == "cancel":
                     self._require_browser_capability()
                     self._read_json()

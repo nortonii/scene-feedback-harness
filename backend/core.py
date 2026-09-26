@@ -496,6 +496,137 @@ class SceneStore:
             self._save()
             return copy.deepcopy(reference)
 
+    @staticmethod
+    def _normalize_reference_camera(camera: Any) -> dict[str, Any]:
+        """Validate a calibrated Three.js camera in the GLB world coordinate frame.
+
+        camera_to_world is a row-major 4x4 transform. Its local camera axes are
+        +X right, +Y up and -Z forward; the GLB's up axis is deliberately not
+        assumed here. Intrinsics use pixels of the stored reference image.
+        """
+        if not isinstance(camera, dict):
+            raise APIError(400, "reference camera must be an object")
+        matrix = camera.get("camera_to_world")
+        if not isinstance(matrix, list) or len(matrix) != 4 or any(not isinstance(row, list) or len(row) != 4 for row in matrix):
+            raise APIError(400, "camera_to_world must be a row-major 4x4 matrix")
+        for row in matrix:
+            for number in row:
+                if type(number) not in (int, float) or not math.isfinite(number) or abs(number) > 1_000_000:
+                    raise APIError(400, "camera_to_world must contain finite numbers")
+        if any(abs(float(matrix[3][index]) - expected) > 1e-6 for index, expected in enumerate((0, 0, 0, 1))):
+            raise APIError(400, "camera_to_world must have a homogeneous bottom row")
+        rotation = [[float(matrix[row][column]) for column in range(3)] for row in range(3)]
+        for row in range(3):
+            for other in range(3):
+                dot = sum(rotation[index][row] * rotation[index][other] for index in range(3))
+                if abs(dot - (1.0 if row == other else 0.0)) > 0.003:
+                    raise APIError(400, "camera_to_world rotation must be orthonormal")
+        determinant = (rotation[0][0] * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
+                       - rotation[0][1] * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
+                       + rotation[0][2] * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0]))
+        if abs(determinant - 1.0) > 0.003:
+            raise APIError(400, "camera_to_world rotation must be right-handed")
+        intrinsics = camera.get("intrinsics")
+        if not isinstance(intrinsics, dict):
+            raise APIError(400, "camera intrinsics must be an object")
+        width, height = intrinsics.get("width"), intrinsics.get("height")
+        if type(width) is not int or type(height) is not int or not (1 <= width <= 20000 and 1 <= height <= 20000):
+            raise APIError(400, "camera width and height must be positive image dimensions")
+        values = {}
+        for field in ("fx", "fy", "cx", "cy"):
+            value = intrinsics.get(field)
+            if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > 1_000_000:
+                raise APIError(400, f"camera {field} must be a finite number")
+            values[field] = float(value)
+        if values["fx"] <= 0 or values["fy"] <= 0:
+            raise APIError(400, "camera focal lengths must be positive")
+        if not (0 <= values["cx"] <= width and 0 <= values["cy"] <= height):
+            raise APIError(400, "camera principal point must lie inside the image")
+        result = {
+            "camera_to_world": [[float(value) for value in row] for row in matrix],
+            "intrinsics": {"width": width, "height": height, **values},
+        }
+        if "distortion" in camera:
+            distortion = camera["distortion"]
+            if not isinstance(distortion, list) or len(distortion) != 5 or any(type(value) not in (int, float) or not math.isfinite(value) or abs(value) > 10 for value in distortion):
+                raise APIError(400, "camera distortion must be five finite OpenCV coefficients")
+            result["distortion"] = [float(value) for value in distortion]
+        if "calibration_status" in camera:
+            status = camera["calibration_status"]
+            if not isinstance(status, str) or not 1 <= len(status) <= 200 or any(ord(char) < 32 for char in status):
+                raise APIError(400, "calibration_status must be a short text label")
+            result["calibration_status"] = status
+        if "image_undistorted" in camera:
+            if type(camera["image_undistorted"]) is not bool:
+                raise APIError(400, "image_undistorted must be a boolean")
+            result["image_undistorted"] = camera["image_undistorted"]
+        return result
+
+    @staticmethod
+    def _image_dimensions(data: bytes) -> tuple[int, int]:
+        from PIL import Image, UnidentifiedImageError
+
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                return image.size
+        except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
+            raise APIError(400, "reference image cannot be decoded") from exc
+
+    def set_reference_cameras(self, session_id: str, updates: Any) -> dict[str, Any]:
+        """Attach calibrated views without changing reference pixels or scene revision."""
+        with self.lock:
+            session = self.state["sessions"].get(session_id)
+            if session is None:
+                raise APIError(404, "session not found")
+            if session["status"] != "open":
+                raise APIError(409, "session is closed")
+            if not isinstance(updates, list) or not 1 <= len(updates) <= MAX_REFERENCES:
+                raise APIError(400, "cameras must contain 1 to 8 reference updates")
+            references = {reference["id"]: reference for reference in session.get("reference_images", [])}
+            prepared = []
+            seen = set()
+            for item in updates:
+                if not isinstance(item, dict) or item.get("reference_id") not in references:
+                    raise APIError(400, "camera update refers to an unknown reference")
+                if "camera" not in item:
+                    raise APIError(400, "camera update must include camera")
+                reference_id = item["reference_id"]
+                if reference_id in seen:
+                    raise APIError(400, "camera update repeats a reference")
+                seen.add(reference_id)
+                camera = None if item.get("camera") is None else self._normalize_reference_camera(item["camera"])
+                if camera is None and "alignment_image_data_url" in item:
+                    raise APIError(400, "alignment image requires a camera")
+                reference = references[reference_id]
+                if camera is not None:
+                    original = (self.media_dir / reference["url"].rsplit("/", 1)[-1]).read_bytes()
+                    size = self._image_dimensions(original)
+                    intrinsics = camera["intrinsics"]
+                    if size != (intrinsics["width"], intrinsics["height"]):
+                        raise APIError(400, "camera image dimensions do not match the reference")
+                alignment = None
+                if "alignment_image_data_url" in item:
+                    alignment = self._decode_image_data_url(item["alignment_image_data_url"], max_bytes=MAX_REFERENCE_BYTES)
+                    if self._image_dimensions(alignment) != size:
+                        raise APIError(400, "alignment image dimensions do not match the reference")
+                prepared.append((reference, camera, alignment))
+            for reference, camera, alignment in prepared:
+                if camera is None:
+                    reference.pop("camera", None)
+                    reference.pop("alignment_image_url", None)
+                else:
+                    old_camera = reference.get("camera")
+                    old_alignment_url = reference.get("alignment_image_url")
+                    if reference.get("camera") != camera and alignment is None:
+                        reference.pop("alignment_image_url", None)
+                    reference["camera"] = camera
+                    if alignment is not None:
+                        old_alignment = self.media_dir / old_alignment_url.rsplit("/", 1)[-1] if isinstance(old_alignment_url, str) else None
+                        if old_camera != camera or old_alignment is None or not old_alignment.is_file() or old_alignment.read_bytes() != alignment:
+                            reference["alignment_image_url"] = self._write_media(alignment)
+            self._save()
+            return {"session_id": session_id, "reference_images": copy.deepcopy(session["reference_images"])}
+
     def get_session(self, session_id: str) -> dict[str, Any]:
         with self.lock:
             session = self.state["sessions"].get(session_id)
@@ -770,6 +901,13 @@ class SceneStore:
                 if isinstance(historic_nodes, list):
                     model_ids.update(node.get("parent_object_id") for node in historic_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
             reference_ids = {image["id"] for image in session.get("reference_images", [])}
+            references_by_id = {image["id"]: image for image in session.get("reference_images", [])}
+            active_reference_id = payload.get("active_reference_id")
+            aligned_reference_id = payload.get("aligned_reference_id")
+            if active_reference_id is not None and active_reference_id not in reference_ids:
+                raise APIError(400, "active_reference_id must identify a current reference")
+            if aligned_reference_id is not None and (aligned_reference_id not in reference_ids or "camera" not in references_by_id[aligned_reference_id]):
+                raise APIError(400, "aligned_reference_id must identify a calibrated reference")
             normalized_annotations = [self._normalize_annotation(item, object_ids, model_ids, reference_ids) for item in annotations]
             note = payload.get("note", "")
             if not isinstance(note, str) or len(note) > 10_000:
@@ -825,6 +963,10 @@ class SceneStore:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
             feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes}
+            if active_reference_id is not None:
+                feedback["active_reference_id"] = active_reference_id
+            if aligned_reference_id is not None:
+                feedback["aligned_reference_id"] = aligned_reference_id
             if client_key is not None:
                 feedback["idempotency_key"] = client_key
                 feedback["payload_digest"] = digest
