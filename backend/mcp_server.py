@@ -135,10 +135,10 @@ mcp = MCPServer(
     instructions=(
         "For this configured project's 3D reconstruction task, if the user says '进入人工调试模式' or '进入人工参与调试模式', "
         "call request_visual_feedback with project-local reference images and current GLB if available. "
-        "In external mode, annotated images, scene screenshot, selected object, and note return to the "
-        "invoking Codex task. Continue editing in that task; publish the updated GLB with "
-        "workspace_publish_scene. If no browser opens, share the returned URL and call "
-        "wait_visual_feedback with session_id and next_cursor."
+        "In external mode without a bound desktop task, wait for the annotated images, scene screenshot, "
+        "selected object, and note to return as the tool result. With a bound desktop task, the "
+        "workbench sends the submitted visual feedback as a new message to that same task. "
+        "Continue editing there and publish the updated GLB with workspace_publish_scene."
     ),
 )
 
@@ -283,13 +283,15 @@ async def request_visual_feedback(
             opened = bool(await asyncio.wait_for(asyncio.to_thread(webbrowser.open, url, 1, True), timeout=5))
         except Exception:
             logging.exception("Could not open the visual workbench")
-    if wait_for_submit and opened:
+    if wait_for_submit and not state.get("thread_id"):
         result = await _wait_for_external_feedback(state["session_id"], timeout_sec, effective_cursor, url)
         result["browser_opened"] = opened
         return _visual_tool_result(result)
     response = {**request, "url": url, "browser_opened": opened, "reference_images": _http("GET", "/api/workspace/context")["reference_images"]}
-    if wait_for_submit:
-        response["message"] = "Open the URL, submit your marks, then call wait_visual_feedback with session_id and next_cursor."
+    if state.get("thread_id"):
+        response["message"] = "The workbench is bound to this Codex Desktop task. After the user submits, the service will add the visual feedback as a new user turn in this task; no MCP wait is needed."
+    else:
+        response["message"] = "Open the URL and submit your marks. Call wait_visual_feedback with session_id and next_cursor if this invocation did not wait."
     return CallToolResult(content=[TextContent(type="text", text=json.dumps(response, ensure_ascii=False))], structured_content=response)
 
 
@@ -299,6 +301,8 @@ async def wait_visual_feedback(session_id: str, cursor: int = 0, timeout_sec: in
     state = _external_state()
     if session_id != state["session_id"]:
         raise ValueError("session_id belongs to a different workspace")
+    if state.get("thread_id"):
+        raise ValueError("this workbench delivers feedback directly to its bound Codex Desktop task; no MCP wait is needed")
     await asyncio.to_thread(_http, "POST", "/api/workspace/external/request", {"session_id": session_id, "cursor": cursor}, private=True)
     return _visual_tool_result(await _wait_for_external_feedback(session_id, timeout_sec, cursor, _browser_url(state)))
 

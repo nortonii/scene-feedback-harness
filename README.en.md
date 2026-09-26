@@ -71,7 +71,7 @@ Add reference images in the browser. Have Codex build or export a self-contained
 
 ## Review from an existing Codex desktop task (external MCP mode)
 
-If you are already working on a project in Codex desktop, use `--external-review` to expose the workbench as an MCP tool called by that task. This mode **does not create or take over another Codex thread**. Codex calls `request_visual_feedback` to start a review; if the browser opens successfully, that call waits and returns the feedback by default. If it only returns a URL and session details, call `wait_visual_feedback` to wait. When you click “Send” in the browser, your words and actual image content return as a tool result to the **same task**, which can continue editing the scene. `get_visual_feedback` can reread submitted feedback.
+An existing Codex desktop task can receive feedback in two ways. With `--external-review` alone, that task calls `request_visual_feedback`. By default the tool waits for browser submission **even when the server has no graphical desktop and cannot open a browser automatically**. After you click “Send,” the text and images return as an MCP tool result to the task that is still waiting. Explicitly passing `wait_for_submit=False` makes the tool return a URL, `session_id`, and `next_cursor` immediately; the task must then call `wait_visual_feedback(session_id, cursor=next_cursor)` to receive the submission. If the waiting call has already ended or timed out, the feedback remains saved but will not wake an idle task. Read it from the original task or use the task binding option below. `get_visual_feedback` can reread submitted feedback.
 
 Install the dependencies above first. Use absolute paths in a terminal to register a global MCP server and run a separate review service:
 
@@ -88,9 +88,22 @@ codex mcp add scene_feedback_external \
   --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
 ```
 
-In `~/.codex/config.toml`, set `tool_timeout_sec = 900` under the `[mcp_servers.scene_feedback_external]` table created by `codex mcp add`. Use the review tools' default `timeout_sec` of 600 or less, leaving time to transfer images. **Restart Codex desktop** so the existing task refreshes its MCP tool catalog. In that task, say “进入人工调试模式” (“enter human review mode”) or explicitly ask it to call `request_visual_feedback` with project-local reference image paths and the current GLB path (omit the GLB if no initial scene exists). If the tool returns only `session_id`, `next_cursor`, and a URL, open <http://127.0.0.1:18768/> and call `wait_visual_feedback` with `cursor=next_cursor` for that `session_id`. Add reference images and mark up the scene. In this mode, the browser's Send button completes the pending MCP review; it **does not start another user turn**.
+In `~/.codex/config.toml`, set `tool_timeout_sec = 900` under the `[mcp_servers.scene_feedback_external]` table created by `codex mcp add`. Use the review tools' default `timeout_sec` of 600 or less, leaving time to transfer images. **Restart Codex desktop** so the existing task refreshes its MCP tool catalog. In that task, say “进入人工调试模式” (“enter human review mode”) or explicitly ask it to call `request_visual_feedback` with project-local reference image paths and the current GLB path (omit the GLB if no initial scene exists). In the unbound mode, Send completes the waiting MCP call; if the tool was explicitly told not to wait, call `wait_visual_feedback` separately.
 
 `PROJECT` is the reconstruction root under review; the reference images and GLB must be inside it. It may be a subdirectory of the Codex task's working directory. `DATA` is a private directory dedicated to that project. The example uses a separate port, data directory, and MCP server name to keep it apart from the default mode above. Published scenes can still update the page through `workspace_publish_scene`.
+
+### Bind an existing desktop task for automatic continuation
+
+To make “Send” continue **the already open Codex desktop task** without keeping an MCP tool call waiting, stop the service above and restart it with the same project and data directory plus that task's UUID. `THREAD_ID` is the Codex desktop task ID, **not** the workbench `session_id`:
+
+```bash
+THREAD_ID=your-existing-codex-task-uuid
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 \
+  --external-review --shared-thread-id "$THREAD_ID"
+```
+
+The workbench connects to the running **Codex Desktop App Server on the same host and under the same user**. Each submission becomes a new user turn in that existing task, with your text, original and annotated images, and scene snapshots; no new task is created. Feedback waits in a queue while the task is busy. The page shows queued, running, and completed delivery states. If the scene revision changes while feedback waits, confirm the old-revision feedback before it is sent. Human approval and interaction requests appear in the workbench; it never approves them automatically. If a disconnect makes delivery uncertain, inspect the original task history before retrying to avoid duplicates. This mode uses `websocket-client`, installed through `backend/requirements.txt`. In bound mode, `request_visual_feedback` opens or updates the workbench and returns its URL; **no MCP result needs to remain pending**.
 
 ## Open the page from another device on the LAN
 
@@ -105,6 +118,8 @@ LAN_IP=192.168.1.10
 
 The startup output or the MCP `request_visual_feedback` / `workspace_open` result provides a complete link containing `access_token`. Open that **full link** in the other device's browser. After checking it, the page removes the token from the address bar and keeps access in a browser cookie. Entering only `http://$LAN_IP:18768/` will not grant access; keep the access link private. The default workbench mode accepts the same two flags with its existing port and data directory; omit `--external-review` there. For a persistent service, run the same command under a systemd user service. The workbench page and its protected API are available over the LAN. Codex on the project host still calls MCP through `127.0.0.1`. If the page is unreachable, allow the selected TCP port in the host firewall. Plain HTTP LAN mode is intended for a trusted network.
 
+For the desktop task binding option, also keep `--shared-thread-id "$THREAD_ID"` in the LAN startup command. The browser may be on another LAN device; the service connecting to Codex Desktop must still run under the same user on the desktop task's host.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -114,10 +129,10 @@ The startup output or the MCP `request_visual_feedback` / `workspace_open` resul
 | `workspace_get_feedback` | Read submitted feedback and its actual images |
 | `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
 | `workspace_request_feedback` | Default mode: ask the user to inspect something on the page and return immediately; their reply becomes the next user message |
-| `request_visual_feedback` / `wait_visual_feedback` | External MCP mode: start a review and wait for browser submission, returning text and images to the current task |
+| `request_visual_feedback` / `wait_visual_feedback` | Unbound external MCP mode: wait and return text and images as a tool result; bound desktop mode: the former returns the page URL and submission starts a new turn |
 | `get_visual_feedback` | External MCP mode: reread submitted visual feedback |
 
-The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) reminds Codex to distinguish original images from annotations, edit project source files, and publish a GLB when the result is ready. The default mode does not need an MCP call to remain waiting for the next submission; external MCP mode returns feedback to the original task through `wait_visual_feedback`.
+The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) reminds Codex to distinguish original images from annotations, edit project source files, and publish a GLB when the result is ready. Default mode sends a new turn directly. Unbound external MCP mode returns feedback through a waiting `request_visual_feedback` or `wait_visual_feedback` call. Bound desktop mode starts a new turn after browser submission.
 
 ## Verification and limits
 

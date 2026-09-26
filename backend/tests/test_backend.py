@@ -688,7 +688,7 @@ class ExternalReviewTests(unittest.TestCase):
             self.assertFalse(opened.structured_content["browser_opened"])
             self.assertEqual(opened.structured_content["delivery_mode"], "external")
             status, state = self.request("GET", "/api/workspace/state")
-            self.assertEqual((status, state["agent"]["status"], state["thread_id"]), (200, "waiting_for_mcp", None))
+            self.assertEqual((status, state["agent"]["status"], state["thread_id"]), (200, "external_idle", None))
             self.assertEqual(state["scene_revision"], 2)
             asyncio.run(mcp_server.request_visual_feedback(reference_images=[str(reference)], wait_for_submit=False, open_browser=False))
             status, context = self.request("GET", "/api/workspace/context")
@@ -742,15 +742,57 @@ class ExternalReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(APIError, "bound to external delivery"):
             gateway.ensure()
 
-    def test_headless_default_returns_url_without_blocking(self) -> None:
+    def test_headless_default_waits_for_browser_feedback(self) -> None:
+        data_url, _ = image_data_url()
+        with patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "DATA_DIR", self.data_dir), patch.object(mcp_server, "PROJECT_DIR", self.project), patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
+            async def exercise():
+                pending = asyncio.create_task(mcp_server.request_visual_feedback(timeout_sec=3))
+                for _ in range(100):
+                    status, state = await asyncio.to_thread(self.request, "GET", "/api/workspace/state")
+                    if status == 200 and state.get("request_feedback"):
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("MCP review request did not become ready")
+                self.assertFalse(pending.done(), "headless review must keep the invoking tool call open")
+                session_id = state["session_id"]
+                status, submitted = await asyncio.to_thread(
+                    self.request, "POST", f"/api/sessions/{session_id}/feedback",
+                    {"idempotency_key": "headless-wait-0001", "scene_revision": state["scene_revision"],
+                     "note": "Move this edge", "scene_original_data_url": data_url,
+                     "scene_annotated_data_url": data_url}, browser=True,
+                )
+                self.assertEqual((status, submitted["delivery"]["status"]), (201, "awaiting_mcp"))
+                return submitted, await asyncio.wait_for(pending, timeout=4)
+
+            start = time.monotonic()
+            submitted, result = asyncio.run(exercise())
+            self.assertLess(time.monotonic() - start, 5)
+            self.assertFalse(result.structured_content["browser_opened"])
+            self.assertEqual(result.structured_content["items"][0]["feedback_id"], submitted["feedback_id"])
+            self.assertEqual(sum(block.type == "image" for block in result.content), 2)
+            status, state = self.request("GET", "/api/workspace/state")
+            self.assertEqual((status, state["agent"]["status"]), (200, "external_idle"))
+
+    def test_explicit_url_only_review_returns_immediately_in_headless_mode(self) -> None:
         with patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "DATA_DIR", self.data_dir), patch.object(mcp_server, "PROJECT_DIR", self.project), patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
             start = time.monotonic()
-            opened = asyncio.run(mcp_server.request_visual_feedback(timeout_sec=600))
+            opened = asyncio.run(mcp_server.request_visual_feedback(wait_for_submit=False, timeout_sec=600))
             self.assertLess(time.monotonic() - start, 3)
             self.assertFalse(opened.structured_content["browser_opened"])
             self.assertIn("session_id=", opened.structured_content["url"])
-            status, state = self.request("GET", "/api/workspace/state")
-            self.assertEqual((status, state["agent"]["status"]), (200, "waiting_for_mcp"))
+            self.assertEqual(opened.structured_content["delivery_mode"], "external")
+            self.assertIn("next_cursor", opened.structured_content)
+
+    def test_bound_desktop_review_returns_url_without_an_mcp_wait(self) -> None:
+        thread_id = "01a0d906-146e-7762-a1f9-49baeda8e270"
+        self.server.scene_store.workspace_thread(thread_id)
+        with patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "DATA_DIR", self.data_dir), patch.object(mcp_server, "PROJECT_DIR", self.project), patch.object(mcp_server, "_wait_for_external_feedback", side_effect=AssertionError("bound task must not wait for an MCP result")):
+            opened = asyncio.run(mcp_server.request_visual_feedback(open_browser=False))
+            self.assertEqual(opened.structured_content["thread_id"], thread_id)
+            self.assertIn("no MCP wait is needed", opened.structured_content["message"])
+            with self.assertRaisesRegex(ValueError, "delivers feedback directly"):
+                asyncio.run(mcp_server.wait_visual_feedback(opened.structured_content["session_id"]))
 
 
 if __name__ == "__main__":

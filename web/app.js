@@ -43,7 +43,7 @@ const ui = {
 const state = {
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
-  externalSubmitted:false, externalWaitId:null, queue:[], approvals:[],
+  boundThreadId:null, queue:[], approvals:[],
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
@@ -199,7 +199,7 @@ function setSession(session) {
   state.sessionId = session.session_id;
   state.sessionStatus = session.status || 'open';
   state.feedbackCount = Number(session.feedback_count) || 0;
-  id('feedback-count-label').textContent = '已发 ' + state.feedbackCount + ' 轮';
+  id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
   ui.pill.textContent = ({open:'工作台已连接', submitted:'已结束', cancelled:'已取消', error:'连接失败', connecting:'连接中'})[state.sessionStatus] || state.sessionStatus;
   ui.pill.className = 'session-pill ' + state.sessionStatus;
   ui.submit.disabled = !editable();
@@ -293,21 +293,24 @@ async function clearOutbox() {
 function updateSubmitLabel() {
   const status = state.agent?.status || 'disconnected';
   if (state.deliveryMode === 'external') {
-    const waiting = status === 'waiting_for_mcp';
-    const label = state.pendingSubmission ? '重试交回当前会话'
-      : state.externalSubmitted ? '反馈已提交'
-      : waiting ? '送回当前 Codex 会话' : '等待 Codex 请求反馈';
+    const bound = !!state.boundThreadId;
+    const label = state.pendingSubmission ? '重试同一条反馈'
+      : bound && ['running', 'awaiting_approval'].includes(status) ? '加入原任务下一轮'
+      : bound ? '发送到原 Codex 任务' : '保存视觉反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
-    ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading ||
-      (!state.pendingSubmission && (!waiting || state.externalSubmitted));
+    ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
       ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
-      : state.externalSubmitted ? '反馈已保存，正在交回当前等待中的 MCP 工具。'
-      : waiting ? '原图、标注图和场景截图会作为本次 MCP 工具调用的结果返回 Codex。'
-      : '当前没有等待中的反馈工具调用。请先在 Codex 会话中请求视觉反馈。';
+      : bound && ['running', 'awaiting_approval'].includes(status)
+        ? '原任务正在执行；这条图文反馈会加入下一轮。'
+      : bound && status === 'delivery_uncertain'
+        ? '请先核对原 Codex 任务中的送达情况；新反馈会先保存。'
+      : bound
+        ? '原图、标注图和场景截图会送入绑定的 Codex 任务。'
+      : '反馈会保存在工作台，待 MCP 工具读取后交回 Codex。';
     return;
   }
   const label = state.pendingSubmission ? '重试上一条消息'
@@ -326,6 +329,7 @@ function updateSubmitLabel() {
 }
 function renderWorkspace(workspace) {
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
+  state.boundThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
   state.approvals = Array.isArray(workspace.approvals) ? workspace.approvals : [];
@@ -353,25 +357,47 @@ function renderWorkspace(workspace) {
   updateSubmitLabel();
 }
 function renderExternalWorkspace(workspace) {
-  const waiting = state.agent.status === 'waiting_for_mcp';
-  const waitId = workspace.external_wait_id || workspace.wait_id || null;
-  if (!waiting || (waitId && state.externalWaitId && waitId !== state.externalWaitId)) state.externalSubmitted = false;
-  if (waiting && state.queue.at(-1)?.status === 'awaiting_mcp') state.externalSubmitted = true;
-  state.externalWaitId = waitId;
-  ui.feedbackIntro.textContent = 'Codex 请求反馈时，在这里圈画并提交。反馈会交回正在等待的 MCP 工具调用。';
-  ui.agentStatus.textContent = waiting
-    ? state.externalSubmitted ? '视觉反馈已提交，正在交回当前 Codex 工具调用。'
-      : '当前 Codex 的反馈工具正在等待你的圈画和文字。'
-    : '当前没有等待中的反馈工具调用。请在 Codex 会话中请求视觉反馈。';
+  const bound = !!state.boundThreadId;
+  const status = state.agent.status;
+  ui.feedbackIntro.textContent = bound
+    ? '圈画后发送图文反馈；工作台会送入原 Codex 任务，并显示处理进度。'
+    : '圈画后保存视觉反馈；MCP 工具读取后才会交回 Codex。';
+  const statusText = bound ? {
+    idle:'已连接原 Codex 任务，可以发送图文反馈。',
+    running:'原 Codex 任务正在处理视觉反馈。',
+    awaiting_approval:'原 Codex 任务需要审批后继续。',
+    delivery_uncertain:'反馈送达状态待核实，请先查看原 Codex 任务。',
+    disconnected:'暂时无法连接原 Codex 任务；反馈会先保存。',
+    error:'原 Codex 任务连接或执行出错。'
+  } : {
+    waiting_for_mcp:'反馈可保存；MCP 工具读取后才会进入 Codex。',
+    external_idle:'反馈可保存；MCP 工具读取后才会进入 Codex。',
+    disconnected:'工作台尚未连接到 MCP 服务。',
+    error:'MCP 反馈通道出错。'
+  };
+  ui.agentStatus.textContent = statusText[status] || (bound
+    ? '正在连接原 Codex 任务…' : '反馈可保存，等待 MCP 工具读取。');
   if (state.agent.error) ui.agentStatus.textContent += '：' + String(state.agent.error).slice(0, 240);
-  ui.agentStatus.className = 'agent-status' + (waiting ? ' running' : '');
-  ui.pill.textContent = waiting ? state.externalSubmitted ? '反馈已提交' : '工具等待反馈' : '等待 Codex 调用';
-  ui.pill.className = 'session-pill ' + (waiting ? 'running' : 'open');
-  ui.stop.classList.add('hidden');
-  ui.approvals.replaceChildren();
-  renderExternalDelivery();
+  ui.agentStatus.className = 'agent-status' + (status === 'running' ? ' running'
+    : ['error', 'disconnected', 'delivery_uncertain'].includes(status) ? ' error' : '');
+  ui.pill.textContent = bound ? ({idle:'原任务已连接',running:'原任务执行中',awaiting_approval:'等待审批',
+    delivery_uncertain:'送达待核实',disconnected:'连接中断',error:'连接错误'})[status] || '连接原任务'
+    : '等待 MCP 读取';
+  ui.pill.className = 'session-pill ' + (status === 'running' ? 'running'
+    : status === 'awaiting_approval' ? 'queued'
+    : ['error', 'disconnected', 'delivery_uncertain'].includes(status) ? 'error' : 'open');
+  ui.stop.classList.toggle('hidden', !bound || !['running', 'awaiting_approval'].includes(status));
+  if (bound) {
+    renderQueue({boundExternal:true});
+    renderApprovals();
+  } else {
+    ui.approvals.replaceChildren();
+    renderExternalDelivery();
+  }
   if (ui.conversation.firstElementChild?.classList.contains('muted')) {
-    ui.conversation.firstElementChild.textContent = '此模式由 MCP 工具交回反馈；Codex 的完整对话仍显示在原会话中。';
+    ui.conversation.firstElementChild.textContent = bound
+      ? '图文反馈会送入原 Codex 任务；完整对话请在原任务中查看。'
+      : '反馈保存在工作台；MCP 读取后，请在原 Codex 任务中查看后续。';
   }
   updateSubmitLabel();
 }
@@ -382,24 +408,32 @@ function renderExternalDelivery() {
   const card = document.createElement('div');
   card.className = 'queue-card';
   const title = document.createElement('strong');
-  title.textContent = item.status === 'returned_to_mcp' ? '已交回当前 Codex 工具' : '反馈已提交';
+  title.textContent = item.status === 'returned_to_mcp' ? 'MCP 已读取反馈' : '等待 MCP 读取';
   const body = document.createElement('div');
   body.textContent = item.status === 'returned_to_mcp'
-    ? '图像和标记已经作为 MCP 工具结果返回。'
-    : '工作台已保存图像和标记，等待当前 MCP 工具读取。';
+    ? '反馈已从工作台取走；请在原 Codex 任务中查看是否继续执行。'
+    : '图像和标记已保存。MCP 工具读取后才能交回 Codex。';
   card.append(title, body);
   ui.queue.append(card);
 }
-function renderQueue() {
+function renderQueue({boundExternal=false}={}) {
   ui.queue.replaceChildren();
+  const latest = state.queue.at(-1);
   for (const item of state.queue) {
-    if (!item || item.status === 'completed') continue;
+    if (!item || (item.status === 'completed' && (!boundExternal || item !== latest))) continue;
     const card = document.createElement('div');
     card.className = 'queue-card';
     const title = document.createElement('strong');
-    title.textContent = ({queued:'已加入下一轮',dispatching:'正在送达',running:'正在处理',blocked_stale:'请确认旧场景反馈',delivery_uncertain:'送达待核实',failed:'发送失败'})[item.status] || '待处理消息';
+    title.textContent = ({queued:boundExternal ? '等待送入原任务' : '已加入下一轮',dispatching:'正在送达',running:'正在处理',
+      completed:'这一轮已完成',awaiting_mcp:'等待反馈通道读取',returned_to_mcp:'MCP 已读取反馈',
+      blocked_stale:'请确认旧场景反馈',delivery_uncertain:'送达待核实',failed:'发送失败'})[item.status] || '待处理消息';
     const body = document.createElement('div');
-    body.textContent = '针对场景版本 ' + (item.scene_revision ?? '—') + (item.status === 'blocked_stale' ? '，当前场景已有新版本。确认后仍按旧截图发送。' : '');
+    body.textContent = '针对场景版本 ' + (item.scene_revision ?? '—') + (item.status === 'blocked_stale'
+      ? '，当前场景已有新版本。确认后仍按旧截图发送。'
+      : boundExternal && item.status === 'queued' ? '，反馈已保存，等待原任务空闲后送入。'
+      : boundExternal && item.status === 'running' ? '，图文反馈已送入原 Codex 任务。'
+      : '');
+    if (item.status === 'failed' && item.error) body.textContent += '：' + String(item.error).slice(0, 240);
     card.append(title, body);
     if (item.status === 'blocked_stale' && item.feedback_id) {
       const actions = document.createElement('div');
@@ -431,7 +465,7 @@ function renderQueue() {
     }
     if (item.status === 'delivery_uncertain' && item.feedback_id) {
       const warning = document.createElement('div');
-      warning.textContent = 'Gateway 在发送途中中断。请先核对 Codex 会话，再选择重试或舍弃。';
+      warning.textContent = '发送途中连接中断。请先核对 Codex 任务，再选择重试或舍弃。';
       const actions = document.createElement('div');
       actions.className = 'queue-actions';
       for (const [retry,label] of [[true,'确认未送达，重试'],[false,'已处理，舍弃']]) {
@@ -865,11 +899,11 @@ async function fetchEvents(initial=false) {
     state.seenEventIds.add(event.id);
     const payload = event.payload || {};
     const message = payload.text || payload.message || payload.summary || payload.prompt;
-    if (state.deliveryMode === 'external') {
+    if (state.deliveryMode === 'external' && !state.boundThreadId) {
       if (event.type === 'feedback_queued' || event.type === 'external_feedback_submitted' || event.type === 'feedback_submitted') {
         addConversation('user', payload.note || '已提交视觉反馈（含原图、标记和场景截图）', event.at);
       } else if (event.type === 'feedback_returned_to_mcp' || event.type === 'mcp_feedback_returned') {
-        addConversation('status', '视觉反馈已交回当前 Codex 工具调用。', event.at);
+        addConversation('status', 'MCP 已读取视觉反馈；请在原 Codex 任务中查看后续。', event.at);
       } else if (event.type === 'scene_published') {
         addConversation('status', message || '新场景已发布。', event.at);
       } else if (event.type === 'feedback_requested' || event.type === 'external_feedback_requested') {
@@ -1876,11 +1910,6 @@ async function feedbackPayload() {
 }
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || state.submitting || state.uploading) return;
-  if (state.deliveryMode === 'external' && !state.pendingSubmission &&
-      (state.agent.status !== 'waiting_for_mcp' || state.externalSubmitted)) {
-    announce('当前没有等待反馈的 Codex 工具调用。请先在原会话中请求视觉反馈。', true);
-    return;
-  }
   if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length) {
     announce('请添加参考图、画标记，或写一句话后再发送。', true);
     return;
@@ -1908,15 +1937,20 @@ async function submitFeedback() {
     await clearOutbox();
     state.pendingSubmission = null;
     state.feedbackCount += 1;
-    id('feedback-count-label').textContent = '已发 ' + state.feedbackCount + ' 轮';
+    id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
     const delivery = result.delivery?.status || (state.deliveryMode === 'external' ? 'submitted' : 'queued');
-    if (state.deliveryMode === 'external') state.externalSubmitted = true;
     ui.caption.textContent = '标记仍保留；再次发送前可删除或清空。';
     saveDraft();
     if (state.deliveryMode === 'external') {
-      announce(delivery === 'returned_to_mcp'
-        ? '视觉反馈已交回当前 Codex 工具调用。'
-        : '视觉反馈已提交，正在等待当前 Codex 工具调用读取。');
+      announce(delivery === 'running' ? '图文反馈已送入原 Codex 任务。'
+        : delivery === 'dispatching' ? '工作台正在将图文反馈送入原 Codex 任务。'
+        : delivery === 'queued' ? '反馈已保存，等待原 Codex 任务空闲后送入。'
+        : delivery === 'completed' ? '原 Codex 任务已处理这条反馈。'
+        : delivery === 'blocked_stale' ? '反馈已保存；请确认是否仍按旧场景截图发送。'
+        : delivery === 'delivery_uncertain' ? '反馈已保存，送达状态待核实，请查看原 Codex 任务。'
+        : delivery === 'failed' ? '反馈已保存，但发送失败；请查看工作台状态。'
+        : delivery === 'returned_to_mcp' ? 'MCP 已读取视觉反馈；请查看原 Codex 任务是否继续执行。'
+        : '视觉反馈已保存，等待 MCP 工具读取。');
     } else {
       announce(delivery === 'running' ? '图文消息已送进当前 Codex 会话。'
         : delivery === 'blocked_stale' ? '已保存消息；场景已更新，请在右侧确认旧截图后继续发送。'

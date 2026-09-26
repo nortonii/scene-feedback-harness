@@ -69,7 +69,7 @@ Gateway 会在项目的 Codex thread 中自动配置这五个 MCP 工具，无�
 
 ## 在现有 Codex 桌面任务中审图（外部 MCP 模式）
 
-如果你已经在 Codex 桌面中处理某个项目，可用 `--external-review` 把工作台作为该任务调用的 MCP 工具。此模式**不会创建或接管另一条 Codex 会话**：Codex 调用 `request_visual_feedback` 打开审图会话；如果浏览器成功打开，该调用默认等待并返回反馈。如果只返回地址和会话信息，则调用 `wait_visual_feedback` 等待。你在浏览器点击「发送」后，文字和实际图像作为工具结果回到**原任务**，由它继续修改场景。`get_visual_feedback` 可重新读取已提交的反馈。
+已有 Codex 桌面任务可用两种方式接收反馈。只用 `--external-review` 时，该任务调用 `request_visual_feedback`；工具默认等待浏览器提交，**即使服务端没有图形桌面、无法自动打开浏览器也会等待**。点击「发送」后，文字和图像作为 MCP 工具结果返回给仍在等待的原任务。显式传入 `wait_for_submit=False` 时，工具立即返回链接、`session_id` 和 `next_cursor`；原任务须调用 `wait_visual_feedback(session_id, cursor=next_cursor)` 来接收提交。如果等待调用已经结束或超时，反馈仍会保存，但不会自动唤醒空闲任务；可在原任务中重新读取，或使用下文的任务绑定方式。`get_visual_feedback` 可重新读取已提交的反馈。
 
 先在仓库根目录安装上面的依赖。在一个终端中设置绝对路径，注册全局 MCP，再启动独立的审图服务：
 
@@ -86,9 +86,22 @@ codex mcp add scene_feedback_external \
   --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
 ```
 
-在 `~/.codex/config.toml` 中，由 `codex mcp add` 创建的 `[mcp_servers.scene_feedback_external]` 表下设置 `tool_timeout_sec = 900`；审图工具的 `timeout_sec` 用默认 600 或更小值，留出传输图像的时间。**重启 Codex 桌面应用**，让现有任务刷新 MCP 工具目录。然后在该任务中说「进入人工调试模式」，或明确要求它调用 `request_visual_feedback`，传入项目内的参考图片路径及现有 GLB 路径（没有初始场景时可省略 GLB）。如果工具只返回 `session_id`、`next_cursor` 和地址，就打开 <http://127.0.0.1:18768/>，并以 `cursor=next_cursor` 调用 `wait_visual_feedback(session_id, cursor)`。添加参考图并标注；浏览器的发送按钮此时只完成等待中的 MCP 审图请求，**不会另外启动用户回合**。
+在 `~/.codex/config.toml` 中，由 `codex mcp add` 创建的 `[mcp_servers.scene_feedback_external]` 表下设置 `tool_timeout_sec = 900`；审图工具的 `timeout_sec` 用默认 600 或更小值，留出传输图像的时间。**重启 Codex 桌面应用**，让现有任务刷新 MCP 工具目录。然后在该任务中说「进入人工调试模式」，或明确要求它调用 `request_visual_feedback`，传入项目内的参考图片路径及现有 GLB 路径（没有初始场景时可省略 GLB）。在未绑定任务的方式下，浏览器的发送按钮完成正在等待的 MCP 调用；如果工具明确选择不等待，则须另行调用 `wait_visual_feedback`。
 
 `PROJECT` 是要审查的工程根目录，传入的参考图和 GLB 必须位于其中；它可以是 Codex 任务工作目录的子目录。`DATA` 是该项目专用的私有目录。示例使用独立的端口、数据目录和 MCP 名称，避免混用上面的默认模式。已发布的场景仍可通过 `workspace_publish_scene` 更新到页面。
+
+### 绑定现有桌面任务：发送后自动继续
+
+如果希望点击「发送」就让**已有的那条 Codex 桌面任务**继续，而不用保持 MCP 工具调用等待，先停止上述服务，再用同一工程和数据目录加上该任务的 UUID 重新启动。`THREAD_ID` 是 Codex 桌面任务 ID，**不是**工作台的 `session_id`：
+
+```bash
+THREAD_ID=your-existing-codex-task-uuid
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 \
+  --external-review --shared-thread-id "$THREAD_ID"
+```
+
+工作台会连接**同一用户、同一主机上正在运行的 Codex Desktop App Server**，并把每次提交的文字、原图、标注图和场景截图作为新用户回合送入该任务；它不会新建任务。任务忙时，反馈在队列中等候；页面会显示排队、执行和完成状态。若排队期间场景版本改变，须先确认旧版本反馈。Codex 的审批和交互请求显示在工作台，由人决定；工作台不会自动批准。若连接中断造成送达状态不确定，先检查原任务历史，再决定是否重试，以免重复发送。此方式需要通过 `backend/requirements.txt` 安装的 `websocket-client`。绑定后，`request_visual_feedback` 只需打开或更新工作台并返回链接，**无需等待 MCP 结果**。
 
 ## 在局域网的其他设备上打开页面
 
@@ -103,6 +116,8 @@ LAN_IP=192.168.1.10
 
 终端启动信息或 MCP 的 `request_visual_feedback` / `workspace_open` 结果会给出带 `access_token` 的完整链接。把**整个链接**在另一台设备的浏览器中打开；页面验证后会清除地址栏中的令牌，并用浏览器 Cookie 保持访问。不要只输入 `http://$LAN_IP:18768/`，也不要把访问链接发到公开位置。默认工作台模式也可加这两个参数，使用原来的端口和数据目录，并省略 `--external-review`。需要常驻时，可用 systemd 用户服务运行同一条启动命令。局域网开放的是工作台网页及其受保护的 API；MCP 仍由工程主机上的 Codex 经 `127.0.0.1` 在本机调用。如果连接不通，检查主机防火墙是否允许所选 TCP 端口；HTTP 局域网模式适合可信网络。
 
+使用上述桌面任务绑定方式时，在局域网启动命令中同时保留 `--shared-thread-id "$THREAD_ID"`。浏览器可位于局域网的其他设备；连接 Codex Desktop 的服务仍须运行在该桌面任务所在的同一主机和用户下。
+
 ## MCP 工具
 
 | 工具 | 用途 |
@@ -112,10 +127,10 @@ LAN_IP=192.168.1.10
 | `workspace_get_feedback` | 读取已提交反馈及其实际图像 |
 | `workspace_publish_scene` | 校验并发布新的 GLB，检查预期版本，通知页面刷新 |
 | `workspace_request_feedback` | 默认模式：在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |
-| `request_visual_feedback` / `wait_visual_feedback` | 外部 MCP 模式：发起审图并等待浏览器提交，将文字和图像交回当前任务 |
+| `request_visual_feedback` / `wait_visual_feedback` | 未绑定的外部 MCP 模式：等待提交并把图文作为工具结果交回；绑定桌面任务时，前者返回页面链接，提交自动创建新回合 |
 | `get_visual_feedback` | 外部 MCP 模式：读取已提交的视觉反馈 |
 
-仓库内的 [视觉重建 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) 提醒 Codex 区分原图和标记、编辑项目源文件，并在结果就绪时发布 GLB。默认模式无需等待某个 MCP 调用才能发送下一轮；外部 MCP 模式则由 `wait_visual_feedback` 把本轮反馈交回原任务。
+仓库内的 [视觉重建 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) 提醒 Codex 区分原图和标记、编辑项目源文件，并在结果就绪时发布 GLB。默认模式直接发送新回合；未绑定的外部 MCP 模式由正在等待的 `request_visual_feedback` 或 `wait_visual_feedback` 返回反馈；绑定桌面任务的模式则在浏览器提交后自动发送新回合。
 
 ## 验证与边界
 

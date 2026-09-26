@@ -18,8 +18,6 @@ class WorkspaceGateway:
         self.store = store
         self.project_dir = Path(project_dir).expanduser().resolve()
         self.adapter = adapter
-        if external_review and adapter is not None:
-            raise ValueError("external review cannot start a Codex App Server adapter")
         self.external_review = external_review
         self._worker_lock = threading.Lock()
         self._worker_running = False
@@ -54,7 +52,7 @@ class WorkspaceGateway:
     def start(self) -> None:
         self.ensure()
         self._started = True
-        if self.external_review:
+        if self.external_review and self.adapter is None:
             self.store.workspace_agent(status="external_idle")
             return
         if self.adapter is None:
@@ -63,10 +61,17 @@ class WorkspaceGateway:
         try:
             thread_id = self.adapter.start()
             self.store.workspace_thread(thread_id)
+            bound_task_idle = True
+            if self.external_review:
+                bound_task_idle = self.adapter.refresh().get("turn_state") == "idle"
             with self.store.lock:
                 workspace = self.store.state["workspace"]
                 active_id = workspace.get("active_feedback_id")
                 workspace["approvals"] = []
+                if self.external_review and bound_task_idle:
+                    for queued in workspace["queue"]:
+                        if queued["status"] == "awaiting_mcp":
+                            queued["status"] = "queued"
                 if active_id:
                     item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == active_id), None)
                     if item and item["status"] in {"dispatching", "running"}:
@@ -95,7 +100,7 @@ class WorkspaceGateway:
         if not payload.get("idempotency_key"):
             raise APIError(400, "idempotency_key is required for direct Codex delivery")
         feedback = self.store.submit_feedback(session_id, payload)
-        if self.external_review:
+        if self.external_review and self.adapter is None:
             with self.store.lock:
                 item = next(entry for entry in self.store.state["workspace"]["queue"] if entry["feedback_id"] == feedback["feedback_id"])
                 if item["status"] == "queued":
@@ -248,16 +253,19 @@ class WorkspaceGateway:
             if type(cursor) is not int or not 0 <= cursor <= count:
                 raise APIError(400, "cursor must refer to an existing feedback position")
             current = self.store.state["workspace"]
-            current["agent"] = {"status": "waiting_for_mcp", "turn_id": None, "error": None}
+            if self.adapter is None:
+                current["agent"] = {"status": "external_idle", "turn_id": None, "error": None}
             if message is not None:
                 current["request_feedback"] = {"message": message, "object_ids": [], "at": _now(), "scene_revision": self.store.state["scene"]["revision"]}
             self.store._save()
             self.store.workspace_event("external_feedback_requested", {"session_id": workspace["session_id"], "cursor": cursor, "message": message or ""})
-            return {"session_id": workspace["session_id"], "next_cursor": cursor, "scene_revision": self.store.state["scene"]["revision"], "delivery_mode": "external"}
+            return {"session_id": workspace["session_id"], "next_cursor": cursor, "scene_revision": self.store.state["scene"]["revision"], "delivery_mode": "external", "thread_id": current.get("thread_id")}
 
     def take_external_feedback(self, session_id: str, cursor: int) -> dict[str, Any]:
         if not self.external_review:
             raise APIError(409, "this workspace uses direct Codex delivery")
+        if self.adapter is not None:
+            raise APIError(409, "feedback is delivered directly to the bound Codex task")
         workspace = self.ensure()
         if session_id != workspace["session_id"]:
             raise APIError(409, "review session belongs to another workspace")

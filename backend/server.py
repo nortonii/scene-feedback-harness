@@ -40,12 +40,15 @@ def make_server(
     model: str | None = None,
     enable_codex: bool = False,
     external_review: bool = False,
+    shared_thread_id: str | None = None,
     adapter: object | None = None,
     listen_host: str = "127.0.0.1",
     public_base_url: str | None = None,
 ) -> ThreadingHTTPServer:
-    if external_review and (enable_codex or adapter is not None):
+    if external_review and enable_codex:
         raise ValueError("external review cannot start a separate Codex App Server thread")
+    if shared_thread_id and (not external_review or adapter is not None):
+        raise ValueError("--shared-thread-id requires --external-review without another adapter")
     if listen_host not in {"127.0.0.1", "localhost"} and not public_base_url:
         raise ValueError("--public-base-url is required when listening beyond loopback")
     if public_base_url:
@@ -66,6 +69,9 @@ def make_server(
     web_root = Path(web_dir).expanduser().resolve()
     project_root = Path(project_dir or os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)).expanduser().resolve()
     gateway = WorkspaceGateway(store, project_root, adapter=adapter, external_review=external_review)
+    if shared_thread_id:
+        from shared_thread_adapter import SharedDesktopAdapter
+        gateway.adapter = SharedDesktopAdapter(shared_thread_id, on_event=gateway.on_adapter_event)
     if enable_codex and adapter is None:
         from appserver_adapter import CodexAppServerAdapter
         gateway.adapter = CodexAppServerAdapter(
@@ -406,7 +412,8 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("SCENE_FEEDBACK_MODEL"), help="Codex model ID for this project thread")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--no-codex", action="store_true", help="serve the workbench without starting Codex App Server")
-    mode.add_argument("--external-review", action="store_true", help="wait for an existing Codex task to receive feedback through an MCP tool call")
+    mode.add_argument("--external-review", action="store_true", help="review in an existing Codex task")
+    parser.add_argument("--shared-thread-id", help="deliver submitted feedback into this already-open Codex Desktop task")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     server = make_server(
@@ -417,6 +424,7 @@ def main() -> None:
         model=args.model,
         enable_codex=not args.no_codex and not args.external_review,
         external_review=args.external_review,
+        shared_thread_id=args.shared_thread_id,
         listen_host=args.listen_host,
         public_base_url=args.public_base_url,
     )

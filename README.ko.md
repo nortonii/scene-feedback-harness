@@ -71,7 +71,7 @@ Gateway가 프로젝트의 Codex 대화에 이 다섯 가지 `scene_feedback` MC
 
 ## 기존 Codex 데스크톱 작업에서 검토하기 (외부 MCP 모드)
 
-이미 Codex 데스크톱에서 프로젝트를 작업 중이라면 `--external-review`로 작업대를 그 작업에서 호출하는 MCP 도구로 실행할 수 있습니다. 이 모드는 **다른 Codex 대화를 만들거나 인계받지 않습니다**. Codex가 `request_visual_feedback`으로 검토를 시작합니다. 브라우저가 정상적으로 열리면 이 호출이 기본적으로 입력을 기다렸다가 피드백을 반환합니다. URL과 세션 정보만 반환되면 `wait_visual_feedback`을 호출해 기다립니다. 브라우저에서 「보내기」를 누르면 글과 실제 이미지 데이터가 도구 결과로 **원래 작업**에 돌아가며, 그 작업에서 장면 수정을 이어 갑니다. `get_visual_feedback`으로 제출된 피드백을 다시 읽을 수 있습니다.
+기존 Codex 데스크톱 작업에는 두 가지 방법으로 피드백을 전달할 수 있습니다. `--external-review`만 사용할 때는 그 작업에서 `request_visual_feedback`을 호출합니다. 도구는 기본적으로 브라우저의 제출을 기다립니다. **서버에 그래픽 데스크톱이 없어 브라우저를 자동으로 열 수 없는 경우에도 기다립니다.** 「보내기」를 누르면 글과 이미지가 대기 중인 원래 작업으로 MCP 도구 결과로 돌아갑니다. `wait_for_submit=False`를 명시하면 도구가 URL, `session_id`, `next_cursor`를 즉시 반환합니다. 이 경우 원래 작업에서 `wait_visual_feedback(session_id, cursor=next_cursor)`을 호출해야 제출 내용을 받습니다. 대기 중인 호출이 이미 끝났거나 시간 초과되었다면 피드백은 저장되지만 유휴 작업이 자동으로 재개되지는 않습니다. 원래 작업에서 다시 읽거나 아래의 작업 연결 방식을 사용하세요. `get_visual_feedback`으로 제출 내용을 다시 읽을 수 있습니다.
 
 위의 의존성을 먼저 설치하세요. 터미널에서 절대 경로를 지정해 전역 MCP 서버를 등록하고, 별도의 검토 서비스를 실행합니다.
 
@@ -88,9 +88,22 @@ codex mcp add scene_feedback_external \
   --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
 ```
 
-`codex mcp add`가 만든 `~/.codex/config.toml`의 `[mcp_servers.scene_feedback_external]` 항목 아래에 `tool_timeout_sec = 900`을 설정하세요. 이미지 전송 시간을 남기도록 검토 도구의 `timeout_sec`는 기본값인 600 이하로 지정하세요. 기존 작업의 MCP 도구 목록을 새로 읽도록 **Codex 데스크톱 앱을 재시작**하세요. 그 작업에서 “进入人工调试模式”(사람이 직접 검토하는 모드로 들어가기)라고 말하거나 프로젝트 안의 참고 이미지 경로와 현재 GLB 경로를 전달해 `request_visual_feedback`을 호출하라고 명시하세요(초기 장면이 없으면 GLB는 생략 가능). 도구가 `session_id`, `next_cursor`, URL만 반환하면 <http://127.0.0.1:18768/>을 열고 그 `session_id`와 `cursor=next_cursor`로 `wait_visual_feedback`을 호출하세요. 참고 이미지를 추가해 표시하면 됩니다. 이 모드에서 브라우저의 보내기 버튼은 대기 중인 MCP 검토만 완료하며 **새 사용자 턴을 시작하지 않습니다**.
+`codex mcp add`가 만든 `~/.codex/config.toml`의 `[mcp_servers.scene_feedback_external]` 항목 아래에 `tool_timeout_sec = 900`을 설정하세요. 이미지 전송 시간을 남기도록 검토 도구의 `timeout_sec`는 기본값인 600 이하로 지정하세요. 기존 작업의 MCP 도구 목록을 새로 읽도록 **Codex 데스크톱 앱을 재시작**하세요. 그 작업에서 “进入人工调试模式”(사람이 직접 검토하는 모드로 들어가기)라고 말하거나 프로젝트 안의 참고 이미지 경로와 현재 GLB 경로를 전달해 `request_visual_feedback`을 호출하라고 명시하세요(초기 장면이 없으면 GLB는 생략 가능). 작업을 연결하지 않은 방식에서는 브라우저의 보내기 버튼이 대기 중인 MCP 호출을 완료합니다. 도구를 명시적으로 대기하지 않게 했다면 `wait_visual_feedback`을 별도로 호출해야 합니다.
 
 `PROJECT`는 검토할 재구성 프로젝트의 루트이며 참고 이미지와 GLB가 그 안에 있어야 합니다. Codex 작업 디렉터리의 하위 디렉터리여도 됩니다. `DATA`는 그 프로젝트만 사용하는 비공개 디렉터리입니다. 예제에서는 기본 모드와 섞이지 않도록 포트, 데이터 디렉터리, MCP 이름을 분리했습니다. 게시된 장면은 여전히 `workspace_publish_scene`으로 페이지에 반영할 수 있습니다.
+
+### 기존 데스크톱 작업에 연결해 자동으로 계속하기
+
+MCP 도구 호출을 대기시키지 않고 「보내기」를 누를 때 **이미 열려 있는 Codex 데스크톱 작업**이 계속되게 하려면, 위 서비스를 중지하고 같은 프로젝트와 데이터 디렉터리를 사용하면서 해당 작업의 UUID를 추가해 다시 시작하세요. `THREAD_ID`는 Codex 데스크톱 작업 ID이며, 작업대의 `session_id`가 아닙니다.
+
+```bash
+THREAD_ID=your-existing-codex-task-uuid
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 \
+  --external-review --shared-thread-id "$THREAD_ID"
+```
+
+작업대는 **같은 호스트에서 같은 사용자로 실행 중인 Codex Desktop App Server**에 연결합니다. 제출한 글, 원본 및 주석 이미지, 장면 스냅샷이 기존 작업의 새 사용자 턴이 됩니다. 새 작업을 만들지 않습니다. 작업이 실행 중이면 피드백이 대기열에서 기다리고, 페이지에 대기·실행·완료 상태가 표시됩니다. 대기 중 장면 버전이 바뀌면 이전 버전의 피드백을 확인해야 합니다. Codex의 승인 및 상호작용 요청은 작업대에 표시되며 사람이 결정합니다. 자동으로 승인하지 않습니다. 연결이 끊겨 전달 여부가 불확실해지면 중복 전송을 막기 위해 재시도 전에 원래 작업 기록을 확인하세요. 이 방식에는 `backend/requirements.txt`로 설치되는 `websocket-client`가 필요합니다. 연결된 모드에서 `request_visual_feedback`은 작업대를 열거나 업데이트하고 URL을 반환하므로 **MCP 결과를 기다릴 필요가 없습니다.**
 
 ## LAN의 다른 기기에서 페이지 열기
 
@@ -105,6 +118,8 @@ LAN_IP=192.168.1.10
 
 시작 메시지 또는 MCP의 `request_visual_feedback` / `workspace_open` 결과에 `access_token`이 포함된 전체 링크가 나옵니다. 다른 기기의 브라우저에서 **전체 링크**를 여세요. 확인이 끝나면 주소창에서 토큰을 지우고 브라우저 쿠키로 접근을 유지합니다. `http://$LAN_IP:18768/`만 입력해서는 접근할 수 없습니다. 접속 링크를 공개하지 마세요. 기본 작업대 모드에서도 기존 포트와 데이터 디렉터리를 사용하면서 이 두 옵션을 추가할 수 있으며, 이때 `--external-review`는 생략합니다. 계속 실행하려면 같은 시작 명령을 systemd 사용자 서비스로 실행할 수 있습니다. LAN에서는 작업대 웹페이지와 인증된 API를 사용할 수 있고, MCP는 프로젝트 호스트의 Codex가 계속 `127.0.0.1`을 통해 호출합니다. 연결되지 않으면 호스트 방화벽에서 선택한 TCP 포트를 허용하세요. 일반 HTTP LAN 모드는 신뢰할 수 있는 네트워크용입니다.
 
+데스크톱 작업 연결 방식을 LAN에서 사용할 때는 시작 명령에 `--shared-thread-id "$THREAD_ID"`도 유지하세요. 브라우저는 다른 LAN 기기에 있어도 되지만 Codex Desktop에 연결하는 서비스는 원래 작업과 같은 호스트와 사용자로 실행해야 합니다.
+
 ## MCP 도구
 
 | 도구 | 용도 |
@@ -114,10 +129,10 @@ LAN_IP=192.168.1.10
 | `workspace_get_feedback` | 제출된 피드백과 실제 이미지를 읽습니다 |
 | `workspace_publish_scene` | 새 GLB를 검증하고 게시하며, 예상 버전을 확인하고 페이지에 새로고침을 알립니다 |
 | `workspace_request_feedback` | 기본 모드: 페이지에서 검토를 요청하고 즉시 반환합니다. 답변은 다음 사용자 메시지가 됩니다 |
-| `request_visual_feedback` / `wait_visual_feedback` | 외부 MCP 모드: 검토를 시작하고 브라우저 제출을 기다려 글과 이미지를 원래 작업에 반환합니다 |
+| `request_visual_feedback` / `wait_visual_feedback` | 연결하지 않은 외부 MCP 모드: 제출을 기다려 글과 이미지를 도구 결과로 반환합니다. 데스크톱 작업 연결 모드: 앞의 도구는 페이지 URL을 반환하고 제출 시 새 턴이 시작됩니다 |
 | `get_visual_feedback` | 외부 MCP 모드: 제출된 시각 피드백을 다시 읽습니다 |
 
-저장소의 [시각 재구성 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)은 Codex에게 원본 이미지와 표시를 구별하고, 프로젝트 소스 파일을 편집하며, 결과가 준비되면 GLB를 게시하도록 안내합니다. 기본 모드에서는 다음 제출을 위해 MCP 호출이 대기할 필요가 없습니다. 외부 MCP 모드에서는 `wait_visual_feedback`이 피드백을 원래 작업으로 반환합니다.
+저장소의 [시각 재구성 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)은 Codex에게 원본 이미지와 표시를 구별하고, 프로젝트 소스 파일을 편집하며, 결과가 준비되면 GLB를 게시하도록 안내합니다. 기본 모드는 새 턴을 직접 보냅니다. 연결하지 않은 외부 MCP 모드는 대기 중인 `request_visual_feedback` 또는 `wait_visual_feedback`을 통해 결과를 반환합니다. 데스크톱 작업에 연결한 모드는 브라우저 제출 후 새 턴을 시작합니다.
 
 ## 검증과 사용 범위
 

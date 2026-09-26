@@ -71,7 +71,7 @@ Gateway は、このプロジェクトの Codex スレッドに 5 つの `scene_
 
 ## 既存の Codex デスクトップタスクから確認する（外部 MCP モード）
 
-すでに Codex デスクトップでプロジェクトを扱っている場合は、`--external-review` でワークベンチをそのタスクから呼び出せる MCP ツールとして起動できます。このモードは**別の Codex スレッドを作成・引き継ぎません**。Codex が `request_visual_feedback` で確認を開始します。ブラウザーが正常に開けば、この呼び出しが標準で入力を待ってフィードバックを返します。URL とセッション情報だけが返った場合は、`wait_visual_feedback` を呼んで待機します。ブラウザーで「送信」をクリックすると、文章と実際の画像データがツールの結果として**元のタスク**に戻り、そのタスクがシーンの編集を続けます。`get_visual_feedback` で送信済みのフィードバックを再取得できます。
+既存の Codex デスクトップタスクには、二つの方法でフィードバックを届けられます。`--external-review` だけを使う場合、そのタスクが `request_visual_feedback` を呼びます。ツールは標準でブラウザーからの送信を待ちます。**サーバーに画面がなく、ブラウザーを自動で開けない場合も待機します**。「送信」をクリックすると、待機中の元のタスクに文章と画像が MCP ツールの結果として戻ります。`wait_for_submit=False` を明示すると、ツールは URL、`session_id`、`next_cursor` をすぐに返します。その場合、元のタスクが `wait_visual_feedback(session_id, cursor=next_cursor)` を呼ぶ必要があります。待機中の呼び出しが終了またはタイムアウトしていれば、フィードバックは保存されますが、アイドル状態のタスクは自動的に再開しません。元のタスクから読み直すか、後述するタスクの紐付けを使ってください。`get_visual_feedback` で送信済みの内容を再取得できます。
 
 上記の依存関係を先にインストールしてください。ターミナルで絶対パスを指定してグローバル MCP サーバーを登録し、独立した確認用サービスを起動します。
 
@@ -88,9 +88,22 @@ codex mcp add scene_feedback_external \
   --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
 ```
 
-`codex mcp add` が作成した `~/.codex/config.toml` の `[mcp_servers.scene_feedback_external]` に `tool_timeout_sec = 900` を設定します。画像転送の余裕を残すため、確認ツールの `timeout_sec` は既定値の 600 以下にしてください。既存タスクの MCP ツール一覧を更新するため、**Codex デスクトップアプリを再起動**します。そのタスクで「进入人工调试模式」（人による確認モードに入る）と伝えるか、プロジェクト内の参照画像のパスと現在の GLB のパスを渡して `request_visual_feedback` を呼ぶよう明示します（初期シーンがなければ GLB は省略できます）。ツールが `session_id`、`next_cursor`、URL だけを返した場合は <http://127.0.0.1:18768/> を開き、その `session_id` と `cursor=next_cursor` で `wait_visual_feedback` を呼びます。参照画像を追加して印を付けてください。このモードでブラウザーの送信ボタンが完了させるのは待機中の MCP 確認だけであり、**別のユーザーターンは開始しません**。
+`codex mcp add` が作成した `~/.codex/config.toml` の `[mcp_servers.scene_feedback_external]` に `tool_timeout_sec = 900` を設定します。画像転送の余裕を残すため、確認ツールの `timeout_sec` は既定値の 600 以下にしてください。既存タスクの MCP ツール一覧を更新するため、**Codex デスクトップアプリを再起動**します。そのタスクで「进入人工调试模式」（人による確認モードに入る）と伝えるか、プロジェクト内の参照画像のパスと現在の GLB のパスを渡して `request_visual_feedback` を呼ぶよう明示します（初期シーンがなければ GLB は省略できます）。タスクを紐付けない場合、ブラウザーの送信ボタンは待機中の MCP 呼び出しを完了します。明示的に待機しない設定にした場合は、別途 `wait_visual_feedback` を呼びます。
 
 `PROJECT` は確認する再構成プロジェクトのルートです。参照画像と GLB はその中に置きます。Codex タスクの作業ディレクトリのサブディレクトリでも構いません。`DATA` にはそのプロジェクト専用の非公開ディレクトリを指定してください。例では標準モードと混ざらないよう、ポート、データディレクトリ、MCP 名を分けています。公開したシーンは引き続き `workspace_publish_scene` でページへ反映できます。
+
+### 既存のデスクトップタスクに紐付けて自動的に再開する
+
+MCP ツールを待機させず、「送信」した時点で**開いている元の Codex デスクトップタスク**を続行したい場合は、上記のサービスを停止し、同じプロジェクトとデータディレクトリにそのタスクの UUID を指定して再起動します。`THREAD_ID` は Codex デスクトップのタスク ID であり、ワークベンチの `session_id` ではありません。
+
+```bash
+THREAD_ID=your-existing-codex-task-uuid
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 \
+  --external-review --shared-thread-id "$THREAD_ID"
+```
+
+ワークベンチは**同じホストで同じユーザーが実行している Codex Desktop App Server**に接続します。送信した文章、元画像、注釈付き画像、シーンのスナップショットが、既存タスクの新しいユーザーターンになります。新しいタスクは作成されません。タスクの実行中はフィードバックをキューに入れ、ページに待機・実行・完了の状態を表示します。待機中にシーンのリビジョンが変わった場合は、古いリビジョンに対するフィードバックの確認が必要です。Codex の承認と対話の要求はワークベンチに表示され、人が判断します。自動承認はしません。切断後に送達状態が不明な場合は、重複送信を避けるため、再試行前に元のタスク履歴を確認してください。この方式では `backend/requirements.txt` からインストールされる `websocket-client` を使います。紐付け後の `request_visual_feedback` はワークベンチを開くか更新して URL を返すため、**MCP の結果を待機させる必要はありません**。
 
 ## LAN 上の別の端末からページを開く
 
@@ -105,6 +118,8 @@ LAN_IP=192.168.1.10
 
 起動時の出力、または MCP の `request_visual_feedback` / `workspace_open` の結果に `access_token` を含む完全なリンクが表示されます。別の端末のブラウザーでその**リンク全体**を開いてください。検証後、トークンはアドレスバーから消え、ブラウザー Cookie でアクセスが維持されます。`http://$LAN_IP:18768/` だけを入力してもアクセスできません。リンクは公開しないでください。標準のワークベンチモードでも、従来のポートとデータディレクトリに同じ二つのオプションを追加できます。その場合は `--external-review` を省きます。常駐させる場合は同じ起動コマンドを systemd のユーザーサービスで実行できます。LAN ではワークベンチの Web ページと認証済み API が利用でき、MCP は引き続きプロジェクトホスト上の Codex が `127.0.0.1` 経由で呼び出します。接続できない場合はホストのファイアウォールで選択した TCP ポートを許可してください。平文 HTTP の LAN モードは信頼できるネットワーク向けです。
 
+デスクトップタスクへの紐付けを LAN で使う場合は、起動コマンドに `--shared-thread-id "$THREAD_ID"` も追加します。ブラウザーは別の LAN 端末から開けますが、Codex Desktop に接続するサービスは、元のタスクと同じホスト・ユーザーで実行してください。
+
 ## MCP ツール
 
 | ツール | 用途 |
@@ -114,10 +129,10 @@ LAN_IP=192.168.1.10
 | `workspace_get_feedback` | 送信済みフィードバックと実際の画像を読み取る |
 | `workspace_publish_scene` | 新しい GLB を検証して公開し、想定リビジョンを確認してページの更新を通知する |
 | `workspace_request_feedback` | 標準モード：ページで確認を依頼してすぐに返る。返信は次のユーザーメッセージになる |
-| `request_visual_feedback` / `wait_visual_feedback` | 外部 MCP モード：確認を始め、ブラウザーからの送信を待ち、文章と画像を元のタスクへ返す |
+| `request_visual_feedback` / `wait_visual_feedback` | 紐付けない外部 MCP モード：送信を待ち、文章と画像をツールの結果として返す。デスクトップタスク紐付け時：前者は URL を返し、送信が新しいターンを開始する |
 | `get_visual_feedback` | 外部 MCP モード：送信済みの視覚フィードバックを再取得する |
 
-リポジトリ内の[ビジュアル再構築 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)は、元画像と注釈の区別、プロジェクトのソースファイルの編集、結果が準備できたときの GLB 公開を Codex に促します。標準モードでは次の送信まで MCP 呼び出しを待機させる必要はありません。外部 MCP モードでは、`wait_visual_feedback` が元のタスクにフィードバックを返します。
+リポジトリ内の[ビジュアル再構築 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)は、元画像と注釈の区別、プロジェクトのソースファイルの編集、結果が準備できたときの GLB 公開を Codex に促します。標準モードは新しいターンを直接送ります。紐付けない外部 MCP モードは、待機中の `request_visual_feedback` または `wait_visual_feedback` を通して結果を返します。デスクトップタスクに紐付けたモードは、ブラウザーからの送信後に新しいターンを開始します。
 
 ## 検証と適用範囲
 
