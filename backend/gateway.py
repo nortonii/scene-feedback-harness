@@ -65,6 +65,17 @@ class WorkspaceGateway:
             if self.external_review:
                 bound_task_idle = self.adapter.refresh().get("turn_state") == "idle"
             with self.store.lock:
+                saved_workspace = self.store.state["workspace"]
+                saved_active = saved_workspace.get("active_feedback_id")
+                saved_item = next((entry for entry in saved_workspace["queue"] if entry["feedback_id"] == saved_active), None)
+                saved_turn_id = saved_item.get("turn_id") if saved_item else None
+            recovered_turn = None
+            if self.external_review and saved_turn_id and hasattr(self.adapter, "lookup_turn"):
+                try:
+                    recovered_turn = self.adapter.lookup_turn(saved_turn_id)
+                except Exception:
+                    logging.exception("Could not reconcile the previous shared Codex turn")
+            with self.store.lock:
                 workspace = self.store.state["workspace"]
                 active_id = workspace.get("active_feedback_id")
                 workspace["approvals"] = []
@@ -75,11 +86,18 @@ class WorkspaceGateway:
                 if active_id:
                     item = next((entry for entry in workspace["queue"] if entry["feedback_id"] == active_id), None)
                     if item and item["status"] in {"dispatching", "running"}:
-                        item["status"] = "delivery_uncertain"
-                        item["error"] = "Gateway restarted during a turn; inspect the thread before retrying."
-                        workspace["agent"] = {"status": "delivery_uncertain", "turn_id": item.get("turn_id"), "error": item["error"]}
+                        if recovered_turn and recovered_turn.get("id") == item.get("turn_id") and recovered_turn.get("status") in {"completed", "failed", "interrupted"}:
+                            item["status"] = recovered_turn["status"]
+                            item["error"] = None
+                            workspace["active_feedback_id"] = None
+                            workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                            self.store.workspace_event("turn_reconciled", {"feedback_id": active_id, "turn_id": item["turn_id"], "status": item["status"]})
+                        else:
+                            item["status"] = "delivery_uncertain"
+                            item["error"] = "Gateway restarted during a turn; inspect the thread before retrying."
+                            workspace["agent"] = {"status": "delivery_uncertain", "turn_id": item.get("turn_id"), "error": item["error"]}
+                            self.store.workspace_event("delivery_uncertain", {"feedback_id": active_id, "message": item["error"]})
                         self.store._save()
-                        self.store.workspace_event("delivery_uncertain", {"feedback_id": active_id, "message": item["error"]})
                 else:
                     workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
                     self.store._save()

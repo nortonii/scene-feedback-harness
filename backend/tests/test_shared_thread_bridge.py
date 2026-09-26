@@ -31,6 +31,7 @@ class FakeWebSocket:
     def __init__(self, status: str = "idle", *, fail_turn_receive: bool = False) -> None:
         self.status = status
         self.fail_turn_receive = fail_turn_receive
+        self.turns: list[dict] = []
         self.sent: list[dict] = []
         self.responses: deque[dict] = deque()
         self.closed = False
@@ -44,6 +45,11 @@ class FakeWebSocket:
             self.responses.append({"id": request_id, "result": {"userAgent": "fake"}})
             self.responses.append({"method": "account/updated", "params": {}})
         elif method == "thread/read":
+            thread = {"id": THREAD_ID, "status": {"type": self.status}}
+            if message.get("params", {}).get("includeTurns"):
+                thread["turns"] = list(self.turns)
+            self.responses.append({"id": request_id, "result": {"thread": thread}})
+        elif method == "thread/resume":
             self.responses.append({"id": request_id, "result": {"thread": {"id": THREAD_ID, "status": {"type": self.status}}}})
         elif method == "turn/start" and not self.fail_turn_receive:
             self.responses.append({"id": 99, "method": "item/commandExecution/requestApproval", "params": {"threadId": THREAD_ID, "turnId": "turn-1"}})
@@ -62,6 +68,44 @@ class FakeWebSocket:
 
 
 class SharedThreadBridgeTests(unittest.TestCase):
+    def test_reads_exact_turn_history_without_inferring_from_idle(self) -> None:
+        ws = FakeWebSocket("idle")
+        ws.turns = [
+            {"id": "turn-1", "status": "inProgress"},
+            {"id": "unrelated", "status": "completed"},
+        ]
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        self.assertNotIn("turns", bridge.read_thread())
+        turns = bridge.read_thread(include_turns=True)["turns"]
+        self.assertEqual(turns[0], {"id": "turn-1", "status": "inProgress"})
+        self.assertEqual(turns[1], {"id": "unrelated", "status": "completed"})
+        self.assertEqual([item["params"]["includeTurns"] for item in ws.sent if item.get("method") == "thread/read"], [False, True])
+
+    def test_subscribes_only_to_selected_loaded_daemon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            loaded_path = root / ("a" * 64)
+            other_path = root / ("b" * 64)
+            connections = {loaded_path: FakeWebSocket(), other_path: FakeWebSocket("notLoaded")}
+            with socket.socket(socket.AF_UNIX) as first, socket.socket(socket.AF_UNIX) as second:
+                first.bind(str(loaded_path))
+                second.bind(str(other_path))
+                loaded_path.chmod(0o600)
+                other_path.chmod(0o600)
+                bridge = SharedThreadBridge.connect_for_thread(
+                    THREAD_ID, socket_dir=root, connector=lambda path, _timeout: connections[path], subscribe=True
+                )
+                try:
+                    self.assertEqual(bridge.socket_path, loaded_path)
+                    loaded_subscriptions = [item for item in connections[loaded_path].sent if item.get("method") == "thread/resume"]
+                    other_subscriptions = [item for item in connections[other_path].sent if item.get("method") == "thread/resume"]
+                    self.assertEqual(len(loaded_subscriptions), 1)
+                    self.assertEqual(loaded_subscriptions[0]["params"]["threadId"], THREAD_ID)
+                    self.assertEqual(other_subscriptions, [])
+                finally:
+                    bridge.close()
+
     def test_connect_performs_unix_websocket_upgrade(self) -> None:
         with patch("shared_thread_bridge.socket.socket") as socket_factory, patch("shared_thread_bridge._checked_peer") as peer_check, patch("websocket.create_connection") as upgrade:
             raw = socket_factory.return_value

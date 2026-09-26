@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from appserver_adapter import TurnBusyError, UncertainDeliveryError
 from shared_thread_bridge import SharedThreadBridge, SharedThreadNotIdle, SharedThreadTimeout, UncertainTurnDelivery
+
+
+_RECONCILE_INTERVAL_SEC = 5.0
 
 
 class SharedDesktopAdapter:
@@ -62,12 +66,19 @@ class SharedDesktopAdapter:
                         if self._closed:
                             raise RuntimeError("shared desktop adapter is closed")
                     try:
-                        bridge = SharedThreadBridge.connect_for_thread(self.thread_id)
-                        break
+                        bridge = SharedThreadBridge.connect_for_thread(self.thread_id, subscribe=True)
                     except SharedThreadNotIdle:
                         time.sleep(1)
-                # start_turn checks idle again immediately before sending.
-                turn_id = bridge.start_turn(text, image_paths, client_user_message_id=message_id)
+                        continue
+                    # Another client can start a turn between the subscription
+                    # and this second idle check. No turn/start was sent yet.
+                    try:
+                        turn_id = bridge.start_turn(text, image_paths, client_user_message_id=message_id)
+                        break
+                    except SharedThreadNotIdle:
+                        bridge.close()
+                        bridge = None
+                        time.sleep(1)
                 with self._lock:
                     if self._closed:
                         raise UncertainDeliveryError("adapter closed after Codex accepted the turn")
@@ -90,6 +101,7 @@ class SharedDesktopAdapter:
     def _read_loop(self, bridge: SharedThreadBridge) -> None:
         try:
             bridge.ws.settimeout(1.0)
+            next_reconcile = time.monotonic() + _RECONCILE_INTERVAL_SEC
             while True:
                 with self._lock:
                     if self._closed or self._bridge is not bridge:
@@ -97,6 +109,22 @@ class SharedDesktopAdapter:
                 try:
                     message = bridge.receive_message()
                 except SharedThreadTimeout:
+                    if time.monotonic() >= next_reconcile:
+                        next_reconcile = time.monotonic() + _RECONCILE_INTERVAL_SEC
+                        with self._lock:
+                            active_id = self._active_turn_id
+                        if active_id:
+                            try:
+                                saved_turn = self.lookup_turn(active_id)
+                            except Exception:
+                                logging.exception("Could not reconcile shared Codex turn")
+                            else:
+                                if saved_turn and saved_turn.get("status") in {"completed", "failed", "interrupted"}:
+                                    with self._lock:
+                                        self._active_turn_id = None
+                                        self._turn_state = "idle"
+                                    self.on_event({"method": "turn/completed", "params": {"threadId": self.thread_id, "turn": saved_turn}})
+                                    return
                     continue
                 if "id" in message and "method" in message:
                     with self._lock:
@@ -113,12 +141,15 @@ class SharedDesktopAdapter:
                     params = message.get("params") or {}
                     if isinstance(params, dict) and params.get("threadId") not in {None, self.thread_id}:
                         continue
-                    self.on_event(message)
-                    if message["method"] == "turn/completed" and not bridge.active_turn_id:
+                    if message["method"] == "turn/completed":
+                        if bridge.active_turn_id:
+                            continue
                         with self._lock:
                             self._active_turn_id = None
                             self._turn_state = "idle"
+                        self.on_event(message)
                         return
+                    self.on_event(message)
         except Exception as exc:
             with self._lock:
                 if not self._closed:
@@ -134,6 +165,18 @@ class SharedDesktopAdapter:
                         result["error"] = "shared Codex connection closed"
                         event.set()
                     self._pending_rpc.clear()
+            bridge.close()
+
+    def lookup_turn(self, turn_id: str) -> dict[str, Any] | None:
+        """Read the authoritative saved status for one exact turn ID."""
+        bridge = SharedThreadBridge.connect_for_thread(self.thread_id, require_idle=False)
+        try:
+            thread = bridge.read_thread(include_turns=True)
+            for turn in thread.get("turns") or []:
+                if isinstance(turn, dict) and turn.get("id") == turn_id:
+                    return turn
+            return None
+        finally:
             bridge.close()
 
     def respond_to_request(self, request_id: int | str, result: dict[str, Any]) -> None:

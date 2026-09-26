@@ -34,9 +34,10 @@ def wait_for(predicate, timeout: float = 2.0) -> None:
 class FakeBridge:
     """Only the bridge surface that SharedDesktopAdapter uses."""
 
-    def __init__(self, *, uncertain: bool = False) -> None:
+    def __init__(self, *, uncertain: bool = False, daemon: dict | None = None) -> None:
         self.ws = self
         self.uncertain = uncertain
+        self.daemon = daemon
         self.incoming: queue.Queue[dict] = queue.Queue()
         self.started: list[tuple[str, list[str], str]] = []
         self.responses: list[tuple[int | str, dict]] = []
@@ -46,14 +47,25 @@ class FakeBridge:
     def settimeout(self, _seconds: float) -> None:
         pass
 
-    def read_thread(self) -> dict:
-        return {"id": THREAD_ID, "status": {"type": "idle"}}
+    def read_thread(self, include_turns: bool = False) -> dict:
+        if self.daemon is not None:
+            return {
+                "id": THREAD_ID,
+                "status": {"type": self.daemon["status"]},
+                "turns": list(self.daemon["turns"]) if include_turns else [],
+            }
+        return {"id": THREAD_ID, "status": {"type": "idle"}, "turns": []}
 
     def start_turn(self, text: str, image_paths, *, client_user_message_id: str) -> str:
         self.started.append((text, list(image_paths), client_user_message_id))
         if self.uncertain:
             raise UncertainTurnDelivery("socket closed after turn/start")
-        self.active_turn_id = "turn-1"
+        if self.daemon is not None:
+            self.active_turn_id = f"turn-{len(self.daemon['turns']) + 1}"
+            self.daemon["turns"].append({"id": self.active_turn_id, "status": "inProgress"})
+            self.daemon["status"] = "active"
+        else:
+            self.active_turn_id = "turn-1"
         return self.active_turn_id
 
     def receive_message(self) -> dict:
@@ -104,6 +116,34 @@ class FakeBoundAdapter:
 
 
 class SharedDesktopAdapterTests(unittest.TestCase):
+    def test_silent_socket_reconciles_only_the_exact_completed_turn(self) -> None:
+        daemon = {"status": "idle", "turns": []}
+        bridges: list[FakeBridge] = []
+        events: list[dict] = []
+
+        def connect(_thread_id: str, **_kwargs) -> FakeBridge:
+            bridge = FakeBridge(daemon=daemon)
+            bridges.append(bridge)
+            return bridge
+
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", side_effect=connect):
+            adapter = SharedDesktopAdapter(THREAD_ID, events.append)
+            self.assertEqual(adapter.start_turn("Fix the shape", [], message_id="feedback-1")["turn_id"], "turn-1")
+            # The socket never receives turn/completed. A different completed
+            # turn must not satisfy this active feedback's completion check.
+            daemon["turns"].append({"id": "another-turn", "status": "completed"})
+            self.assertIsNone(adapter.lookup_turn("missing-turn"))
+            self.assertEqual(adapter.lookup_turn("turn-1")["status"], "inProgress")
+            daemon["turns"][0]["status"] = "completed"
+            daemon["status"] = "idle"
+            wait_for(lambda: adapter.status()["turn_state"] == "idle", timeout=8.0)
+            completed = [event for event in events if event.get("method") == "turn/completed"]
+            self.assertEqual(len(completed), 1)
+            self.assertEqual(completed[0]["params"]["turn"]["id"], "turn-1")
+            self.assertEqual(completed[0]["params"]["turn"]["status"], "completed")
+            self.assertTrue(bridges[0].closed)
+            adapter.close()
+
     def test_preserves_connection_for_pending_approval_and_completion(self) -> None:
         bridges: list[FakeBridge] = []
         events: list[dict] = []
@@ -162,6 +202,40 @@ class BoundGatewayTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_startup_recovers_completed_active_feedback_before_dispatching_next(self) -> None:
+        daemon = {"status": "idle", "turns": [{"id": "turn-1", "status": "completed"}]}
+        bridges: list[FakeBridge] = []
+
+        def connect(_thread_id: str, **_kwargs) -> FakeBridge:
+            bridge = FakeBridge(daemon=daemon)
+            bridges.append(bridge)
+            return bridge
+
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None)
+        gateway = WorkspaceGateway(self.store, self.project, adapter=adapter, external_review=True)
+        adapter.on_event = gateway.on_adapter_event
+        workspace = gateway.ensure()
+        first = self.store.submit_feedback(workspace["session_id"], {"idempotency_key": "persisted-first", "scene_revision": 1, "note": "first"})
+        second = self.store.submit_feedback(workspace["session_id"], {"idempotency_key": "persisted-second", "scene_revision": 1, "note": "second"})
+        with self.store.lock:
+            stored = self.store.state["workspace"]
+            first_item = next(item for item in stored["queue"] if item["feedback_id"] == first["feedback_id"])
+            first_item.update(status="running", turn_id="turn-1")
+            stored["active_feedback_id"] = first["feedback_id"]
+            stored["agent"] = {"status": "running", "turn_id": "turn-1", "error": None}
+            self.store._save()
+
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", side_effect=connect):
+            gateway.start()
+            wait_for(lambda: next(item for item in gateway.state()["queue"] if item["feedback_id"] == second["feedback_id"])["status"] == "running")
+            state = gateway.state()
+            self.assertEqual(state["queue"][0]["status"], "completed")
+            self.assertEqual(state["queue"][1]["status"], "running")
+            self.assertEqual(state["active_feedback_id"], second["feedback_id"])
+            started = [entry for bridge in bridges for entry in bridge.started]
+            self.assertEqual([entry[2] for entry in started], [second["feedback_id"]])
+            gateway.close()
 
     def test_submit_dispatches_to_bound_task_once_then_completes(self) -> None:
         adapter = FakeBoundAdapter()

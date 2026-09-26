@@ -124,6 +124,7 @@ class SharedThreadBridge:
         socket_dir: Path | None = None,
         timeout: float = 10.0,
         require_idle: bool = True,
+        subscribe: bool = False,
         connector: Callable[[Path, float], Any] = _connect,
     ) -> "SharedThreadBridge":
         """Select the single daemon where ``thread_id`` is already loaded.
@@ -165,6 +166,14 @@ class SharedThreadBridge:
         if require_idle and thread.get("status", {}).get("type") != "idle":
             bridge.close()
             raise SharedThreadNotIdle(f"Codex task status is {thread.get('status')!r}")
+        if subscribe:
+            try:
+                resumed = bridge._rpc("thread/resume", {"threadId": thread_id}).get("thread")
+                if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
+                    raise SharedThreadBridgeError("thread/resume returned the wrong task")
+            except Exception:
+                bridge.close()
+                raise
         return bridge
 
     def _send(self, message: dict[str, Any]) -> None:
@@ -207,9 +216,9 @@ class SharedThreadBridge:
         self._rpc("initialize", {"clientInfo": {"name": "scene_feedback_shared_bridge", "title": "Scene Feedback Shared Bridge", "version": "0.1.0"}})
         self._send({"method": "initialized", "params": {}})
 
-    def read_thread(self) -> dict[str, Any]:
-        """Read task state without loading or subscribing to it."""
-        thread = self._rpc("thread/read", {"threadId": self.thread_id, "includeTurns": False}).get("thread")
+    def read_thread(self, *, include_turns: bool = False) -> dict[str, Any]:
+        """Read task state; optionally include its persisted turn outcomes."""
+        thread = self._rpc("thread/read", {"threadId": self.thread_id, "includeTurns": include_turns}).get("thread")
         if not isinstance(thread, dict) or thread.get("id") != self.thread_id:
             raise SharedThreadBridgeError("thread/read returned the wrong task")
         return thread
@@ -270,7 +279,7 @@ class SharedThreadBridge:
         message = self._pending.popleft() if self._pending else self._receive()
         if message.get("method") == "turn/completed":
             params = message.get("params") or {}
-            if params.get("threadId") == self.thread_id and (params.get("turn") or {}).get("id") == self._active_turn_id:
+            if params.get("threadId") in {None, self.thread_id} and (params.get("turn") or {}).get("id") == self._active_turn_id:
                 self._active_turn_id = None
         return message
 
