@@ -372,8 +372,11 @@ class WorkspaceGateway:
                 workspace = self.store.state["workspace"]
                 if workspace.get("active_feedback_id"):
                     return
-                item = next((entry for entry in workspace["queue"] if entry["status"] in {"queued", "blocked_stale", "delivery_uncertain"}), None)
-                if item is None or item["status"] != "queued":
+                # A feedback captured against an older scene needs a human
+                # decision, but must not hold up newer feedback that already
+                # targets the current revision.
+                item = next((entry for entry in workspace["queue"] if entry["status"] == "queued"), None)
+                if item is None:
                     return
                 revision = self.store.state["scene"]["revision"]
                 if item["scene_revision"] != revision and item.get("confirmed_against_revision") != revision:

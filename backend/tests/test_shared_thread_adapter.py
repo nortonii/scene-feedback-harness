@@ -285,6 +285,26 @@ class BoundGatewayTests(unittest.TestCase):
         self.assertEqual(SceneStore(self.store.data_dir).workspace()["queue"][0]["status"], "completed")
         gateway.close()
 
+    def test_stale_feedback_does_not_block_newer_feedback_for_current_scene(self) -> None:
+        adapter = FakeBoundAdapter()
+        gateway = WorkspaceGateway(self.store, self.project, adapter=adapter, external_review=True)
+        gateway.start()
+        session_id = gateway.state()["session_id"]
+        with patch.object(gateway, "wake"):
+            old = gateway.submit(session_id, {"idempotency_key": "old-shape", "scene_revision": 1, "note": "Old shape"})
+        scene = self.store.replace_scene(1, self.store.scene()["objects"])
+        self.assertEqual(scene["revision"], 2)
+
+        new = gateway.submit(session_id, {"idempotency_key": "new-shape", "scene_revision": 2, "note": "Current shape"})
+        wait_for(lambda: any(item["feedback_id"] == new["feedback_id"] and item["status"] == "running" for item in gateway.state()["queue"]))
+        state = gateway.state()
+        items = {item["feedback_id"]: item for item in state["queue"]}
+        self.assertEqual(items[old["feedback_id"]]["status"], "blocked_stale")
+        self.assertEqual(items[new["feedback_id"]]["status"], "running")
+        self.assertEqual(state["active_feedback_id"], new["feedback_id"])
+        self.assertEqual([call["message_id"] for call in adapter.calls], [new["feedback_id"]])
+        gateway.close()
+
     def test_uncertain_bound_delivery_stays_queued_for_explicit_resolution(self) -> None:
         adapter = FakeBoundAdapter(uncertain=True)
         gateway = WorkspaceGateway(self.store, self.project, adapter=adapter, external_review=True)
