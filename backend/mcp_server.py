@@ -36,8 +36,11 @@ def _http(method: str, path: str, payload: dict[str, Any] | None = None, *, priv
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    if private:
+    try:
         headers["X-Scene-Harness-Key"] = (DATA_DIR / "control_token").read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        if private:
+            raise RuntimeError(f"Workspace Gateway control key is missing from {DATA_DIR}") from None
     request = urllib.request.Request(BASE_URL + path, data=body, headers=headers, method=method)
     try:
         with _opener.open(request, timeout=timeout) as response:
@@ -148,7 +151,12 @@ def _external_state() -> dict[str, Any]:
     return state
 
 
-async def _wait_for_external_feedback(session_id: str, timeout_sec: int, cursor: int) -> dict[str, Any]:
+def _browser_url(state: dict[str, Any]) -> str:
+    """Prefer the server's accessible browser link over the local API address."""
+    return state.get("browser_url") or f"{BASE_URL}/?{urlencode({'session_id': state['session_id']})}"
+
+
+async def _wait_for_external_feedback(session_id: str, timeout_sec: int, cursor: int, browser_url: str) -> dict[str, Any]:
     if type(timeout_sec) is not int or not 1 <= timeout_sec <= 3600:
         raise ValueError("timeout_sec must be between 1 and 3600")
     if type(cursor) is not int or cursor < 0:
@@ -158,10 +166,10 @@ async def _wait_for_external_feedback(session_id: str, timeout_sec: int, cursor:
     while True:
         result = await asyncio.to_thread(_http, "GET", f"/api/workspace/external/feedback?{query}", private=True)
         if result["items"] or result.get("status") != "open":
-            result["url"] = f"{BASE_URL}/?session_id={session_id}"
+            result["url"] = browser_url
             return result
         if asyncio.get_running_loop().time() >= deadline:
-            return {"session_id": session_id, "status": "timeout", "items": [], "next_cursor": cursor, "url": f"{BASE_URL}/?session_id={session_id}", "message": "The workbench remains open. Call wait_visual_feedback later with this session_id and next_cursor."}
+            return {"session_id": session_id, "status": "timeout", "items": [], "next_cursor": cursor, "url": browser_url, "message": "The workbench remains open. Call wait_visual_feedback later with this session_id and next_cursor."}
         await asyncio.sleep(0.35)
 
 
@@ -174,7 +182,8 @@ def workspace_open(open_browser: bool = True) -> dict[str, Any]:
         _http("POST", "/api/workspace/external/request", {"session_id": result["session_id"]}, private=True)
         result = _http("GET", "/api/workspace/state")
     result.pop("browser_capability", None)
-    result["url"] = f"{BASE_URL}/?session_id={result['session_id']}"
+    result["url"] = _browser_url(result)
+    result.pop("browser_url", None)
     result["browser_opened"] = False
     if open_browser and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         try:
@@ -221,8 +230,11 @@ def workspace_publish_scene(local_path: str, expected_revision: int) -> dict[str
 def workspace_request_feedback(message: str, object_ids: list[str] | None = None) -> dict[str, Any]:
     """Ask the human to inspect a result in the workbench, then return immediately."""
     ensure_http_server()
-    if _http("GET", "/api/workspace/state").get("delivery_mode") == "external":
-        return _http("POST", "/api/workspace/external/request", {"message": message}, private=True)
+    state = _http("GET", "/api/workspace/state")
+    if state.get("delivery_mode") == "external":
+        result = _http("POST", "/api/workspace/external/request", {"message": message}, private=True)
+        result["url"] = _browser_url(state)
+        return result
     return _http("POST", "/api/workspace/request-feedback", {"message": message, "object_ids": object_ids}, private=True)
 
 
@@ -264,7 +276,7 @@ async def request_visual_feedback(
         await asyncio.to_thread(_http, "PUT", "/api/scene", {"expected_revision": scene["revision"], "objects": current_scene["objects"]}, private=True)
     request = await asyncio.to_thread(_http, "POST", "/api/workspace/external/request", {"session_id": state["session_id"], "cursor": cursor, "message": "请在参考图和当前场景上标出要调整的位置，然后发送给当前 Codex 任务。"}, private=True)
     effective_cursor = request["next_cursor"]
-    url = f"{BASE_URL}/?session_id={state['session_id']}"
+    url = _browser_url(state)
     opened = False
     if open_browser and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         try:
@@ -272,7 +284,7 @@ async def request_visual_feedback(
         except Exception:
             logging.exception("Could not open the visual workbench")
     if wait_for_submit and opened:
-        result = await _wait_for_external_feedback(state["session_id"], timeout_sec, effective_cursor)
+        result = await _wait_for_external_feedback(state["session_id"], timeout_sec, effective_cursor, url)
         result["browser_opened"] = opened
         return _visual_tool_result(result)
     response = {**request, "url": url, "browser_opened": opened, "reference_images": _http("GET", "/api/workspace/context")["reference_images"]}
@@ -288,7 +300,7 @@ async def wait_visual_feedback(session_id: str, cursor: int = 0, timeout_sec: in
     if session_id != state["session_id"]:
         raise ValueError("session_id belongs to a different workspace")
     await asyncio.to_thread(_http, "POST", "/api/workspace/external/request", {"session_id": session_id, "cursor": cursor}, private=True)
-    return _visual_tool_result(await _wait_for_external_feedback(session_id, timeout_sec, cursor))
+    return _visual_tool_result(await _wait_for_external_feedback(session_id, timeout_sec, cursor, _browser_url(state)))
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
@@ -301,7 +313,7 @@ def get_visual_feedback(session_id: str, cursor: int = 0) -> CallToolResult:
         raise ValueError("cursor must be a nonnegative integer")
     query = urlencode({"session_id": session_id, "cursor": cursor})
     result = _http("GET", f"/api/workspace/external/feedback?{query}", private=True)
-    result["url"] = f"{BASE_URL}/?session_id={session_id}"
+    result["url"] = _browser_url(state)
     return _visual_tool_result(result)
 
 

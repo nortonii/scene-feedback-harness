@@ -86,6 +86,19 @@ In `~/.codex/config.toml`, set `tool_timeout_sec = 900` under the `[mcp_servers.
 
 `PROJECT` is the reconstruction root under review; the reference images and GLB must be inside it. It may be a subdirectory of the Codex task's working directory. `DATA` is a private directory dedicated to that project. The example uses a separate port, data directory, and MCP server name to keep it apart from the default mode above. Published scenes can still update the page through `workspace_publish_scene`.
 
+## Open the page from another device on the LAN
+
+Keep the service on the machine that holds the project and runs Codex and MCP; other devices only need a browser. Stop the old service on this port, then use the same `REPO`, `PROJECT`, and `DATA` values as above. Replace the example IP with the **service host's** reachable LAN IPv4 address:
+
+```bash
+LAN_IP=192.168.1.10
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review \
+  --listen-host 0.0.0.0 --public-base-url "http://$LAN_IP:18768"
+```
+
+The startup output or the MCP `request_visual_feedback` / `workspace_open` result provides a complete link containing `access_token`. Open that **full link** in the other device's browser. After checking it, the page removes the token from the address bar and keeps access in a browser cookie. Entering only `http://$LAN_IP:18768/` will not grant access; keep the access link private. The default workbench mode accepts the same two flags with its existing port and data directory; omit `--external-review` there. For a persistent service, run the same command under a systemd user service. The workbench page and its protected API are available over the LAN. Codex on the project host still calls MCP through `127.0.0.1`. If the page is unreachable, allow the selected TCP port in the host firewall. Plain HTTP LAN mode is intended for a trusted network.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -110,6 +123,6 @@ The real App Server integration was tested with two different local images: Code
 
 An end-to-end Selenium run also exercised two browser → Codex turns in the same thread. In the first turn, numbered rectangles were drawn on the reference image and scene and submitted from the browser. Codex received five actual image inputs, edited the demo's `scene.json`, generated a GLB, and successfully published through the project-scoped `workspace_publish_scene` MCP tool twice. Approval was handled on the page; the workbench refreshed as the scene advanced from revision 2 to 3 and then 4. The cabinet's final center was `x=-0.8`. In the second turn, another line was drawn on the reference image and submitted from the page. Codex received five more `input_image` items in the same thread and replied with a confirmation. It did not edit files or publish another scene, so the final revision remained 4.
 
-The service listens only on `127.0.0.1` and is intended for trusted local use. Codex turns in the `workspace-write` sandbox enable `networkAccess: true` to reach the local MCP Gateway. The page's control API uses a random local capability; do not proxy the port to untrusted clients. Users decide approval requests on the page; the workbench does not approve them automatically. Runtime data and demo output are excluded from Git.
+By default the service listens only on `127.0.0.1`. With the LAN flags above, the page requires an access link and cookie, and submissions still require the browser capability. Codex turns in the `workspace-write` sandbox enable `networkAccess: true` to reach the local MCP Gateway. Users decide approval requests on the page; the workbench does not approve them automatically. Runtime data and demo output are excluded from Git.
 
 Project code is licensed under the [MIT License](LICENSE). The bundled Three.js files retain their [original MIT license](web/vendor/three/LICENSE).

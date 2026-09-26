@@ -84,6 +84,19 @@ codex mcp add scene_feedback_external \
 
 `PROJECT` 是要审查的工程根目录，传入的参考图和 GLB 必须位于其中；它可以是 Codex 任务工作目录的子目录。`DATA` 是该项目专用的私有目录。示例使用独立的端口、数据目录和 MCP 名称，避免混用上面的默认模式。已发布的场景仍可通过 `workspace_publish_scene` 更新到页面。
 
+## 在局域网的其他设备上打开页面
+
+服务仍运行在保存工程、运行 Codex 和 MCP 的主机上；其他设备只需要浏览器。先停止占用该端口的旧服务，然后使用上文相同的 `REPO`、`PROJECT`、`DATA` 启动局域网服务。把示例 IP 换成**服务主机**在局域网内可访问的 IPv4 地址：
+
+```bash
+LAN_IP=192.168.1.10
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review \
+  --listen-host 0.0.0.0 --public-base-url "http://$LAN_IP:18768"
+```
+
+终端启动信息或 MCP 的 `request_visual_feedback` / `workspace_open` 结果会给出带 `access_token` 的完整链接。把**整个链接**在另一台设备的浏览器中打开；页面验证后会清除地址栏中的令牌，并用浏览器 Cookie 保持访问。不要只输入 `http://$LAN_IP:18768/`，也不要把访问链接发到公开位置。默认工作台模式也可加这两个参数，使用原来的端口和数据目录，并省略 `--external-review`。需要常驻时，可用 systemd 用户服务运行同一条启动命令。局域网开放的是工作台网页及其受保护的 API；MCP 仍由工程主机上的 Codex 经 `127.0.0.1` 在本机调用。如果连接不通，检查主机防火墙是否允许所选 TCP 端口；HTTP 局域网模式适合可信网络。
+
 ## MCP 工具
 
 | 工具 | 用途 |
@@ -106,6 +119,6 @@ codex mcp add scene_feedback_external \
 
 App Server 的真实联调已用两张不同的本地图像完成：Codex 在第一轮识别红图，关闭并重启 stdio 后，在**同一 thread** 的第二轮识别蓝图；`thread/read` 历史记录包含两轮的 `localImage` 项。这验证了图片确实进入模型，不只是传了图片路径。完整浏览器验收中，人在参考图和场景图上分别画编号框并点击发送；Codex 收到五张实际图像，修改演示场景源文件并导出 GLB，经页面审批后两次成功调用 `workspace_publish_scene`，工作台自动从场景版本 2 刷新到版本 4。随后在网页再次画参考线并发送；Codex 在**同一 thread** 收到第二轮的五张图像并确认，没有修改文件或重复发布。
 
-服务只监听 `127.0.0.1`，面向可信本机使用。为访问本机 MCP Gateway，Codex 的 `workspace-write` 回合设置 `networkAccess: true`；页面控制接口使用本地随机 capability。不要把端口代理给不可信访问者。执行审批由用户在页面决定，工作台不会自动批准。运行数据和演示输出均不进入 Git。
+默认服务只监听 `127.0.0.1`；显式启用上述局域网参数后，页面需要访问链接及 Cookie，提交操作仍需浏览器 capability。为访问本机 MCP Gateway，Codex 的 `workspace-write` 回合设置 `networkAccess: true`。执行审批由用户在页面决定，工作台不会自动批准。运行数据和演示输出均不进入 Git。
 
 项目代码使用 [MIT 许可证](LICENSE)。仓库里的 Three.js 文件保留其[原始 MIT 许可证](web/vendor/three/LICENSE)。

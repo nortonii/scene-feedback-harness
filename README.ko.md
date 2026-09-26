@@ -86,6 +86,19 @@ codex mcp add scene_feedback_external \
 
 `PROJECT`는 검토할 재구성 프로젝트의 루트이며 참고 이미지와 GLB가 그 안에 있어야 합니다. Codex 작업 디렉터리의 하위 디렉터리여도 됩니다. `DATA`는 그 프로젝트만 사용하는 비공개 디렉터리입니다. 예제에서는 기본 모드와 섞이지 않도록 포트, 데이터 디렉터리, MCP 이름을 분리했습니다. 게시된 장면은 여전히 `workspace_publish_scene`으로 페이지에 반영할 수 있습니다.
 
+## LAN의 다른 기기에서 페이지 열기
+
+서비스는 프로젝트를 보관하고 Codex와 MCP를 실행하는 호스트에서 계속 실행합니다. 다른 기기에는 브라우저만 있으면 됩니다. 해당 포트를 사용 중인 기존 서비스를 중지한 뒤 위에서 사용한 `REPO`, `PROJECT`, `DATA` 값을 그대로 사용하세요. 예시 IP는 **서비스 호스트**의 접속 가능한 LAN IPv4 주소로 바꾸세요.
+
+```bash
+LAN_IP=192.168.1.10
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review \
+  --listen-host 0.0.0.0 --public-base-url "http://$LAN_IP:18768"
+```
+
+시작 메시지 또는 MCP의 `request_visual_feedback` / `workspace_open` 결과에 `access_token`이 포함된 전체 링크가 나옵니다. 다른 기기의 브라우저에서 **전체 링크**를 여세요. 확인이 끝나면 주소창에서 토큰을 지우고 브라우저 쿠키로 접근을 유지합니다. `http://$LAN_IP:18768/`만 입력해서는 접근할 수 없습니다. 접속 링크를 공개하지 마세요. 기본 작업대 모드에서도 기존 포트와 데이터 디렉터리를 사용하면서 이 두 옵션을 추가할 수 있으며, 이때 `--external-review`는 생략합니다. 계속 실행하려면 같은 시작 명령을 systemd 사용자 서비스로 실행할 수 있습니다. LAN에서는 작업대 웹페이지와 인증된 API를 사용할 수 있고, MCP는 프로젝트 호스트의 Codex가 계속 `127.0.0.1`을 통해 호출합니다. 연결되지 않으면 호스트 방화벽에서 선택한 TCP 포트를 허용하세요. 일반 HTTP LAN 모드는 신뢰할 수 있는 네트워크용입니다.
+
 ## MCP 도구
 
 | 도구 | 용도 |
@@ -110,6 +123,6 @@ codex mcp add scene_feedback_external \
 
 실제 브라우저→Codex→MCP 흐름도 Selenium으로 두 차례 검증했습니다. 첫 번째 라운드에서 사용자가 참고 이미지와 장면 이미지에 각각 번호가 있는 사각형을 그리고 보냈고, App Server 턴에는 `localImage` 5개가 포함되었습니다. Codex는 데모의 `scene.json`을 수정해 GLB를 생성하고 프로젝트별 MCP의 `workspace_publish_scene`을 두 차례 성공적으로 호출했습니다. 페이지에서 사용자가 승인한 뒤 브라우저의 장면 버전은 2→3→4로 자동 갱신되었고, 캐비닛 중심의 `x`는 `-0.8`이 되었습니다. 두 번째 라운드에서는 사용자가 웹페이지의 참고 이미지에 선을 더 그려 보냈습니다. 같은 대화에서 Codex는 추가 `input_image` 5개를 받고 확인 답변을 했습니다. 파일을 수정하거나 다시 게시하지 않았으며 최종 장면 버전은 4입니다.
 
-서비스는 `127.0.0.1`에서만 수신하며 신뢰할 수 있는 로컬 환경을 대상으로 합니다. 로컬 MCP Gateway와 통신할 수 있도록 Codex의 `workspaceWrite` 턴에 `networkAccess: true`가 설정됩니다. 페이지 제어 API에는 로컬에서 생성한 임의의 capability를 사용합니다. 신뢰할 수 없는 사용자에게 포트를 프록시하지 마세요. 실행 승인은 사용자가 페이지에서 결정하며 작업대는 자동으로 승인하지 않습니다. 실행 데이터와 데모 출력은 Git에 포함되지 않습니다.
+기본적으로 서비스는 `127.0.0.1`에서만 수신합니다. 위의 LAN 옵션을 지정하면 페이지에 접속 링크와 쿠키가 필요하고, 제출 작업에는 브라우저 capability도 계속 필요합니다. 로컬 MCP Gateway와 통신할 수 있도록 Codex의 `workspaceWrite` 턴에 `networkAccess: true`가 설정됩니다. 실행 승인은 사용자가 페이지에서 결정하며 작업대는 자동으로 승인하지 않습니다. 실행 데이터와 데모 출력은 Git에 포함되지 않습니다.
 
 프로젝트 코드는 [MIT 라이선스](LICENSE)를 따릅니다. 저장소의 Three.js 파일에는 [원래의 MIT 라이선스](web/vendor/three/LICENSE)가 유지됩니다.

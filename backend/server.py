@@ -1,9 +1,11 @@
-"""Loopback HTTP API and static 3D review page. No web framework is required."""
+"""HTTP API and static 3D review page. No web framework is required."""
 
 from __future__ import annotations
 
 import argparse
 import hmac
+from http.cookies import CookieError, SimpleCookie
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -12,7 +14,7 @@ import re
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
@@ -29,9 +31,37 @@ WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 
 
-def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, web_dir: str | Path = DEFAULT_WEB_DIR, project_dir: str | Path | None = None, model: str | None = None, enable_codex: bool = False, external_review: bool = False, adapter: object | None = None) -> ThreadingHTTPServer:
+def make_server(
+    *,
+    port: int = 18765,
+    data_dir: str | Path = DEFAULT_DATA_DIR,
+    web_dir: str | Path = DEFAULT_WEB_DIR,
+    project_dir: str | Path | None = None,
+    model: str | None = None,
+    enable_codex: bool = False,
+    external_review: bool = False,
+    adapter: object | None = None,
+    listen_host: str = "127.0.0.1",
+    public_base_url: str | None = None,
+) -> ThreadingHTTPServer:
     if external_review and (enable_codex or adapter is not None):
         raise ValueError("external review cannot start a separate Codex App Server thread")
+    if listen_host not in {"127.0.0.1", "localhost"} and not public_base_url:
+        raise ValueError("--public-base-url is required when listening beyond loopback")
+    if public_base_url:
+        public_url = urlsplit(public_base_url)
+        if (public_url.scheme not in {"http", "https"} or not public_url.hostname
+                or public_url.username or public_url.password or public_url.path not in {"", "/"}
+                or public_url.query or public_url.fragment):
+            raise ValueError("--public-base-url must be an http(s) origin without a path or query")
+        try:
+            configured_port = public_url.port
+        except ValueError as exc:
+            raise ValueError("--public-base-url has an invalid port") from exc
+        if configured_port != port:
+            raise ValueError("--public-base-url must use the listening port")
+        public_base_url = public_base_url.rstrip("/")
+    lan_mode = public_base_url is not None
     store = SceneStore(data_dir)
     web_root = Path(web_dir).expanduser().resolve()
     project_root = Path(project_dir or os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)).expanduser().resolve()
@@ -50,17 +80,73 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             },
         )
 
+    def browser_url(session_id: str, port_number: int) -> str:
+        base = public_base_url or f"http://127.0.0.1:{port_number}"
+        query = {"session_id": session_id}
+        if lan_mode:
+            query["access_token"] = store.browser_token
+        return f"{base}/?{urlencode(query)}"
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "SceneFeedbackHarness/0.1"
 
         def _check_request_origin(self) -> None:
             port_number = self.server.server_port
             allowed = {f"127.0.0.1:{port_number}", f"localhost:{port_number}"}
+            origins = {f"http://{host}" for host in allowed}
+            if public_base_url:
+                public_url = urlsplit(public_base_url)
+                allowed.add(public_url.netloc)
+                origins.add(public_base_url)
             if self.headers.get("Host") not in allowed:
-                raise APIError(403, "request must use the loopback host")
+                raise APIError(403, "request host is not configured for this workbench")
             origin = self.headers.get("Origin")
-            if origin and origin not in {f"http://{host}" for host in allowed}:
+            if origin and origin not in origins:
                 raise APIError(403, "cross-origin request refused")
+
+        def _browser_url(self, session_id: str) -> str:
+            return browser_url(session_id, self.server.server_port)
+
+        def _has_lan_access(self) -> bool:
+            if hmac.compare_digest(self.headers.get("X-Scene-Harness-Key", ""), store.control_token):
+                return True
+            try:
+                cookies = SimpleCookie()
+                cookies.load(self.headers.get("Cookie", ""))
+                cookie = cookies.get(f"scene_feedback_{self.server.server_port}_access")
+            except CookieError:
+                return False
+            return cookie is not None and hmac.compare_digest(cookie.value, store.browser_token)
+
+        def _needs_lan_access(self) -> bool:
+            if not lan_mode:
+                return False
+            try:
+                loopback_peer = ipaddress.ip_address(self.client_address[0]).is_loopback
+            except ValueError:
+                loopback_peer = False
+            # Existing local MCP processes use the loopback API address. A remote
+            # peer cannot bypass access control by forging a loopback Host header.
+            return not loopback_peer or self.headers.get("Host") == urlsplit(public_base_url).netloc
+
+        def _bootstrap_lan_access(self, path: str, query: dict[str, list[str]]) -> bool:
+            if not lan_mode or self.command != "GET" or path != "/" or "access_token" not in query:
+                return False
+            submitted = query.pop("access_token")
+            if len(submitted) != 1 or not hmac.compare_digest(submitted[0], store.browser_token):
+                raise APIError(403, "invalid workbench access link")
+            location = "/" + (f"?{urlencode(query, doseq=True)}" if query else "")
+            cookie = f"scene_feedback_{self.server.server_port}_access={store.browser_token}; HttpOnly; SameSite=Lax; Path=/"
+            if urlsplit(public_base_url).scheme == "https":
+                cookie += "; Secure"
+            self.send_response(303)
+            self.send_header("Location", location)
+            self.send_header("Set-Cookie", cookie)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
 
         def _require_control_key(self) -> None:
             key = self.headers.get("X-Scene-Harness-Key", "")
@@ -109,6 +195,8 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             self.send_header("Content-Length", str(file_path.stat().st_size))
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if lan_mode:
+                self.send_header("Cache-Control", "no-store")
             self.end_headers()
             with file_path.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
@@ -119,11 +207,17 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             query = parse_qs(parsed.query)
+            if self._bootstrap_lan_access(path, query):
+                return
+            if self._needs_lan_access() and not self._has_lan_access():
+                raise APIError(403, "open a workbench access link first")
 
             if self.command == "GET" and path == "/api/health":
                 return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if external_review else "appserver"})
             if self.command == "GET" and path == "/api/workspace/state":
-                return self._send_json(200, gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0]))
+                state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
+                state["browser_url"] = self._browser_url(state["session_id"])
+                return self._send_json(200, state)
             if self.command == "GET" and path == "/api/workspace/events":
                 gateway.ensure()
                 return self._send_json(200, store.workspace_events(self._event_cursor(query)))
@@ -194,7 +288,7 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                 if "reference_images" in payload:
                     self._require_control_key()
                 session = store.create_session(payload.get("reference_images"), reference_session_id=payload.get("reference_session_id"))
-                session["url"] = f"http://127.0.0.1:{self.server.server_port}/?session_id={session['session_id']}"
+                session["url"] = self._browser_url(session["session_id"])
                 return self._send_json(201, session)
             if self.command == "GET" and path == "/api/sessions":
                 return self._send_json(200, {"items": store.list_sessions()})
@@ -278,20 +372,26 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             self._handle()
 
         def log_message(self, format: str, *args: object) -> None:
-            logging.info("%s - %s", self.address_string(), format % args)
+            message = format % args
+            if "?" in self.path:
+                message = message.replace(self.path, urlsplit(self.path).path + "?[redacted]")
+            logging.info("%s - %s", self.address_string(), message)
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer((listen_host, port), Handler)
     server.daemon_threads = True
     server.workspace_gateway = gateway
     server.scene_store = store
+    server.browser_url = lambda session_id: browser_url(session_id, server.server_port)
     if enable_codex or external_review:
         gateway.start()
     return server
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Local 3D scene review HTTP server")
+    parser = argparse.ArgumentParser(description="3D scene review HTTP server")
     parser.add_argument("--port", type=int, default=18765)
+    parser.add_argument("--listen-host", default="127.0.0.1", help="HTTP bind address; use 0.0.0.0 for LAN access")
+    parser.add_argument("--public-base-url", help="Browser URL on the LAN, e.g. http://192.168.1.10:18765; enables access-link authentication")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--web-dir", type=Path, default=DEFAULT_WEB_DIR)
     parser.add_argument("--project-dir", type=Path, default=Path(os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)))
@@ -301,8 +401,19 @@ def main() -> None:
     mode.add_argument("--external-review", action="store_true", help="wait for an existing Codex task to receive feedback through an MCP tool call")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    server = make_server(port=args.port, data_dir=args.data_dir, web_dir=args.web_dir, project_dir=args.project_dir, model=args.model, enable_codex=not args.no_codex and not args.external_review, external_review=args.external_review)
-    print(f"Scene feedback UI: http://127.0.0.1:{server.server_port}/", flush=True)
+    server = make_server(
+        port=args.port,
+        data_dir=args.data_dir,
+        web_dir=args.web_dir,
+        project_dir=args.project_dir,
+        model=args.model,
+        enable_codex=not args.no_codex and not args.external_review,
+        external_review=args.external_review,
+        listen_host=args.listen_host,
+        public_base_url=args.public_base_url,
+    )
+    session_id = server.workspace_gateway.state()["session_id"]
+    print(f"Scene feedback UI: {server.browser_url(session_id)}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
