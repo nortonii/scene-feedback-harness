@@ -29,11 +29,13 @@ WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 
 
-def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, web_dir: str | Path = DEFAULT_WEB_DIR, project_dir: str | Path | None = None, model: str | None = None, enable_codex: bool = False, adapter: object | None = None) -> ThreadingHTTPServer:
+def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, web_dir: str | Path = DEFAULT_WEB_DIR, project_dir: str | Path | None = None, model: str | None = None, enable_codex: bool = False, external_review: bool = False, adapter: object | None = None) -> ThreadingHTTPServer:
+    if external_review and (enable_codex or adapter is not None):
+        raise ValueError("external review cannot start a separate Codex App Server thread")
     store = SceneStore(data_dir)
     web_root = Path(web_dir).expanduser().resolve()
     project_root = Path(project_dir or os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)).expanduser().resolve()
-    gateway = WorkspaceGateway(store, project_root, adapter=adapter)
+    gateway = WorkspaceGateway(store, project_root, adapter=adapter, external_review=external_review)
     if enable_codex and adapter is None:
         from appserver_adapter import CodexAppServerAdapter
         gateway.adapter = CodexAppServerAdapter(
@@ -119,7 +121,7 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
             query = parse_qs(parsed.query)
 
             if self.command == "GET" and path == "/api/health":
-                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True})
+                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if external_review else "appserver"})
             if self.command == "GET" and path == "/api/workspace/state":
                 return self._send_json(200, gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0]))
             if self.command == "GET" and path == "/api/workspace/events":
@@ -127,7 +129,18 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                 return self._send_json(200, store.workspace_events(self._event_cursor(query)))
             if self.command == "GET" and path == "/api/workspace/context":
                 workspace = gateway.state()
-                return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "request_feedback": workspace["request_feedback"]})
+                return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "delivery_mode": workspace["delivery_mode"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "request_feedback": workspace["request_feedback"]})
+            if self.command == "POST" and path == "/api/workspace/references":
+                self._require_control_key()
+                payload = self._read_json()
+                return self._send_json(200, gateway.add_reference_paths(payload.get("reference_images")))
+            if self.command == "POST" and path == "/api/workspace/external/request":
+                self._require_control_key()
+                payload = self._read_json()
+                return self._send_json(200, gateway.begin_external_request(session_id=payload.get("session_id"), message=payload.get("message"), cursor=payload.get("cursor")))
+            if self.command == "GET" and path == "/api/workspace/external/feedback":
+                self._require_control_key()
+                return self._send_json(200, gateway.take_external_feedback(query.get("session_id", [""])[0], self._cursor(query)))
             feedback_match = WORKSPACE_FEEDBACK_ROUTE.fullmatch(path)
             if self.command == "GET" and feedback_match:
                 return self._send_json(200, store.feedback_by_id(feedback_match.group(1)))
@@ -154,6 +167,8 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
                 gateway.ensure()
                 if "expected_revision" not in payload:
                     raise APIError(400, "expected_revision is required")
+                if external_review:
+                    gateway._project_file(payload.get("local_path"))
                 scene = store.set_scene_preview(payload.get("local_path"), expected_revision=payload["expected_revision"])
                 return self._send_json(200, scene)
             if self.command == "GET" and path == "/api/scene":
@@ -269,7 +284,7 @@ def make_server(*, port: int = 18765, data_dir: str | Path = DEFAULT_DATA_DIR, w
     server.daemon_threads = True
     server.workspace_gateway = gateway
     server.scene_store = store
-    if enable_codex:
+    if enable_codex or external_review:
         gateway.start()
     return server
 
@@ -281,10 +296,12 @@ def main() -> None:
     parser.add_argument("--web-dir", type=Path, default=DEFAULT_WEB_DIR)
     parser.add_argument("--project-dir", type=Path, default=Path(os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)))
     parser.add_argument("--model", default=os.environ.get("SCENE_FEEDBACK_MODEL"), help="Codex model ID for this project thread")
-    parser.add_argument("--no-codex", action="store_true", help="serve the workbench without starting Codex App Server")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--no-codex", action="store_true", help="serve the workbench without starting Codex App Server")
+    mode.add_argument("--external-review", action="store_true", help="wait for an existing Codex task to receive feedback through an MCP tool call")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    server = make_server(port=args.port, data_dir=args.data_dir, web_dir=args.web_dir, project_dir=args.project_dir, model=args.model, enable_codex=not args.no_codex)
+    server = make_server(port=args.port, data_dir=args.data_dir, web_dir=args.web_dir, project_dir=args.project_dir, model=args.model, enable_codex=not args.no_codex and not args.external_review, external_review=args.external_review)
     print(f"Scene feedback UI: http://127.0.0.1:{server.server_port}/", flush=True)
     try:
         server.serve_forever()

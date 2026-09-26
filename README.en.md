@@ -2,7 +2,7 @@
 
 # Codex Visual Reconstruction Workbench
 
-Mark the reference image and the current 3D scene, write a sentence, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read.
+In the default mode, mark the reference image and the current 3D scene, write a sentence, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same workbench-owned Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read. An existing Codex desktop task can use the same review UI through the external MCP mode below.
 
 ![Side-by-side annotations on a reference image and scene](preview.png)
 
@@ -21,7 +21,7 @@ Browser: reference image + 3D scene + annotations + text
               Workbench refreshes the scene
 ```
 
-The Gateway keeps one persistent Codex thread for this project. It starts `codex app-server` over stdio and sends images as `localImage` input items. The workbench does not inject messages into other Codex desktop or terminal sessions you may have open. MCP is used to read context, request a user review, and publish the scene; **the web page's Send button starts a user turn directly**.
+In the default mode, the Gateway keeps one persistent Codex thread for this project. It starts `codex app-server` over stdio and sends images as `localImage` input items. This mode does not inject messages into other Codex desktop or terminal sessions you may have open. MCP is used to read context, request a user review, and publish the scene; **the web page's Send button starts a user turn directly**.
 
 This interface helps people point out problems. It does not define a reconstruction algorithm or ask people to enter coordinates or geometric constraints. Codex can use the modeling, reconstruction, and editing tools already available in the project.
 
@@ -63,6 +63,29 @@ For your own project, run:
 
 Add reference images in the browser. Have Codex build or export a self-contained GLB from your project's source files and publish it through MCP. The project directory and thread ID are stored in the data directory, allowing the same thread to be restored after a restart. A data directory is bound to one project and will not silently switch to another.
 
+## Review from an existing Codex desktop task (external MCP mode)
+
+If you are already working on a project in Codex desktop, use `--external-review` to expose the workbench as an MCP tool called by that task. This mode **does not create or take over another Codex thread**. Codex calls `request_visual_feedback` to start a review; if the browser opens successfully, that call waits and returns the feedback by default. If it only returns a URL and session details, call `wait_visual_feedback` to wait. When you click “Send” in the browser, your words and actual image content return as a tool result to the **same task**, which can continue editing the scene. `get_visual_feedback` can reread submitted feedback.
+
+Install the dependencies above first. Use absolute paths in a terminal to register a global MCP server and run a separate review service:
+
+```bash
+REPO=/absolute/path/to/scene_feedback_harness
+PROJECT=/absolute/path/to/your/existing/project
+DATA=/absolute/path/to/private/external-review-data
+codex mcp add scene_feedback_external \
+  --env SCENE_FEEDBACK_PORT=18768 \
+  --env SCENE_FEEDBACK_DATA_DIR="$DATA" \
+  --env SCENE_FEEDBACK_PROJECT_DIR="$PROJECT" \
+  -- "$REPO/.venv/bin/python" "$REPO/backend/mcp_server.py"
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
+```
+
+In `~/.codex/config.toml`, set `tool_timeout_sec = 900` under the `[mcp_servers.scene_feedback_external]` table created by `codex mcp add`. Use the review tools' default `timeout_sec` of 600 or less, leaving time to transfer images. **Restart Codex desktop** so the existing task refreshes its MCP tool catalog. In that task, say “进入人工调试模式” (“enter human review mode”) or explicitly ask it to call `request_visual_feedback` with project-local reference image paths and the current GLB path (omit the GLB if no initial scene exists). If the tool returns only `session_id`, `next_cursor`, and a URL, open <http://127.0.0.1:18768/> and call `wait_visual_feedback` with `cursor=next_cursor` for that `session_id`. Add reference images and mark up the scene. In this mode, the browser's Send button completes the pending MCP review; it **does not start another user turn**.
+
+`PROJECT` must match the existing task's project directory; `DATA` is a private directory dedicated to that project. The example uses a separate port, data directory, and MCP server name to keep it apart from the default mode above. Published scenes can still update the page through `workspace_publish_scene`.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -71,9 +94,11 @@ Add reference images in the browser. Have Codex build or export a self-contained
 | `workspace_get_context` | Read current reference images, scene revision, and project context |
 | `workspace_get_feedback` | Read submitted feedback and its actual images |
 | `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
-| `workspace_request_feedback` | Ask the user to inspect something on the page and return immediately; their reply becomes the next user message |
+| `workspace_request_feedback` | Default mode: ask the user to inspect something on the page and return immediately; their reply becomes the next user message |
+| `request_visual_feedback` / `wait_visual_feedback` | External MCP mode: start a review and wait for browser submission, returning text and images to the current task |
+| `get_visual_feedback` | External MCP mode: reread submitted visual feedback |
 
-The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) reminds Codex to distinguish original images from annotations, edit project source files, and publish a GLB when the result is ready. The next submission does not require an MCP call to remain waiting.
+The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) reminds Codex to distinguish original images from annotations, edit project source files, and publish a GLB when the result is ready. The default mode does not need an MCP call to remain waiting for the next submission; external MCP mode returns feedback to the original task through `wait_visual_feedback`.
 
 ## Verification and limits
 

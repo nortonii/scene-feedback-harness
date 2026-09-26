@@ -2,7 +2,7 @@
 
 # Codex ビジュアル再構築ワークベンチ
 
-参照画像と現在の 3D シーンに印を付け、一言を書いて「送信」をクリックします。ワークベンチは文章、元画像、注釈付き画像、シーンのスナップショットを、**同じ Codex スレッドのユーザーメッセージ**として送ります。Codex がプロジェクトを編集して GLB を公開すると、結果がこのページに戻ります。もう一度読み取らせるためにターミナルで操作する必要はありません。
+標準モードでは、参照画像と現在の 3D シーンに印を付け、一言を書いて「送信」をクリックします。ワークベンチは文章、元画像、注釈付き画像、シーンのスナップショットを、**ワークベンチが管理する同じ Codex スレッドのユーザーメッセージ**として送ります。Codex がプロジェクトを編集して GLB を公開すると、結果がこのページに戻ります。もう一度読み取らせるためにターミナルで操作する必要はありません。既存の Codex デスクトップタスクでも、後述する外部 MCP モードで同じ確認画面を使用できます。
 
 ![参照画像とシーンを並べて注釈した画面](preview.png)
 
@@ -21,7 +21,7 @@
              ワークベンチがシーンを更新
 ```
 
-Gateway は、このプロジェクトの Codex スレッドを一つ永続化します。`codex app-server` を stdio 経由で起動し、画像を `localImage` 入力項目として送ります。すでに開いている別の Codex デスクトップやターミナルのセッションに、ワークベンチがメッセージを注入することはありません。MCP はコンテキストの取得、ユーザーへの確認依頼、シーンの公開に使用します。**Web ページの送信ボタンがユーザーターンを直接開始します。**
+標準モードでは、Gateway がこのプロジェクトの Codex スレッドを一つ永続化します。`codex app-server` を stdio 経由で起動し、画像を `localImage` 入力項目として送ります。このモードは、すでに開いている別の Codex デスクトップやターミナルのセッションにメッセージを注入しません。MCP はコンテキストの取得、ユーザーへの確認依頼、シーンの公開に使用します。**Web ページの送信ボタンがユーザーターンを直接開始します。**
 
 この画面は、人が問題を指し示すためのものです。再構築アルゴリズムを定めたり、座標や幾何拘束の入力を求めたりしません。Codex はプロジェクトで利用できる既存のモデリング、再構築、編集ツールを使えます。
 
@@ -63,6 +63,29 @@ Gateway は、このプロジェクトの Codex スレッドに 5 つの `scene_
 
 参照画像はブラウザーから追加します。Codex にプロジェクトのソースファイルから自己完結型の GLB を構築または書き出させ、MCP 経由で公開します。プロジェクトのディレクトリとスレッド ID はデータディレクトリに保存され、再起動後も同じスレッドを復元できます。一つのデータディレクトリは一つのプロジェクトに紐付き、黙って別のプロジェクトに切り替わることはありません。
 
+## 既存の Codex デスクトップタスクから確認する（外部 MCP モード）
+
+すでに Codex デスクトップでプロジェクトを扱っている場合は、`--external-review` でワークベンチをそのタスクから呼び出せる MCP ツールとして起動できます。このモードは**別の Codex スレッドを作成・引き継ぎません**。Codex が `request_visual_feedback` で確認を開始します。ブラウザーが正常に開けば、この呼び出しが標準で入力を待ってフィードバックを返します。URL とセッション情報だけが返った場合は、`wait_visual_feedback` を呼んで待機します。ブラウザーで「送信」をクリックすると、文章と実際の画像データがツールの結果として**元のタスク**に戻り、そのタスクがシーンの編集を続けます。`get_visual_feedback` で送信済みのフィードバックを再取得できます。
+
+上記の依存関係を先にインストールしてください。ターミナルで絶対パスを指定してグローバル MCP サーバーを登録し、独立した確認用サービスを起動します。
+
+```bash
+REPO=/absolute/path/to/scene_feedback_harness
+PROJECT=/absolute/path/to/your/existing/project
+DATA=/absolute/path/to/private/external-review-data
+codex mcp add scene_feedback_external \
+  --env SCENE_FEEDBACK_PORT=18768 \
+  --env SCENE_FEEDBACK_DATA_DIR="$DATA" \
+  --env SCENE_FEEDBACK_PROJECT_DIR="$PROJECT" \
+  -- "$REPO/.venv/bin/python" "$REPO/backend/mcp_server.py"
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
+```
+
+`codex mcp add` が作成した `~/.codex/config.toml` の `[mcp_servers.scene_feedback_external]` に `tool_timeout_sec = 900` を設定します。画像転送の余裕を残すため、確認ツールの `timeout_sec` は既定値の 600 以下にしてください。既存タスクの MCP ツール一覧を更新するため、**Codex デスクトップアプリを再起動**します。そのタスクで「进入人工调试模式」（人による確認モードに入る）と伝えるか、プロジェクト内の参照画像のパスと現在の GLB のパスを渡して `request_visual_feedback` を呼ぶよう明示します（初期シーンがなければ GLB は省略できます）。ツールが `session_id`、`next_cursor`、URL だけを返した場合は <http://127.0.0.1:18768/> を開き、その `session_id` と `cursor=next_cursor` で `wait_visual_feedback` を呼びます。参照画像を追加して印を付けてください。このモードでブラウザーの送信ボタンが完了させるのは待機中の MCP 確認だけであり、**別のユーザーターンは開始しません**。
+
+`PROJECT` は既存タスクのプロジェクトディレクトリと一致させ、`DATA` にはそのプロジェクト専用の非公開ディレクトリを指定してください。例では標準モードと混ざらないよう、ポート、データディレクトリ、MCP 名を分けています。公開したシーンは引き続き `workspace_publish_scene` でページへ反映できます。
+
 ## MCP ツール
 
 | ツール | 用途 |
@@ -71,9 +94,11 @@ Gateway は、このプロジェクトの Codex スレッドに 5 つの `scene_
 | `workspace_get_context` | 現在の参照画像、シーンのリビジョン、プロジェクトのコンテキストを読み取る |
 | `workspace_get_feedback` | 送信済みフィードバックと実際の画像を読み取る |
 | `workspace_publish_scene` | 新しい GLB を検証して公開し、想定リビジョンを確認してページの更新を通知する |
-| `workspace_request_feedback` | ページでユーザーに特定箇所の確認を依頼してすぐに返る。返信は次のユーザーメッセージになる |
+| `workspace_request_feedback` | 標準モード：ページで確認を依頼してすぐに返る。返信は次のユーザーメッセージになる |
+| `request_visual_feedback` / `wait_visual_feedback` | 外部 MCP モード：確認を始め、ブラウザーからの送信を待ち、文章と画像を元のタスクへ返す |
+| `get_visual_feedback` | 外部 MCP モード：送信済みの視覚フィードバックを再取得する |
 
-リポジトリ内の[ビジュアル再構築 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)は、元画像と注釈の区別、プロジェクトのソースファイルの編集、結果が準備できたときの GLB 公開を Codex に促します。次の送信まで MCP 呼び出しを待機させておく必要はありません。
+リポジトリ内の[ビジュアル再構築 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)は、元画像と注釈の区別、プロジェクトのソースファイルの編集、結果が準備できたときの GLB 公開を Codex に促します。標準モードでは次の送信まで MCP 呼び出しを待機させる必要はありません。外部 MCP モードでは、`wait_visual_feedback` が元のタスクにフィードバックを返します。
 
 ## 検証と適用範囲
 

@@ -2,7 +2,7 @@
 
 # Codex 시각 재구성 작업대
 
-참고 이미지와 현재 3D 장면에 표시를 그리고 한 문장을 쓴 뒤 「보내기」를 누르세요. 작업대는 글, 원본 이미지, 주석 이미지, 장면 스냅샷을 **같은 Codex 대화의 사용자 메시지**로 보냅니다. Codex가 프로젝트를 수정하고 GLB를 게시하면 결과가 이 페이지에 나타납니다. 터미널에서 별도의 읽기 작업을 다시 시작할 필요가 없습니다.
+기본 모드에서는 참고 이미지와 현재 3D 장면에 표시를 그리고 한 문장을 쓴 뒤 「보내기」를 누르세요. 작업대는 글, 원본 이미지, 주석 이미지, 장면 스냅샷을 **작업대가 관리하는 같은 Codex 대화의 사용자 메시지**로 보냅니다. Codex가 프로젝트를 수정하고 GLB를 게시하면 결과가 이 페이지에 나타납니다. 터미널에서 별도의 읽기 작업을 다시 시작할 필요가 없습니다. 이미 진행 중인 Codex 데스크톱 작업에서도 아래의 외부 MCP 모드로 같은 검토 화면을 사용할 수 있습니다.
 
 ![참고 이미지와 장면을 나란히 놓고 표시한 화면](preview.png)
 
@@ -21,7 +21,7 @@
               작업대의 장면 새로고침
 ```
 
-Gateway는 이 프로젝트의 Codex 대화를 지속적으로 보관합니다. stdio로 `codex app-server`를 실행하고 이미지를 `localImage` 입력 항목으로 보냅니다. 작업대가 이미 열려 있는 다른 Codex 데스크톱 또는 터미널 대화에 메시지를 주입하지는 않습니다. MCP는 문맥 읽기, 사용자 검토 요청, 장면 게시에 사용합니다. **웹페이지의 보내기 버튼이 사용자 턴을 직접 시작합니다.**
+기본 모드에서 Gateway는 이 프로젝트의 Codex 대화를 지속적으로 보관합니다. stdio로 `codex app-server`를 실행하고 이미지를 `localImage` 입력 항목으로 보냅니다. 이 모드는 이미 열려 있는 다른 Codex 데스크톱 또는 터미널 대화에 메시지를 주입하지 않습니다. MCP는 문맥 읽기, 사용자 검토 요청, 장면 게시에 사용합니다. **웹페이지의 보내기 버튼이 사용자 턴을 직접 시작합니다.**
 
 이 화면은 사람이 문제를 가리킬 수 있도록 돕습니다. 재구성 알고리즘을 규정하거나 사용자에게 좌표나 기하학적 제약을 입력하라고 요구하지 않습니다. Codex는 프로젝트에 이미 있는 모델링, 재구성, 편집 도구를 사용할 수 있습니다.
 
@@ -63,6 +63,29 @@ Gateway가 프로젝트의 Codex 대화에 이 다섯 가지 `scene_feedback` MC
 
 브라우저에서 참고 이미지를 추가하세요. Codex가 프로젝트 소스 파일에서 자체 완결형 GLB를 빌드하거나 내보낸 다음 MCP를 통해 게시하도록 하면 됩니다. 프로젝트 디렉터리와 thread ID는 데이터 디렉터리에 저장되므로 재시작해도 같은 대화가 복원됩니다. 데이터 디렉터리 하나는 프로젝트 하나에만 연결되며 다른 프로젝트로 몰래 바뀌지 않습니다.
 
+## 기존 Codex 데스크톱 작업에서 검토하기 (외부 MCP 모드)
+
+이미 Codex 데스크톱에서 프로젝트를 작업 중이라면 `--external-review`로 작업대를 그 작업에서 호출하는 MCP 도구로 실행할 수 있습니다. 이 모드는 **다른 Codex 대화를 만들거나 인계받지 않습니다**. Codex가 `request_visual_feedback`으로 검토를 시작합니다. 브라우저가 정상적으로 열리면 이 호출이 기본적으로 입력을 기다렸다가 피드백을 반환합니다. URL과 세션 정보만 반환되면 `wait_visual_feedback`을 호출해 기다립니다. 브라우저에서 「보내기」를 누르면 글과 실제 이미지 데이터가 도구 결과로 **원래 작업**에 돌아가며, 그 작업에서 장면 수정을 이어 갑니다. `get_visual_feedback`으로 제출된 피드백을 다시 읽을 수 있습니다.
+
+위의 의존성을 먼저 설치하세요. 터미널에서 절대 경로를 지정해 전역 MCP 서버를 등록하고, 별도의 검토 서비스를 실행합니다.
+
+```bash
+REPO=/absolute/path/to/scene_feedback_harness
+PROJECT=/absolute/path/to/your/existing/project
+DATA=/absolute/path/to/private/external-review-data
+codex mcp add scene_feedback_external \
+  --env SCENE_FEEDBACK_PORT=18768 \
+  --env SCENE_FEEDBACK_DATA_DIR="$DATA" \
+  --env SCENE_FEEDBACK_PROJECT_DIR="$PROJECT" \
+  -- "$REPO/.venv/bin/python" "$REPO/backend/mcp_server.py"
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
+```
+
+`codex mcp add`가 만든 `~/.codex/config.toml`의 `[mcp_servers.scene_feedback_external]` 항목 아래에 `tool_timeout_sec = 900`을 설정하세요. 이미지 전송 시간을 남기도록 검토 도구의 `timeout_sec`는 기본값인 600 이하로 지정하세요. 기존 작업의 MCP 도구 목록을 새로 읽도록 **Codex 데스크톱 앱을 재시작**하세요. 그 작업에서 “进入人工调试模式”(사람이 직접 검토하는 모드로 들어가기)라고 말하거나 프로젝트 안의 참고 이미지 경로와 현재 GLB 경로를 전달해 `request_visual_feedback`을 호출하라고 명시하세요(초기 장면이 없으면 GLB는 생략 가능). 도구가 `session_id`, `next_cursor`, URL만 반환하면 <http://127.0.0.1:18768/>을 열고 그 `session_id`와 `cursor=next_cursor`로 `wait_visual_feedback`을 호출하세요. 참고 이미지를 추가해 표시하면 됩니다. 이 모드에서 브라우저의 보내기 버튼은 대기 중인 MCP 검토만 완료하며 **새 사용자 턴을 시작하지 않습니다**.
+
+`PROJECT`는 기존 작업의 프로젝트 디렉터리와 일치해야 하며, `DATA`는 그 프로젝트만 사용하는 비공개 디렉터리입니다. 예제에서는 기본 모드와 섞이지 않도록 포트, 데이터 디렉터리, MCP 이름을 분리했습니다. 게시된 장면은 여전히 `workspace_publish_scene`으로 페이지에 반영할 수 있습니다.
+
 ## MCP 도구
 
 | 도구 | 용도 |
@@ -71,9 +94,11 @@ Gateway가 프로젝트의 Codex 대화에 이 다섯 가지 `scene_feedback` MC
 | `workspace_get_context` | 현재 참고 이미지, 장면 버전 및 프로젝트 문맥을 읽습니다 |
 | `workspace_get_feedback` | 제출된 피드백과 실제 이미지를 읽습니다 |
 | `workspace_publish_scene` | 새 GLB를 검증하고 게시하며, 예상 버전을 확인하고 페이지에 새로고침을 알립니다 |
-| `workspace_request_feedback` | 페이지에서 사용자에게 특정 부분의 검토를 요청하고 즉시 반환합니다. 사용자의 답변은 다음 사용자 메시지가 됩니다 |
+| `workspace_request_feedback` | 기본 모드: 페이지에서 검토를 요청하고 즉시 반환합니다. 답변은 다음 사용자 메시지가 됩니다 |
+| `request_visual_feedback` / `wait_visual_feedback` | 외부 MCP 모드: 검토를 시작하고 브라우저 제출을 기다려 글과 이미지를 원래 작업에 반환합니다 |
+| `get_visual_feedback` | 외부 MCP 모드: 제출된 시각 피드백을 다시 읽습니다 |
 
-저장소의 [시각 재구성 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)은 Codex에게 원본 이미지와 표시를 구별하고, 프로젝트 소스 파일을 편집하며, 결과가 준비되면 GLB를 게시하도록 안내합니다. 새 작업 흐름에서는 다음 턴을 보내기 위해 MCP 호출이 대기할 필요가 없습니다.
+저장소의 [시각 재구성 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md)은 Codex에게 원본 이미지와 표시를 구별하고, 프로젝트 소스 파일을 편집하며, 결과가 준비되면 GLB를 게시하도록 안내합니다. 기본 모드에서는 다음 제출을 위해 MCP 호출이 대기할 필요가 없습니다. 외부 MCP 모드에서는 `wait_visual_feedback`이 피드백을 원래 작업으로 반환합니다.
 
 ## 검증과 사용 범위
 

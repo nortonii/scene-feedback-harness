@@ -3,26 +3,42 @@
 from __future__ import annotations
 
 import copy
+import base64
 import json
 import logging
 import threading
 from pathlib import Path
 from typing import Any
 
-from core import APIError, SceneStore, _now
+from core import APIError, MAX_REFERENCES, SceneStore, _now
 
 
 class WorkspaceGateway:
-    def __init__(self, store: SceneStore, project_dir: str | Path, *, adapter: Any = None):
+    def __init__(self, store: SceneStore, project_dir: str | Path, *, adapter: Any = None, external_review: bool = False):
         self.store = store
         self.project_dir = Path(project_dir).expanduser().resolve()
         self.adapter = adapter
+        if external_review and adapter is not None:
+            raise ValueError("external review cannot start a Codex App Server adapter")
+        self.external_review = external_review
         self._worker_lock = threading.Lock()
         self._worker_running = False
         self._started = False
 
     def ensure(self, preferred_session_id: str | None = None) -> dict[str, Any]:
-        return self.store.ensure_workspace(self.project_dir, preferred_session_id=preferred_session_id)
+        workspace = self.store.ensure_workspace(self.project_dir, preferred_session_id=preferred_session_id)
+        mode = "external" if self.external_review else "appserver"
+        with self.store.lock:
+            stored = self.store.state["workspace"]
+            existing = stored.get("delivery_mode")
+            if existing is not None and existing != mode:
+                raise APIError(409, f"workspace is already bound to {existing} delivery")
+            if existing is None:
+                if self.external_review and (stored.get("thread_id") or stored.get("queue")):
+                    raise APIError(409, "workspace already contains Codex App Server activity")
+                stored["delivery_mode"] = mode
+                self.store._save()
+            return copy.deepcopy(stored)
 
     def state(self, *, include_capability: bool = False, preferred_session_id: str | None = None) -> dict[str, Any]:
         self.ensure(preferred_session_id)
@@ -38,6 +54,9 @@ class WorkspaceGateway:
     def start(self) -> None:
         self.ensure()
         self._started = True
+        if self.external_review:
+            self.store.workspace_agent(status="external_idle")
+            return
         if self.adapter is None:
             self.store.workspace_agent(status="disconnected", error="Codex App Server is not configured")
             return
@@ -76,11 +95,100 @@ class WorkspaceGateway:
         if not payload.get("idempotency_key"):
             raise APIError(400, "idempotency_key is required for direct Codex delivery")
         feedback = self.store.submit_feedback(session_id, payload)
+        if self.external_review:
+            with self.store.lock:
+                item = next(entry for entry in self.store.state["workspace"]["queue"] if entry["feedback_id"] == feedback["feedback_id"])
+                if item["status"] == "queued":
+                    item["status"] = "awaiting_mcp"
+                    self.store._save()
+                result = copy.deepcopy(feedback)
+                result["delivery"] = copy.deepcopy(item)
+                return result
         self.wake()
         with self.store.lock:
             item = next(entry for entry in self.store.state["workspace"]["queue"] if entry["feedback_id"] == feedback["feedback_id"])
             result = copy.deepcopy(feedback)
             result["delivery"] = copy.deepcopy(item)
+            return result
+
+    def _project_file(self, local_path: Any) -> Path:
+        if not isinstance(local_path, str) or not local_path:
+            raise APIError(400, "local path must be a file path")
+        try:
+            path = Path(local_path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise APIError(400, "local file does not exist") from exc
+        if not path.is_file() or not path.is_relative_to(self.project_dir):
+            raise APIError(400, "local file must be inside the workspace project directory")
+        return path
+
+    def add_reference_paths(self, paths: Any) -> dict[str, Any]:
+        """Import local images for the bound workspace, avoiding duplicate uploads."""
+        workspace = self.ensure()
+        if not isinstance(paths, list) or len(paths) > MAX_REFERENCES:
+            raise APIError(400, "reference_images must be an array of at most 8 paths")
+        prepared = []
+        for path in paths:
+            source = self._project_file(path)
+            _, data = self.store._read_reference_path(str(source))
+            # Camera exports often share names such as 000480.jpg. Keep the
+            # view name visible in the browser's reference strip.
+            label = f"{source.parent.name}_{source.name}"[-180:]
+            prepared.append((label, data))
+        with self.store.lock:
+            session_id = workspace["session_id"]
+            current = self.store.state["sessions"][session_id]["reference_images"]
+            existing = {(entry["name"], (self.store.media_dir / entry["url"].rsplit("/", 1)[-1]).read_bytes()): entry for entry in current}
+            novel = [(name, data) for name, data in prepared if (name, data) not in existing]
+            if len(current) + len({(name, data) for name, data in novel}) > MAX_REFERENCES:
+                raise APIError(400, "workspace may contain at most 8 reference images")
+            for name, data in novel:
+                if (name, data) in existing:
+                    continue
+                mime = self.store._image_kind(data)[1]
+                data_url = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+                existing[(name, data)] = self.store.add_reference(session_id, name, data_url)
+            return {"session_id": session_id, "reference_images": copy.deepcopy(self.store.state["sessions"][session_id]["reference_images"])}
+
+    def begin_external_request(self, *, session_id: Any = None, message: Any = None, cursor: Any = None) -> dict[str, Any]:
+        if not self.external_review:
+            raise APIError(409, "this workspace uses direct Codex delivery")
+        workspace = self.ensure()
+        if session_id is not None and session_id != workspace["session_id"]:
+            raise APIError(409, "review session belongs to another workspace")
+        if message is not None and (not isinstance(message, str) or not 1 <= len(message) <= 2000):
+            raise APIError(400, "request message must contain 1 to 2000 characters")
+        with self.store.lock:
+            session = self.store.state["sessions"][workspace["session_id"]]
+            count = session.get("feedback_count", 0)
+            if cursor is None:
+                cursor = count
+            if type(cursor) is not int or not 0 <= cursor <= count:
+                raise APIError(400, "cursor must refer to an existing feedback position")
+            current = self.store.state["workspace"]
+            current["agent"] = {"status": "waiting_for_mcp", "turn_id": None, "error": None}
+            if message is not None:
+                current["request_feedback"] = {"message": message, "object_ids": [], "at": _now(), "scene_revision": self.store.state["scene"]["revision"]}
+            self.store._save()
+            self.store.workspace_event("external_feedback_requested", {"session_id": workspace["session_id"], "cursor": cursor, "message": message or ""})
+            return {"session_id": workspace["session_id"], "next_cursor": cursor, "scene_revision": self.store.state["scene"]["revision"], "delivery_mode": "external"}
+
+    def take_external_feedback(self, session_id: str, cursor: int) -> dict[str, Any]:
+        if not self.external_review:
+            raise APIError(409, "this workspace uses direct Codex delivery")
+        workspace = self.ensure()
+        if session_id != workspace["session_id"]:
+            raise APIError(409, "review session belongs to another workspace")
+        with self.store.lock:
+            result = self.store.feedback(session_id, cursor)
+            if result["items"]:
+                ids = {item["feedback_id"] for item in result["items"]}
+                for item in self.store.state["workspace"]["queue"]:
+                    if item["feedback_id"] in ids and item["status"] == "awaiting_mcp":
+                        item["status"] = "returned_to_mcp"
+                self.store.state["workspace"]["agent"] = {"status": "external_idle", "turn_id": None, "error": None}
+                self.store._save()
+                self.store.workspace_event("feedback_returned_to_mcp", {"feedback_ids": sorted(ids)})
             return result
 
     def confirm_queue(self, feedback_id: str, payload: dict[str, Any]) -> dict[str, Any]:

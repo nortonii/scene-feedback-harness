@@ -2,7 +2,7 @@
 
 # Codex 视觉重建工作台
 
-在参考图片和当前 3D 场景上圈画，写一句话，点击「发送」。工作台把文字、原图、标注图和场景快照作为**同一条 Codex 会话中的用户消息**送出；Codex 修改项目并发布 GLB 后，结果回到这个页面。你不需要去终端再触发一次读取。
+默认模式下，在参考图片和当前 3D 场景上圈画，写一句话，点击「发送」。工作台把文字、原图、标注图和场景快照作为**工作台所管理的同一条 Codex 会话中的用户消息**送出；Codex 修改项目并发布 GLB 后，结果回到这个页面。你不需要去终端再触发一次读取。已有 Codex 桌面任务也可以通过下文的外部 MCP 模式使用同一套审图界面。
 
 ![参考图与场景并排标注](preview.png)
 
@@ -21,7 +21,7 @@
               工作台刷新场景
 ```
 
-Gateway 为这个项目保存一条持久 Codex 会话。它通过 stdio 启动 `codex app-server`，并将图片作为 `localImage` 输入项发送。工作台不向其他已经打开的 Codex 桌面或终端会话注入消息。MCP 用于读取上下文、请求用户检查以及发布场景；**网页的发送按钮直接启动用户回合**。
+默认模式下，Gateway 为这个项目保存一条持久 Codex 会话。它通过 stdio 启动 `codex app-server`，并将图片作为 `localImage` 输入项发送。此模式不向其他已经打开的 Codex 桌面或终端会话注入消息。MCP 用于读取上下文、请求用户检查以及发布场景；**网页的发送按钮直接启动用户回合**。
 
 这套界面负责帮助人指出问题，不定义重建算法，也不要求人输入坐标或几何约束。Codex 可以使用项目已有的建模、重建和编辑工具。
 
@@ -61,6 +61,29 @@ Gateway 会在项目的 Codex thread 中自动配置这五个 MCP 工具，无�
 
 浏览器里添加参考图；让 Codex 从项目源文件构建或导出自包含 GLB，并通过 MCP 发布。项目目录和 thread ID 会保存在数据目录中；重新启动时恢复同一会话。一个数据目录只绑定一个项目，不会悄悄切换到别的项目。
 
+## 在现有 Codex 桌面任务中审图（外部 MCP 模式）
+
+如果你已经在 Codex 桌面中处理某个项目，可用 `--external-review` 把工作台作为该任务调用的 MCP 工具。此模式**不会创建或接管另一条 Codex 会话**：Codex 调用 `request_visual_feedback` 打开审图会话；如果浏览器成功打开，该调用默认等待并返回反馈。如果只返回地址和会话信息，则调用 `wait_visual_feedback` 等待。你在浏览器点击「发送」后，文字和实际图像作为工具结果回到**原任务**，由它继续修改场景。`get_visual_feedback` 可重新读取已提交的反馈。
+
+先在仓库根目录安装上面的依赖。在一个终端中设置绝对路径，注册全局 MCP，再启动独立的审图服务：
+
+```bash
+REPO=/absolute/path/to/scene_feedback_harness
+PROJECT=/absolute/path/to/your/existing/project
+DATA=/absolute/path/to/private/external-review-data
+codex mcp add scene_feedback_external \
+  --env SCENE_FEEDBACK_PORT=18768 \
+  --env SCENE_FEEDBACK_DATA_DIR="$DATA" \
+  --env SCENE_FEEDBACK_PROJECT_DIR="$PROJECT" \
+  -- "$REPO/.venv/bin/python" "$REPO/backend/mcp_server.py"
+"$REPO/.venv/bin/python" "$REPO/backend/server.py" \
+  --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review
+```
+
+在 `~/.codex/config.toml` 中，由 `codex mcp add` 创建的 `[mcp_servers.scene_feedback_external]` 表下设置 `tool_timeout_sec = 900`；审图工具的 `timeout_sec` 用默认 600 或更小值，留出传输图像的时间。**重启 Codex 桌面应用**，让现有任务刷新 MCP 工具目录。然后在该任务中说「进入人工调试模式」，或明确要求它调用 `request_visual_feedback`，传入项目内的参考图片路径及现有 GLB 路径（没有初始场景时可省略 GLB）。如果工具只返回 `session_id`、`next_cursor` 和地址，就打开 <http://127.0.0.1:18768/>，并以 `cursor=next_cursor` 调用 `wait_visual_feedback(session_id, cursor)`。添加参考图并标注；浏览器的发送按钮此时只完成等待中的 MCP 审图请求，**不会另外启动用户回合**。
+
+`PROJECT` 应与现有任务的项目目录一致；`DATA` 是该项目专用的私有目录。示例使用独立的端口、数据目录和 MCP 名称，避免混用上面的默认模式。已发布的场景仍可通过 `workspace_publish_scene` 更新到页面。
+
 ## MCP 工具
 
 | 工具 | 用途 |
@@ -69,9 +92,11 @@ Gateway 会在项目的 Codex thread 中自动配置这五个 MCP 工具，无�
 | `workspace_get_context` | 读取当前参考图、场景版本和项目上下文 |
 | `workspace_get_feedback` | 读取已提交反馈及其实际图像 |
 | `workspace_publish_scene` | 校验并发布新的 GLB，检查预期版本，通知页面刷新 |
-| `workspace_request_feedback` | 在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |
+| `workspace_request_feedback` | 默认模式：在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |
+| `request_visual_feedback` / `wait_visual_feedback` | 外部 MCP 模式：发起审图并等待浏览器提交，将文字和图像交回当前任务 |
+| `get_visual_feedback` | 外部 MCP 模式：读取已提交的视觉反馈 |
 
-仓库内的 [视觉重建 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) 提醒 Codex 区分原图和标记、编辑项目源文件，并在结果就绪时发布 GLB。新工作流无需等待某个 MCP 调用才能发送下一轮。
+仓库内的 [视觉重建 Skill](.agents/skills/visual-reconstruction-feedback/SKILL.md) 提醒 Codex 区分原图和标记、编辑项目源文件，并在结果就绪时发布 GLB。默认模式无需等待某个 MCP 调用才能发送下一轮；外部 MCP 模式则由 `wait_visual_feedback` 把本轮反馈交回原任务。
 
 ## 验证与边界
 

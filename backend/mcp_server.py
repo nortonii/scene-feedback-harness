@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -13,6 +14,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from mcp.server import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
@@ -22,6 +24,7 @@ from server import DEFAULT_DATA_DIR
 
 PORT = int(os.environ.get("SCENE_FEEDBACK_PORT", "18765"))
 DATA_DIR = Path(os.environ.get("SCENE_FEEDBACK_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser().resolve()
+PROJECT_DIR = Path(os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", str(Path(__file__).resolve().parent.parent))).expanduser().resolve()
 BASE_URL = f"http://127.0.0.1:{PORT}"
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 IMAGE_URL_RE = re.compile(r"^/(media|screenshots)/([0-9a-f]{32}\.(?:png|jpg))$")
@@ -56,6 +59,8 @@ def ensure_http_server() -> None:
         raise RuntimeError(f"Workspace Gateway unavailable at {BASE_URL}; start backend/server.py") from exc
     if health.get("service") != "scene-feedback-harness" or not health.get("workspace_gateway"):
         raise RuntimeError(f"port {PORT} is not running the current Workspace Gateway")
+    if health.get("data_dir") != str(DATA_DIR) or health.get("project_dir") != str(PROJECT_DIR):
+        raise RuntimeError(f"Workspace Gateway at {BASE_URL} belongs to another project or data directory; check SCENE_FEEDBACK_* settings")
 
 
 def _image_path(url: str) -> Path:
@@ -122,7 +127,42 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
     return CallToolResult(content=content, structured_content=enriched)
 
 
-mcp = MCPServer("scene-feedback-harness")
+mcp = MCPServer(
+    "scene-feedback-harness",
+    instructions=(
+        "For 3D/image reconstruction in an existing Codex task, if the user says '进入人工调试模式' or '进入人工参与调试模式', "
+        "call request_visual_feedback with project-local reference images and current GLB if available. "
+        "In external mode, annotated images, scene screenshot, selected object, and note return to the "
+        "invoking Codex task. Continue editing in that task; publish the updated GLB with "
+        "workspace_publish_scene. If no browser opens, share the returned URL and call "
+        "wait_visual_feedback with session_id and next_cursor."
+    ),
+)
+
+
+def _external_state() -> dict[str, Any]:
+    ensure_http_server()
+    state = _http("GET", "/api/workspace/state")
+    if state.get("delivery_mode") != "external":
+        raise ValueError("this workbench uses its own Codex App Server task; start it with --external-review for an existing Codex task")
+    return state
+
+
+async def _wait_for_external_feedback(session_id: str, timeout_sec: int, cursor: int) -> dict[str, Any]:
+    if type(timeout_sec) is not int or not 1 <= timeout_sec <= 3600:
+        raise ValueError("timeout_sec must be between 1 and 3600")
+    if type(cursor) is not int or cursor < 0:
+        raise ValueError("cursor must be a nonnegative integer")
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+    query = urlencode({"session_id": session_id, "cursor": cursor})
+    while True:
+        result = await asyncio.to_thread(_http, "GET", f"/api/workspace/external/feedback?{query}", private=True)
+        if result["items"] or result.get("status") != "open":
+            result["url"] = f"{BASE_URL}/?session_id={session_id}"
+            return result
+        if asyncio.get_running_loop().time() >= deadline:
+            return {"session_id": session_id, "status": "timeout", "items": [], "next_cursor": cursor, "url": f"{BASE_URL}/?session_id={session_id}", "message": "The workbench remains open. Call wait_visual_feedback later with this session_id and next_cursor."}
+        await asyncio.sleep(0.35)
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
@@ -130,6 +170,9 @@ def workspace_open(open_browser: bool = True) -> dict[str, Any]:
     """Open or locate this project's persistent visual reconstruction workbench."""
     ensure_http_server()
     result = _http("GET", "/api/workspace/state")
+    if result.get("delivery_mode") == "external":
+        _http("POST", "/api/workspace/external/request", {"session_id": result["session_id"]}, private=True)
+        result = _http("GET", "/api/workspace/state")
     result.pop("browser_capability", None)
     result["url"] = f"{BASE_URL}/?session_id={result['session_id']}"
     result["browser_opened"] = False
@@ -178,7 +221,88 @@ def workspace_publish_scene(local_path: str, expected_revision: int) -> dict[str
 def workspace_request_feedback(message: str, object_ids: list[str] | None = None) -> dict[str, Any]:
     """Ask the human to inspect a result in the workbench, then return immediately."""
     ensure_http_server()
+    if _http("GET", "/api/workspace/state").get("delivery_mode") == "external":
+        return _http("POST", "/api/workspace/external/request", {"message": message}, private=True)
     return _http("POST", "/api/workspace/request-feedback", {"message": message, "object_ids": object_ids}, private=True)
+
+
+@mcp.tool()
+async def request_visual_feedback(
+    reference_images: list[str] | None = None,
+    current_scene: dict[str, Any] | None = None,
+    scene_glb_path: str | None = None,
+    session_id: str | None = None,
+    cursor: int | None = None,
+    wait_for_submit: bool = True,
+    timeout_sec: int = 600,
+    open_browser: bool = True,
+) -> CallToolResult:
+    """Enter human visual debugging in the invoking Codex task and return the annotated feedback.
+
+    Use this for '进入人工调试模式' during 3D reconstruction. Pass reference_images
+    as project-local PNG/JPEG paths and scene_glb_path as a project-local GLB.
+    The persistent workbench session is bound to the configured project.
+    """
+    state = _external_state()
+    if session_id is not None and session_id != state["session_id"]:
+        raise ValueError("session_id belongs to a different workspace")
+    if current_scene is not None and scene_glb_path is not None:
+        raise ValueError("provide current_scene or scene_glb_path, not both")
+    if current_scene is not None and (not isinstance(current_scene, dict) or not isinstance(current_scene.get("objects"), list)):
+        raise ValueError("current_scene must contain an objects array")
+    if type(timeout_sec) is not int or not 1 <= timeout_sec <= 3600:
+        raise ValueError("timeout_sec must be between 1 and 3600")
+    if cursor is not None and (type(cursor) is not int or cursor < 0):
+        raise ValueError("cursor must be a nonnegative integer")
+    if reference_images is not None:
+        await asyncio.to_thread(_http, "POST", "/api/workspace/references", {"reference_images": reference_images}, private=True)
+    if scene_glb_path is not None:
+        scene = await asyncio.to_thread(_http, "GET", "/api/scene")
+        await asyncio.to_thread(_http, "POST", "/api/workspace/publish", {"local_path": scene_glb_path, "expected_revision": scene["revision"]}, private=True)
+    elif current_scene is not None:
+        scene = await asyncio.to_thread(_http, "GET", "/api/scene")
+        await asyncio.to_thread(_http, "PUT", "/api/scene", {"expected_revision": scene["revision"], "objects": current_scene["objects"]}, private=True)
+    request = await asyncio.to_thread(_http, "POST", "/api/workspace/external/request", {"session_id": state["session_id"], "cursor": cursor, "message": "请在参考图和当前场景上标出要调整的位置，然后发送给当前 Codex 任务。"}, private=True)
+    effective_cursor = request["next_cursor"]
+    url = f"{BASE_URL}/?session_id={state['session_id']}"
+    opened = False
+    if open_browser and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        try:
+            opened = bool(await asyncio.wait_for(asyncio.to_thread(webbrowser.open, url, 1, True), timeout=5))
+        except Exception:
+            logging.exception("Could not open the visual workbench")
+    if wait_for_submit and opened:
+        result = await _wait_for_external_feedback(state["session_id"], timeout_sec, effective_cursor)
+        result["browser_opened"] = opened
+        return _visual_tool_result(result)
+    response = {**request, "url": url, "browser_opened": opened, "reference_images": _http("GET", "/api/workspace/context")["reference_images"]}
+    if wait_for_submit:
+        response["message"] = "Open the URL, submit your marks, then call wait_visual_feedback with session_id and next_cursor."
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(response, ensure_ascii=False))], structured_content=response)
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
+async def wait_visual_feedback(session_id: str, cursor: int = 0, timeout_sec: int = 600) -> CallToolResult:
+    """Wait for the next visual feedback packet and return images to this same Codex task."""
+    state = _external_state()
+    if session_id != state["session_id"]:
+        raise ValueError("session_id belongs to a different workspace")
+    await asyncio.to_thread(_http, "POST", "/api/workspace/external/request", {"session_id": session_id, "cursor": cursor}, private=True)
+    return _visual_tool_result(await _wait_for_external_feedback(session_id, timeout_sec, cursor))
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
+def get_visual_feedback(session_id: str, cursor: int = 0) -> CallToolResult:
+    """Read submitted visual feedback now, including the original and annotated images."""
+    state = _external_state()
+    if session_id != state["session_id"]:
+        raise ValueError("session_id belongs to a different workspace")
+    if type(cursor) is not int or cursor < 0:
+        raise ValueError("cursor must be a nonnegative integer")
+    query = urlencode({"session_id": session_id, "cursor": cursor})
+    result = _http("GET", f"/api/workspace/external/feedback?{query}", private=True)
+    result["url"] = f"{BASE_URL}/?session_id={session_id}"
+    return _visual_tool_result(result)
 
 
 if __name__ == "__main__":

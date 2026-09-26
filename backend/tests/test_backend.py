@@ -243,9 +243,9 @@ class FakeAdapter:
 
 
 class GatewayTests(unittest.TestCase):
-    def test_mcp_registers_only_workspace_tools(self) -> None:
+    def test_mcp_registers_workspace_and_external_review_tools(self) -> None:
         names = [tool.name for tool in asyncio.run(mcp_server.mcp.list_tools())]
-        self.assertEqual(names, ["workspace_open", "workspace_get_context", "workspace_get_feedback", "workspace_publish_scene", "workspace_request_feedback"])
+        self.assertEqual(names, ["workspace_open", "workspace_get_context", "workspace_get_feedback", "workspace_publish_scene", "workspace_request_feedback", "request_visual_feedback", "wait_visual_feedback", "get_visual_feedback"])
 
     @staticmethod
     def wait_for(predicate, timeout: float = 3) -> None:
@@ -631,6 +631,126 @@ class HTTPTests(unittest.TestCase):
                 mcp_server.workspace_publish_scene(str(model), expected_revision=before["revision"] + 1)
         status, after = self.request("GET", "/api/scene")
         self.assertEqual(after, before)
+
+
+class ExternalReviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.project = self.root / "project"
+        self.project.mkdir()
+        web_dir = self.root / "web"
+        web_dir.mkdir()
+        (web_dir / "index.html").write_text("<html>review</html>", encoding="utf-8")
+        self.data_dir = self.root / "data"
+        self.server = make_server(port=0, data_dir=self.data_dir, web_dir=web_dir, project_dir=self.project, external_review=True)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_port}"
+        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.token = (self.data_dir / "control_token").read_text(encoding="ascii").strip()
+        self.browser_token = (self.data_dir / "browser_token").read_text(encoding="ascii").strip()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        self.temporary.cleanup()
+
+    def request(self, method: str, path: str, payload: dict | None = None, *, key: bool = False, browser: bool = False):
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["X-Scene-Harness-Key"] = self.token
+        if browser:
+            headers["X-Workspace-Capability"] = self.browser_token
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode()
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.base + path, data=body, headers=headers, method=method)
+        try:
+            with self.opener.open(request, timeout=10) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            with exc:
+                return exc.code, json.loads(exc.read())
+
+    def test_existing_task_receives_annotated_images_and_reference_import_is_idempotent(self) -> None:
+        data_url, image_bytes = image_data_url()
+        reference = self.project / "reference.png"
+        reference.write_bytes(image_bytes)
+        model = self.project / "preview.glb"
+        tiny_glb(model)
+        with patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "DATA_DIR", self.data_dir), patch.object(mcp_server, "PROJECT_DIR", self.project):
+            opened = asyncio.run(mcp_server.request_visual_feedback(reference_images=[str(reference)], scene_glb_path=str(model), wait_for_submit=False, open_browser=False))
+            session_id = opened.structured_content["session_id"]
+            cursor = opened.structured_content["next_cursor"]
+            self.assertFalse(opened.structured_content["browser_opened"])
+            self.assertEqual(opened.structured_content["delivery_mode"], "external")
+            status, state = self.request("GET", "/api/workspace/state")
+            self.assertEqual((status, state["agent"]["status"], state["thread_id"]), (200, "waiting_for_mcp", None))
+            self.assertEqual(state["scene_revision"], 2)
+            asyncio.run(mcp_server.request_visual_feedback(reference_images=[str(reference)], wait_for_submit=False, open_browser=False))
+            status, context = self.request("GET", "/api/workspace/context")
+            self.assertEqual(len(context["reference_images"]), 1)
+            status, packet = self.request("POST", f"/api/sessions/{session_id}/feedback", {"idempotency_key": "external-review-0001", "scene_revision": 2, "note": "柜子顶部请贴近图中的红线", "reference_annotated_data_urls": [{"reference_id": context["reference_images"][0]["id"], "data_url": data_url}], "scene_original_data_url": data_url, "scene_annotated_data_url": data_url}, browser=True)
+            self.assertEqual((status, packet["delivery"]["status"]), (201, "awaiting_mcp"))
+            result = asyncio.run(mcp_server.wait_visual_feedback(session_id, cursor=cursor, timeout_sec=2))
+            self.assertEqual(result.structured_content["items"][0]["feedback_id"], packet["feedback_id"])
+            self.assertEqual(sum(block.type == "image" for block in result.content), 4)
+            status, state = self.request("GET", "/api/workspace/state")
+            self.assertEqual(state["agent"]["status"], "external_idle")
+            self.assertEqual(state["queue"][0]["status"], "returned_to_mcp")
+
+    def test_external_review_is_bound_to_its_project_and_control_key(self) -> None:
+        data_url, data = image_data_url()
+        outside = self.root / "outside.png"
+        outside.write_bytes(data)
+        status, denied = self.request("POST", "/api/workspace/references", {"reference_images": [str(outside)]})
+        self.assertEqual(status, 403)
+        status, denied = self.request("POST", "/api/workspace/references", {"reference_images": [str(outside)]}, key=True)
+        self.assertEqual(status, 400)
+        self.assertIn("project directory", denied["error"])
+        status, denied = self.request("POST", "/api/workspace/publish", {"local_path": str(outside), "expected_revision": 1}, key=True)
+        self.assertEqual(status, 400)
+        status, state = self.request("GET", "/api/workspace/state")
+        status, denied = self.request("POST", "/api/workspace/external/request", {"session_id": "a" * 32}, key=True)
+        self.assertEqual(status, 409)
+        status, denied = self.request("GET", f"/api/workspace/external/feedback?session_id={'b' * 32}&cursor=0", key=True)
+        self.assertEqual(status, 409)
+        self.assertEqual(state["agent"]["status"], "external_idle")
+
+    def test_reference_labels_distinguish_camera_views_with_the_same_filename(self) -> None:
+        _, image_bytes = image_data_url()
+        paths = []
+        for camera in ("C10095_rgb", "C10119_rgb"):
+            directory = self.project / camera
+            directory.mkdir()
+            path = directory / "000480.jpg"
+            path.write_bytes(image_bytes)
+            paths.append(str(path))
+        status, result = self.request("POST", "/api/workspace/references", {"reference_images": paths}, key=True)
+        self.assertEqual(status, 200)
+        self.assertEqual([item["name"] for item in result["reference_images"]],
+                         ["C10095_rgb_000480.jpg", "C10119_rgb_000480.jpg"])
+        status, result = self.request("POST", "/api/workspace/references", {"reference_images": paths}, key=True)
+        self.assertEqual((status, len(result["reference_images"])), (200, 2))
+
+    def test_external_mode_cannot_adopt_a_direct_delivery_workspace(self) -> None:
+        store = self.server.scene_store
+        gateway = WorkspaceGateway(store, self.project)
+        with self.assertRaisesRegex(APIError, "bound to external delivery"):
+            gateway.ensure()
+
+    def test_headless_default_returns_url_without_blocking(self) -> None:
+        with patch.object(mcp_server, "BASE_URL", self.base), patch.object(mcp_server, "PORT", self.server.server_port), patch.object(mcp_server, "DATA_DIR", self.data_dir), patch.object(mcp_server, "PROJECT_DIR", self.project), patch.dict(os.environ, {"DISPLAY": "", "WAYLAND_DISPLAY": ""}):
+            start = time.monotonic()
+            opened = asyncio.run(mcp_server.request_visual_feedback(timeout_sec=600))
+            self.assertLess(time.monotonic() - start, 3)
+            self.assertFalse(opened.structured_content["browser_opened"])
+            self.assertIn("session_id=", opened.structured_content["url"])
+            status, state = self.request("GET", "/api/workspace/state")
+            self.assertEqual((status, state["agent"]["status"]), (200, "waiting_for_mcp"))
 
 
 if __name__ == "__main__":
