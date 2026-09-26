@@ -130,7 +130,7 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
 mcp = MCPServer(
     "scene-feedback-harness",
     instructions=(
-        "For 3D/image reconstruction in an existing Codex task, if the user says '进入人工调试模式' or '进入人工参与调试模式', "
+        "For this configured project's 3D reconstruction task, if the user says '进入人工调试模式' or '进入人工参与调试模式', "
         "call request_visual_feedback with project-local reference images and current GLB if available. "
         "In external mode, annotated images, scene screenshot, selected object, and note return to the "
         "invoking Codex task. Continue editing in that task; publish the updated GLB with "
