@@ -5,6 +5,15 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const array = (value) => [value.x, value.y, value.z].map((n) => Number(n.toFixed(5)));
+function newId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  if (typeof globalThis.crypto?.getRandomValues !== 'function') throw new Error('浏览器无法生成安全随机 ID');
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 const labels = {point:'点', rectangle:'方框', line:'线段', arrow:'箭头', text:'文字', freehand:'自由画笔'};
 const glyphs = {point:'●', rectangle:'▢', line:'╱', arrow:'↗', text:'T', freehand:'〰'};
 const circled = ['','①','②','③','④','⑤','⑥','⑦','⑧','⑨'];
@@ -622,7 +631,7 @@ function approvalQuestions(parent, questions) {
         return answer;
       }];
     }
-    const groupName = 'approval-' + crypto.randomUUID();
+    const groupName = 'approval-' + newId();
     let otherInput = null;
     for (const option of options) {
       const row = document.createElement('label');
@@ -1239,7 +1248,7 @@ function freezeScene() {
   if (oldMarks.length && !window.confirm('拍新截图会清除旧截图上的 ' + oldMarks.length + ' 条场景标记。继续？')) return;
   const shot = captureLiveScene();
   state.snapshot = {
-    id:crypto.randomUUID(), data_url:shot, scene_revision:state.sceneRevision,
+    id:newId(), data_url:shot, scene_revision:state.sceneRevision,
     camera:cameraData(), selected_object_ids:state.selectedId ? [state.selectedId] : [],
     selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : []
   };
@@ -1512,7 +1521,7 @@ function pointFromPointer(event, canvas) {
 }
 function addAnnotation(annotation) {
   const item = {
-    id:crypto.randomUUID(), pane:annotation.pane, type:annotation.type,
+    id:newId(), pane:annotation.pane, type:annotation.type,
     coordinates:annotation.coordinates
   };
   if (state.groupId) item.group_id = state.groupId;
@@ -1886,7 +1895,7 @@ async function submitFeedback() {
   try {
     if (!state.pendingSubmission) {
       const payload = await feedbackPayload();
-      const key = crypto.randomUUID();
+      const key = newId();
       state.pendingSubmission = {key, payload:{...payload, idempotency_key:key,
         confirm_stale:!!staleSnapshot}};
       try { await writeOutbox(state.pendingSubmission); }
