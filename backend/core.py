@@ -986,7 +986,7 @@ class SceneStore:
             session["feedback_count"] = session.get("feedback_count", 0) + 1
             workspace = self.state.get("workspace")
             if workspace and workspace["session_id"] == session_id:
-                queue_item = {"feedback_id": feedback["feedback_id"], "scene_revision": revision, "status": "queued", "enqueued_at": feedback["submitted_at"], "confirmed_against_revision": self.state["scene"]["revision"] if payload.get("confirm_stale") is True else None, "turn_id": None, "error": None}
+                queue_item = {"feedback_id": feedback["feedback_id"], "scene_revision": revision, "status": "queued", "enqueued_at": feedback["submitted_at"], "confirmed_against_revision": self.state["scene"]["revision"] if payload.get("confirm_stale") is True else None, "turn_id": None, "error": None, "target_thread_id": workspace.get("thread_id")}
                 workspace["queue"].append(queue_item)
                 workspace["request_feedback"] = None
                 workspace["event_seq"] += 1

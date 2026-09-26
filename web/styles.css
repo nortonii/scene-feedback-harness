@@ -110,13 +110,24 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .align-button.aligned { border-color: #65b696; background: #235243; color: #e2fff0; }
 .selected-chip { position: absolute; top: 11px; left: 12px; z-index: 5; color: #e7f9f7; background: #1d4450dc; border: 1px solid #6fa8b0; border-radius: 5px; font-size: 10px; padding: 6px 8px; pointer-events: none; max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .compare-row { flex: none; min-height: 77px; padding: 9px 12px; display: flex; align-content: center; align-items: center; flex-wrap: wrap; gap: 7px 10px; color: #b9c8ce; background: #1c2932; border-top: 1px solid #354550; font-size: 10px; }
-.check-label, .opacity-control { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
-.check-label input { accent-color: #e5aa73; }
+.opacity-control { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
 .opacity-control input { width: 76px; accent-color: #e5aa73; }
 .opacity-control span { min-width: 27px; }
 .compare-caption { width: 100%; color: #8799a4; font-size: 9px; }
 .feedback-head { padding: 23px 18px 21px; border-bottom: 1px solid #30404a; }
 .feedback-head h2 { font-size: 20px; }
+.target-picker { flex: none; padding: 11px 12px 9px; border-bottom: 1px solid #30404a; }
+.current-target { margin: 6px 0 8px; color: #dae7ea; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.target-actions { display: flex; align-items: center; gap: 5px; }
+.target-actions select { min-width: 0; flex: 1; height: 30px; border: 1px solid #52636d; border-radius: 5px; background: #24333d; color: #e0eaeb; padding: 0 5px; font-size: 10px; }
+.target-actions input { min-width: 0; flex: 1; height: 30px; border: 1px solid #52636d; border-radius: 5px; background: #24333d; color: #e0eaeb; padding: 0 7px; font-size: 10px; }
+.target-actions .compact-button { padding: 0 7px; }
+.target-manual { margin-top: 7px; color: #96aeb6; font-size: 9px; }
+.target-manual summary { cursor: pointer; }
+.target-manual .target-actions { margin-top: 7px; }
+.target-picker p { margin: 7px 0 0; color: #8498a2; font-size: 9px; line-height: 1.45; }
+.queue-target { margin-top: 6px; color: #b5cbd4; font-size: 9px; }
+.queue-target.old-target { color: #ffce9a; }
 .agent-status { flex: none; margin: 10px 12px 4px; padding: 9px 10px; border: 1px solid #4a626c; border-radius: 6px; background: #23343e; color: #c4d6db; font-size: 10px; line-height: 1.45; }
 .agent-status.running { border-color: #8a6d47; color: #f8d4a1; background: #382f29; }
 .agent-status.error { border-color: #9d605c; color: #ffd5ce; }

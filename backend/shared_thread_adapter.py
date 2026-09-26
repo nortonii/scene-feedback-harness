@@ -153,7 +153,7 @@ class SharedDesktopAdapter:
                 if "id" in message and "method" in message:
                     with self._lock:
                         self._pending_requests[str(message["id"])] = message
-                    self.on_event({"method": "adapter/request_pending", "params": {"request_id": message["id"], "method": message["method"], "params": message.get("params", {})}})
+                    self.on_event({"method": "adapter/request_pending", "params": {"thread_id": self.thread_id, "request_id": message["id"], "method": message["method"], "params": message.get("params", {})}})
                 elif "id" in message:
                     with self._lock:
                         pending = self._pending_rpc.pop(str(message["id"]), None)
@@ -185,7 +185,7 @@ class SharedDesktopAdapter:
                 if not self._closed:
                     self._turn_state = "unknown"
                     self._connected = False
-                    self.on_event({"method": "adapter/disconnected", "params": {"error": str(exc)[:500]}})
+                    self.on_event({"method": "adapter/disconnected", "params": {"thread_id": self.thread_id, "error": str(exc)[:500]}})
         finally:
             with self._lock:
                 if self._bridge is bridge:

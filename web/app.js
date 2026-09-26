@@ -25,8 +25,11 @@ const ui = {
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
-  compareImage:id('compare-image'), compareEnabled:id('compare-enabled'),
+  compareImage:id('compare-image'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
+  targetPicker:id('target-picker'), currentTarget:id('current-target'), targetSelect:id('target-select'),
+  switchTarget:id('switch-target'), refreshTargets:id('refresh-targets'), targetHelp:id('target-help'),
+  manualTargetId:id('manual-target-id'), manualSwitchTarget:id('manual-switch-target'),
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
@@ -43,7 +46,8 @@ const ui = {
 const state = {
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
-  boundThreadId:null, queue:[], approvals:[],
+  boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
+  targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
@@ -235,6 +239,9 @@ async function ensureSession() {
   state.pendingSubmission = await readOutbox();
   renderWorkspace(workspace);
   await fetchEvents(true);
+  if (state.deliveryMode === 'external' && state.boundThreadId) loadTargets().catch((error) => {
+    ui.targetHelp.textContent = '无法读取任务列表：' + error.message;
+  });
 }
 
 function outboxKey() { return 'visual-outbox:' + state.sessionId; }
@@ -295,8 +302,8 @@ function updateSubmitLabel() {
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
     const label = state.pendingSubmission ? '重试同一条反馈'
-      : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入原任务下一轮'
-      : bound ? '发送到原 Codex 任务' : '保存视觉反馈';
+      : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入目标任务下一轮'
+      : bound ? '发送到目标 Codex 任务' : '保存视觉反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
@@ -305,11 +312,11 @@ function updateSubmitLabel() {
     ui.caption.textContent = state.pendingSubmission
       ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status)
-        ? '原任务正在执行；这条图文反馈会加入下一轮。'
+        ? '目标任务正在执行；这条图文反馈会加入下一轮。'
       : bound && status === 'delivery_uncertain'
-        ? '请先核对原 Codex 任务中的送达情况；新反馈会先保存。'
+        ? '请先核对目标 Codex 任务中的送达情况；新反馈会先保存。'
       : bound
-        ? '原图、标注图和场景截图会送入绑定的 Codex 任务。'
+        ? '原图、标注图和场景截图会送入当前选择的 Codex 任务。'
       : '反馈会保存在工作台，待 MCP 工具读取后交回 Codex。';
     return;
   }
@@ -327,9 +334,116 @@ function updateSubmitLabel() {
   else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
   else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
 }
+function shortTaskId(threadId) {
+  return typeof threadId === 'string' && threadId.length > 12 ? threadId.slice(0, 8) + '…' : (threadId || '未绑定');
+}
+function targetStatusLabel(status) {
+  return ({idle:'空闲',inProgress:'执行中',in_progress:'执行中',running:'执行中',active:'执行中',completed:'已完成',
+    archived:'已归档',unknown:'状态未知'})[status] || (status || '');
+}
+function targetIsBusy(item) {
+  return ['inProgress', 'in_progress', 'running', 'active', 'awaiting_approval'].includes(item?.status);
+}
+function targetModelLabel(item) {
+  return [item?.model, item?.reasoning_effort].filter(Boolean).join(' · ');
+}
+function targetName(threadId) {
+  const target = state.targets?.find((item) => item.thread_id === threadId);
+  return target?.title || shortTaskId(threadId);
+}
+function renderTargetPicker() {
+  ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.boundThreadId);
+  if (state.deliveryMode !== 'external' || !state.boundThreadId) return;
+  const bound = state.boundThreadId;
+  const selected = state.targets?.find((item) => item.thread_id === bound);
+  ui.currentTarget.textContent = bound
+    ? '当前：' + targetName(bound) + (targetModelLabel(selected) ? ' · ' + targetModelLabel(selected) : '') +
+      (selected?.status ? ' · ' + targetStatusLabel(selected.status) : '')
+    : '当前未绑定 Codex 任务；反馈会等待 MCP 读取。';
+  ui.currentTarget.title = bound || '';
+  const targets = Array.isArray(state.targets) ? state.targets.filter((item) => typeof item?.thread_id === 'string') : [];
+  if (bound && !targets.some((item) => item.thread_id === bound)) {
+    targets.unshift({thread_id:bound, title:'当前任务（未列出）'});
+  }
+  const signature = JSON.stringify({bound, targets:targets.map((item) => [item.thread_id, item.title, item.model, item.reasoning_effort, item.status]),
+    loading:state.loadingTargets && !state.targets});
+  if (signature !== state.targetOptionsSignature) {
+    state.targetOptionsSignature = signature;
+    ui.targetSelect.replaceChildren();
+    for (const item of targets) {
+      const option = document.createElement('option');
+      option.value = item.thread_id;
+      option.textContent = (item.title || shortTaskId(item.thread_id)) +
+        (targetModelLabel(item) ? ' · ' + targetModelLabel(item) : '') +
+        (item.status ? ' · ' + targetStatusLabel(item.status) : '') +
+        (item.thread_id === bound ? '（当前）' : '');
+      option.title = item.thread_id;
+      ui.targetSelect.append(option);
+    }
+    if (!targets.length) {
+      const option = document.createElement('option');
+      option.textContent = state.loadingTargets ? '正在读取任务…' : '没有可切换的任务';
+      option.value = '';
+      ui.targetSelect.append(option);
+    }
+  }
+  if (!targets.some((item) => item.thread_id === state.targetChoice)) state.targetChoice = bound || targets[0]?.thread_id || null;
+  ui.targetSelect.value = state.targetChoice || '';
+  ui.targetSelect.disabled = !targets.length || state.switchingTarget;
+  const chosen = targets.find((item) => item.thread_id === state.targetChoice);
+  ui.switchTarget.disabled = !state.targetChoice || state.targetChoice === bound || state.switchingTarget ||
+    state.submitting || !!state.pendingSubmission || targetIsBusy(chosen);
+  const manualId = ui.manualTargetId.value.trim();
+  const manualItem = targets.find((item) => item.thread_id === manualId);
+  ui.manualSwitchTarget.disabled = !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(manualId) || manualId === bound ||
+    state.switchingTarget || state.submitting || !!state.pendingSubmission || targetIsBusy(manualItem);
+  ui.manualTargetId.disabled = state.switchingTarget;
+  ui.refreshTargets.disabled = state.loadingTargets || state.switchingTarget;
+  if (state.pendingSubmission) ui.targetHelp.textContent = '请先完成上次未确认的提交，再切换目标任务。';
+  else if (targetIsBusy(chosen)) ui.targetHelp.textContent = '所选任务仍在执行；请等它空闲后切换。';
+  else if (state.targetLoadError) ui.targetHelp.textContent = '无法读取任务列表：' + state.targetLoadError;
+  else ui.targetHelp.textContent = '先在 Codex 打开接手的任务；切换只影响之后提交的反馈。旧反馈仍留在原任务。';
+}
+async function loadTargets() {
+  if (state.deliveryMode !== 'external' || !state.boundThreadId || state.loadingTargets) return;
+  state.loadingTargets = true;
+  renderTargetPicker();
+  try {
+    const result = await api('/api/workspace/targets');
+    state.targets = Array.isArray(result.targets) ? result.targets : [];
+    state.targetLoadError = null;
+  } catch (error) {
+    state.targetLoadError = error.message;
+    throw error;
+  } finally {
+    state.loadingTargets = false;
+    renderTargetPicker();
+  }
+}
+async function switchTask(threadId) {
+  if (!threadId || threadId === state.boundThreadId || state.switchingTarget || state.pendingSubmission) return;
+  const target = state.targets?.find((item) => item.thread_id === threadId);
+  if (targetIsBusy(target)) return;
+  state.switchingTarget = true;
+  renderTargetPicker();
+  try {
+    await api('/api/workspace/target', {method:'POST', body:{thread_id:threadId}});
+    await refreshWorkspace();
+    ui.manualTargetId.value = '';
+    await loadTargets();
+    announce('目标任务已切换到：' + targetName(threadId));
+  } catch (error) {
+    announce('切换任务失败：' + error.message, true);
+  } finally {
+    state.switchingTarget = false;
+    renderTargetPicker();
+  }
+}
 function renderWorkspace(workspace) {
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
-  state.boundThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
+  const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
+  if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
+  state.boundThreadId = nextThreadId;
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
   state.approvals = Array.isArray(workspace.approvals) ? workspace.approvals : [];
@@ -337,6 +451,7 @@ function renderWorkspace(workspace) {
     renderExternalWorkspace(workspace);
     return;
   }
+  renderTargetPicker();
   ui.feedbackIntro.textContent = '圈画后直接发送图文消息。Codex 的进度和新场景会回到这里。';
   const status = state.agent.status;
   const statusText = {
@@ -360,17 +475,18 @@ function renderWorkspace(workspace) {
 function renderExternalWorkspace(workspace) {
   const bound = !!state.boundThreadId;
   const status = state.agent.status;
+  renderTargetPicker();
   ui.feedbackIntro.textContent = bound
-    ? '圈画后发送图文反馈；工作台会送入原 Codex 任务，并显示处理进度。'
+    ? '圈画后发送图文反馈；工作台会送入当前选择的 Codex 任务，并显示处理进度。'
     : '圈画后保存视觉反馈；MCP 工具读取后才会交回 Codex。';
   const statusText = bound ? {
-    idle:'已连接原 Codex 任务，可以发送图文反馈。',
-    running:'原 Codex 任务正在处理视觉反馈。',
-    awaiting_approval:'原 Codex 任务需要审批后继续。',
-    waiting:'反馈已保存，等待原 Codex 任务空闲或连接恢复后自动发送。',
-    delivery_uncertain:'反馈送达状态待核实，请先查看原 Codex 任务。',
-    disconnected:'暂时无法连接原 Codex 任务；反馈会先保存。',
-    error:'原 Codex 任务连接或执行出错。'
+    idle:'已连接当前 Codex 任务，可以发送图文反馈。',
+    running:'当前 Codex 任务正在处理视觉反馈。',
+    awaiting_approval:'当前 Codex 任务需要审批后继续。',
+    waiting:'反馈已保存，等待目标任务空闲或连接恢复后自动发送。',
+    delivery_uncertain:'反馈送达状态待核实，请先查看目标任务。',
+    disconnected:'暂时无法连接当前 Codex 任务；反馈会先保存。',
+    error:'当前 Codex 任务连接或执行出错。'
   } : {
     waiting_for_mcp:'反馈可保存；MCP 工具读取后才会进入 Codex。',
     external_idle:'反馈可保存；MCP 工具读取后才会进入 Codex。',
@@ -378,12 +494,12 @@ function renderExternalWorkspace(workspace) {
     error:'MCP 反馈通道出错。'
   };
   ui.agentStatus.textContent = statusText[status] || (bound
-    ? '正在连接原 Codex 任务…' : '反馈可保存，等待 MCP 工具读取。');
+    ? '正在连接当前 Codex 任务…' : '反馈可保存，等待 MCP 工具读取。');
   if (state.agent.error) ui.agentStatus.textContent += '：' + String(state.agent.error).slice(0, 240);
   ui.agentStatus.className = 'agent-status' + (status === 'running' ? ' running'
     : ['error', 'disconnected', 'delivery_uncertain'].includes(status) ? ' error' : '');
-  ui.pill.textContent = bound ? ({idle:'原任务已连接',running:'原任务执行中',awaiting_approval:'等待审批',
-    waiting:'等待自动重试',delivery_uncertain:'送达待核实',disconnected:'连接中断',error:'连接错误'})[status] || '连接原任务'
+  ui.pill.textContent = bound ? ({idle:'当前任务已连接',running:'任务执行中',awaiting_approval:'等待审批',
+    waiting:'等待自动重试',delivery_uncertain:'送达待核实',disconnected:'连接中断',error:'连接错误'})[status] || '连接目标任务'
     : '等待 MCP 读取';
   ui.pill.className = 'session-pill ' + (status === 'running' ? 'running'
     : ['awaiting_approval', 'waiting'].includes(status) ? 'queued'
@@ -398,7 +514,7 @@ function renderExternalWorkspace(workspace) {
   }
   if (ui.conversation.firstElementChild?.classList.contains('muted')) {
     ui.conversation.firstElementChild.textContent = bound
-      ? '图文反馈会送入原 Codex 任务；完整对话请在原任务中查看。'
+      ? '图文反馈会送入目标 Codex 任务；完整对话请在目标任务中查看。'
       : '反馈保存在工作台；MCP 读取后，请在原 Codex 任务中查看后续。';
   }
   updateSubmitLabel();
@@ -423,13 +539,14 @@ function renderQueue({boundExternal=false}={}) {
   const latest = state.queue.at(-1);
   for (const item of state.queue) {
     if (!item || ((item.status === 'completed' || item.status === 'discarded') && (!boundExternal || item !== latest))) continue;
+    const oldTarget = boundExternal && !!item.target_thread_id && item.target_thread_id !== state.boundThreadId;
     const retryableFailed = item.status === 'failed' && !item.turn_id;
     const card = document.createElement('div');
     card.className = 'queue-card' + (item.status === 'queued' && item.error ? ' retrying'
       : item.status === 'delivery_uncertain' ? ' uncertain'
       : item.status === 'failed' ? ' failed' : '');
     const title = document.createElement('strong');
-    title.textContent = ({queued:item.error ? '等待自动重试' : boundExternal ? '等待送入原任务' : '已加入下一轮',dispatching:'正在送达',running:'正在处理',
+    title.textContent = ({queued:item.error ? '等待自动重试' : boundExternal ? '等待送入目标任务' : '已加入下一轮',dispatching:'正在送达',running:'正在处理',
       completed:'这一轮已完成',interrupted:'Codex 回合已中断',discarded:'这条反馈已舍弃',
       awaiting_mcp:'等待反馈通道读取',returned_to_mcp:'MCP 已读取反馈',
       blocked_stale:'请确认旧场景反馈',delivery_uncertain:item.quarantined_at ? '送达待核实 · 已隔离' : '送达待核实',
@@ -437,16 +554,30 @@ function renderQueue({boundExternal=false}={}) {
     const body = document.createElement('div');
     body.textContent = '针对场景版本 ' + (item.scene_revision ?? '—') + (item.status === 'blocked_stale'
       ? '，当前场景已有新版本。确认后仍按旧截图发送。'
-      : item.status === 'queued' && item.error ? '，反馈已保存；连接恢复或原任务空闲后会自动重试。'
-      : boundExternal && item.status === 'queued' ? '，反馈已保存，等待原任务空闲后送入。'
-      : boundExternal && item.status === 'running' ? '，图文反馈已送入原 Codex 任务。'
+      : item.status === 'queued' && item.error ? '，反馈已保存；连接恢复或目标任务空闲后会自动重试。'
+      : boundExternal && item.status === 'queued' ? '，反馈已保存，等待目标任务空闲后送入。'
+      : boundExternal && item.status === 'running' ? '，图文反馈已送入目标 Codex 任务。'
       : retryableFailed ? '，反馈仍保存在工作台，可在问题解决后手动重试。'
-      : item.status === 'failed' ? '，反馈已送入原任务，但该回合执行失败；请检查原任务后再提交新的反馈。'
-      : item.status === 'interrupted' ? '，反馈已送入原任务，但回合中断；请在原任务中查看原因。'
+      : item.status === 'failed' ? '，反馈已送入目标任务，但该回合执行失败；请检查目标任务后再提交新的反馈。'
+      : item.status === 'interrupted' ? '，反馈已送入目标任务，但回合中断；请在目标任务中查看原因。'
       : item.status === 'discarded' ? '，这条反馈不会再次发送。'
       : '');
     if (item.error && ['queued','failed'].includes(item.status)) body.textContent += ' 最近一次原因：' + String(item.error).slice(0, 240);
     card.append(title, body);
+    if (boundExternal && item.target_thread_id) {
+      const target = document.createElement('div');
+      target.className = 'queue-target' + (oldTarget ? ' old-target' : '');
+      target.textContent = '目标任务：' + (item.target_title || targetName(item.target_thread_id)) +
+        (oldTarget ? ' · 已固定到切换前的任务' : '');
+      target.title = item.target_thread_id;
+      card.append(target);
+    }
+    if (oldTarget && ['queued','dispatching','blocked_stale'].includes(item.status)) {
+      const warning = document.createElement('div');
+      warning.className = 'queue-warning';
+      warning.textContent = '这条反馈仍发往切换前的任务；切回该任务后才会继续发送。';
+      card.append(warning);
+    }
     if (item.status === 'blocked_stale' && item.feedback_id) {
       const actions = document.createElement('div');
       actions.className = 'queue-actions';
@@ -479,8 +610,9 @@ function renderQueue({boundExternal=false}={}) {
       const warning = document.createElement('div');
       warning.className = 'queue-warning';
       warning.textContent = item.quarantined_at
-        ? '这条反馈的送达结果仍无法确认，已暂时隔离；新反馈可以继续发送。请先核对原 Codex 任务，确认没有收到这条反馈后再重试。'
-        : '这条反馈是否进入原 Codex 任务尚不确定；连接可用时工作台会尝试核对。请先查看原任务，确认没有收到后再重试。';
+        ? '这条反馈的送达结果仍无法确认，已暂时隔离；新反馈可以继续发送。请先核对它的目标任务，确认没有收到这条反馈后再重试。'
+        : '这条反馈是否进入目标任务尚不确定；连接可用时工作台会尝试核对。请先查看它的目标任务，确认没有收到后再重试。';
+      if (oldTarget) warning.textContent += ' 如需重试，请先切回这条反馈的目标任务。';
       if (item.error) warning.textContent += ' 当前原因：' + String(item.error).slice(0, 240);
       const actions = document.createElement('div');
       actions.className = 'queue-actions';
@@ -488,28 +620,36 @@ function renderQueue({boundExternal=false}={}) {
         const button = document.createElement('button');
         button.type = 'button';
         button.textContent = label;
+        button.disabled = oldTarget && retry;
         button.addEventListener('click', async () => {
           actions.querySelectorAll('button').forEach((node) => node.disabled = true);
           try {
             await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{retry_uncertain:retry}});
             await refreshWorkspace();
-          } catch (error) { announce('处理失败：' + error.message, true); actions.querySelectorAll('button').forEach((node) => node.disabled = false); }
+          } catch (error) { announce('处理失败：' + error.message, true); actions.querySelectorAll('button').forEach((node) => { node.disabled = oldTarget && node.textContent === '确认未收到，重试'; }); }
         });
         actions.append(button);
       }
       card.append(warning, actions);
     }
     if (retryableFailed && item.feedback_id) {
+      if (oldTarget) {
+        const warning = document.createElement('div');
+        warning.className = 'queue-warning';
+        warning.textContent = '如需重试，请先切回这条反馈的目标任务。';
+        card.append(warning);
+      }
       const actions = document.createElement('div');
       actions.className = 'queue-actions';
       const retry = document.createElement('button');
       retry.type = 'button';
       retry.textContent = '重试这条反馈';
+      retry.disabled = oldTarget;
       retry.addEventListener('click', async () => {
         retry.disabled = true;
         try {
           await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{retry_failed:true}});
-          announce('已加入队列；连接恢复或原任务空闲后会发送。');
+          announce('已加入队列；连接恢复或目标任务空闲后会发送。');
           await refreshWorkspace();
         } catch (error) { announce('重试失败：' + error.message, true); retry.disabled = false; }
       });
@@ -1349,7 +1489,7 @@ function renderSceneView() {
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
     ui.newSceneBadge.textContent = '新结果：版本 ' + state.sceneRevision + '；当前标注仍对应截图版本 ' + state.snapshot.scene_revision;
   }
-  ui.compareImage.classList.toggle('hidden', showingSnapshot || !activeReference() || !ui.compareEnabled.checked);
+  ui.compareImage.classList.toggle('hidden', showingSnapshot || !activeReference());
   controls.enabled = state.mode === 'select' && !showingSnapshot;
   updateSnapshotGeometry();
   updateMode();
@@ -1439,9 +1579,8 @@ function showActiveReference() {
   ui.referenceHint.classList.toggle('hidden', !hasReference || state.mode === 'select');
   ui.referenceTitle.textContent = ref?.name || '照片里的目标';
   updateAlignmentStatus();
-  ui.compareImage.classList.toggle('hidden', !hasReference || !ui.compareEnabled.checked || state.sceneView === 'snapshot');
-  ui.compareEnabled.disabled = !hasReference;
-  ui.compareOpacity.disabled = !hasReference || !ui.compareEnabled.checked;
+  ui.compareImage.classList.toggle('hidden', !hasReference || state.sceneView === 'snapshot');
+  ui.compareOpacity.disabled = !hasReference;
   if (!hasReference) {
     ui.referenceImage.removeAttribute('src');
     drawOverlays();
@@ -2100,6 +2239,16 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
+  ui.targetSelect.addEventListener('change', () => {
+    state.targetChoice = ui.targetSelect.value || null;
+    renderTargetPicker();
+  });
+  ui.refreshTargets.addEventListener('click', () => {
+    loadTargets().catch((error) => announce('刷新任务列表失败：' + error.message, true));
+  });
+  ui.switchTarget.addEventListener('click', () => switchTask(state.targetChoice));
+  ui.manualTargetId.addEventListener('input', renderTargetPicker);
+  ui.manualSwitchTarget.addEventListener('click', () => switchTask(ui.manualTargetId.value.trim()));
   document.querySelectorAll('.tool-button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.tool)));
   ui.groupSelect.addEventListener('change', () => {
     state.groupId = ui.groupSelect.value;
@@ -2146,10 +2295,6 @@ function bindEvents() {
   ui.freeze.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', () => { state.sceneView = 'live'; setMode('select'); renderSceneView(); });
   ui.snapshotButton.addEventListener('click', () => { state.sceneView = 'snapshot'; renderSceneView(); });
-  ui.compareEnabled.addEventListener('change', () => {
-    ui.compareImage.classList.toggle('hidden', !ui.compareEnabled.checked || !activeReference() || state.sceneView === 'snapshot');
-    ui.compareOpacity.disabled = !ui.compareEnabled.checked || !activeReference();
-  });
   ui.compareOpacity.addEventListener('input', () => {
     ui.opacityValue.textContent = ui.compareOpacity.value + '%';
     ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
@@ -2266,3 +2411,8 @@ try {
   announce('工作台启动失败：' + error.message, true);
 }
 setInterval(poll, 1500);
+setInterval(() => {
+  if (state.workspaceReady && state.deliveryMode === 'external' && state.boundThreadId && !state.loadingTargets && !state.switchingTarget) {
+    loadTargets().catch(() => { /* The picker shows the connection error. */ });
+  }
+}, 20000);

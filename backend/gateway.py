@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,8 @@ from typing import Any
 from appserver_adapter import TurnBusyError
 from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
 from shared_thread_adapter import DeliveryNotReadyError, DeliveryRejectedError
-from shared_thread_bridge import SharedThreadNotIdle
+from shared_thread_adapter import SharedDesktopAdapter
+from shared_thread_bridge import SharedThreadBridge, SharedThreadNotIdle
 
 
 class WorkspaceGateway:
@@ -31,6 +33,8 @@ class WorkspaceGateway:
         self._supervisor_stop = threading.Event()
         self._supervisor_thread: threading.Thread | None = None
         self._adapter_initialized = False
+        self._adapter_event_lock = threading.RLock()
+        self._adapter_token = object()
 
     _RECONCILE_INTERVAL_SEC = 5.0
     _UNCERTAIN_GRACE_SEC = 30.0
@@ -75,7 +79,12 @@ class WorkspaceGateway:
             # browser submission when this service becomes directly bound.
             with self.store.lock:
                 workspace = self.store.state["workspace"]
+                bound_thread_id = workspace.get("thread_id") or getattr(self.adapter, "thread_id", None)
                 for item in workspace["queue"]:
+                    # Old workspaces predate per-packet routing. Pin them to
+                    # the task that owned the workspace before any switch.
+                    if item.get("target_thread_id") is None:
+                        item["target_thread_id"] = bound_thread_id
                     if item["status"] == "awaiting_mcp":
                         item["status"] = "queued"
                 self.store._save()
@@ -144,6 +153,177 @@ class WorkspaceGateway:
         if self.adapter is not None:
             self.adapter.close()
 
+    def _target_thread(self) -> str:
+        if not self.external_review or self.adapter is None or not getattr(self.adapter, "thread_id", None):
+            raise APIError(409, "this workspace is not bound to a Codex Desktop task")
+        with self.store.lock:
+            return self.store.state["workspace"].get("thread_id") or self.adapter.thread_id
+
+    def scoped_adapter_callback(self, token: object | None = None):
+        """Ignore events from a Desktop adapter after it has been replaced.
+
+        The token is per adapter instance, not per task ID: switching away
+        and later back to the same task must not revive an old listener.
+        """
+        expected = self._adapter_token if token is None else token
+
+        def receive(event: dict[str, Any]) -> None:
+            with self._adapter_event_lock:
+                if expected is self._adapter_token:
+                    self.on_adapter_event(event)
+
+        return receive
+
+    def _target_cwd_allowed(self, thread: dict[str, Any]) -> bool:
+        cwd = thread.get("cwd")
+        if not isinstance(cwd, str) or not cwd:
+            return False
+        try:
+            raw_directory = Path(cwd).expanduser()
+            if not raw_directory.is_absolute():
+                return False
+            directory = raw_directory.resolve()
+        except (OSError, RuntimeError):
+            return False
+        return directory == self.project_dir or directory in self.project_dir.parents or self.project_dir in directory.parents
+
+    def list_targets(self) -> dict[str, Any]:
+        """Show compatible tasks already loaded by the bound Desktop daemon."""
+        current_id = self._target_thread()
+        try:
+            discovered = SharedThreadBridge.discover_loaded_threads()
+        except Exception as exc:
+            raise APIError(503, f"cannot list loaded Codex Desktop tasks: {exc}") from exc
+        current_paths = {path for path, thread in discovered if thread.get("id") == current_id}
+        loaded_paths = {path for path, _thread in discovered}
+        if len(current_paths) > 1 or (not current_paths and len(loaded_paths) > 1):
+            raise APIError(409, "cannot identify a single Codex Desktop daemon for this workspace")
+        counts: dict[str, int] = {}
+        for _path, thread in discovered:
+            task_id = thread.get("id")
+            if isinstance(task_id, str):
+                counts[task_id] = counts.get(task_id, 0) + 1
+        candidates = []
+        for path, thread in discovered:
+            thread_id = thread.get("id")
+            if not isinstance(thread_id, str) or counts.get(thread_id) != 1 or (current_paths and path not in current_paths) or not self._target_cwd_allowed(thread):
+                continue
+            title = thread.get("name") or thread.get("preview") or "Untitled Codex task"
+            if not isinstance(title, str):
+                title = "Untitled Codex task"
+            status = thread.get("status")
+            candidates.append({
+                "thread_id": thread_id,
+                "title": title.strip()[:160] or "Untitled Codex task",
+                "model": thread.get("model") if isinstance(thread.get("model"), str) else None,
+                "reasoning_effort": thread.get("reasoningEffort") if isinstance(thread.get("reasoningEffort"), str) else None,
+                "status": status.get("type") if isinstance(status, dict) else None,
+            })
+        return {"targets": candidates, "thread_id": current_id}
+
+    def switch_target(self, thread_id: Any) -> dict[str, Any]:
+        """Route future feedback to another idle task without moving old packets."""
+        current_id = self._target_thread()
+        if not isinstance(thread_id, str):
+            raise APIError(400, "thread_id must be a Codex task UUID")
+        try:
+            if str(uuid.UUID(thread_id)) != thread_id:
+                raise ValueError("noncanonical task UUID")
+        except ValueError as exc:
+            raise APIError(400, "thread_id must be a Codex task UUID") from exc
+        if thread_id == current_id:
+            return self.state()
+        try:
+            discovered = SharedThreadBridge.discover_loaded_threads()
+            current_paths = {path for path, thread in discovered if thread.get("id") == current_id}
+            loaded_paths = {path for path, _thread in discovered}
+            if len(current_paths) > 1 or (not current_paths and len(loaded_paths) > 1):
+                raise APIError(409, "cannot identify a single Codex Desktop daemon for this workspace")
+            matches = [(path, thread) for path, thread in discovered if thread.get("id") == thread_id]
+            if len(matches) != 1 or (current_paths and matches[0][0] not in current_paths):
+                raise APIError(409, "target task is not loaded in the same Codex Desktop daemon")
+            target = matches[0][1]
+            if not self._target_cwd_allowed(target):
+                raise APIError(409, "target task cwd cannot access this workspace project")
+            status = target.get("status")
+            if not isinstance(status, dict) or status.get("type") != "idle":
+                raise APIError(409, "target Codex task is active; switch after it becomes idle")
+        except APIError:
+            raise
+        except ValueError as exc:
+            raise APIError(400, "thread_id must be a Codex task UUID") from exc
+        except Exception as exc:
+            raise APIError(503, f"cannot inspect Codex Desktop target: {exc}") from exc
+
+        replacement_token = object()
+        replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token))
+        try:
+            try:
+                replacement.start()
+            except Exception as exc:
+                raise APIError(503, f"target Codex task is no longer available: {exc}") from exc
+            with self._supervisor_lock, self._adapter_event_lock:
+                with self._worker_lock:
+                    with self.store.lock:
+                        workspace = self.store.state["workspace"]
+                        if workspace.get("thread_id") != current_id:
+                            raise APIError(409, "workspace target changed; reload before switching")
+                        if self._worker_running or workspace.get("active_feedback_id") or any(
+                            item["status"] in {"dispatching", "running"}
+                            or (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
+                            for item in workspace["queue"]
+                        ):
+                            raise APIError(409, "finish or resolve the active feedback before switching tasks")
+                    try:
+                        runtime_status = replacement.inspect_thread_status()
+                    except Exception as exc:
+                        raise APIError(503, f"cannot verify target Codex task status: {exc}") from exc
+                    if runtime_status != "idle":
+                        raise APIError(409, "target Codex task became active; switch after it becomes idle")
+                    with self.store.lock:
+                        workspace = self.store.state["workspace"]
+                        if workspace.get("thread_id") != current_id or workspace.get("active_feedback_id") or any(
+                            item["status"] in {"dispatching", "running"}
+                            or (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
+                            for item in workspace["queue"]
+                        ):
+                            raise APIError(409, "feedback state changed while switching tasks; retry after it settles")
+                        previous_workspace = copy.deepcopy(workspace)
+                        old_adapter = self.adapter
+                        old_initialized = self._adapter_initialized
+                        try:
+                            # Older packets have no route metadata. They
+                            # belong to the task being left, including stale
+                            # and unknown packets needing a human decision.
+                            for item in workspace["queue"]:
+                                if item.get("target_thread_id") is None:
+                                    item["target_thread_id"] = current_id
+                            workspace["thread_id"] = thread_id
+                            workspace["approvals"] = []
+                            workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                            workspace["event_seq"] += 1
+                            workspace["events"].append({"id": workspace["event_seq"], "type": "target_switched", "payload": {"old_thread_id": current_id, "thread_id": thread_id}, "at": _now()})
+                            workspace["events"] = workspace["events"][-500:]
+                            self.store._save()
+                            self.adapter = replacement
+                            self._adapter_token = replacement_token
+                            self._adapter_initialized = True
+                        except Exception:
+                            self.store.state["workspace"] = previous_workspace
+                            self.adapter = old_adapter
+                            self._adapter_initialized = old_initialized
+                            raise
+        except Exception:
+            if self.adapter is not replacement:
+                replacement.close()
+            raise
+        try:
+            old_adapter.close()
+        except Exception:
+            logging.exception("Could not close previous Codex task adapter after switching")
+        self.wake()
+        return self.state()
+
     def _supervisor_loop(self) -> None:
         while not self._supervisor_stop.wait(self._RECONCILE_INTERVAL_SEC):
             try:
@@ -159,7 +339,15 @@ class WorkspaceGateway:
         try:
             try:
                 if not self._adapter_initialized or not self.adapter.status().get("connected"):
-                    self.store.workspace_thread(self.adapter.start())
+                    thread_id = self.adapter.start()
+                    self.store.workspace_thread(thread_id)
+                    with self.store.lock:
+                        workspace = self.store.state["workspace"]
+                        unpinned = [item for item in workspace["queue"] if item.get("target_thread_id") is None]
+                        if unpinned:
+                            for item in unpinned:
+                                item["target_thread_id"] = thread_id
+                            self.store._save()
                     self._adapter_initialized = True
             except Exception as exc:
                 error = str(exc)[:500]
@@ -178,7 +366,8 @@ class WorkspaceGateway:
                 active_id = workspace.get("active_feedback_id")
                 active = next((item for item in workspace["queue"] if item["feedback_id"] == active_id), None)
                 active = copy.deepcopy(active) if active else None
-                quarantined = [item["feedback_id"] for item in workspace["queue"] if item["status"] == "delivery_uncertain" and item.get("quarantined_at") and item["feedback_id"] != active_id]
+                target_id = workspace.get("thread_id")
+                quarantined = [item["feedback_id"] for item in workspace["queue"] if item["status"] == "delivery_uncertain" and item.get("quarantined_at") and item["feedback_id"] != active_id and item.get("target_thread_id") == target_id]
             if active:
                 self._reconcile_active(active)
             elif active_id:
@@ -191,7 +380,7 @@ class WorkspaceGateway:
             with self.store.lock:
                 workspace = self.store.state["workspace"]
                 if not workspace.get("active_feedback_id"):
-                    pending = any(item["status"] == "queued" for item in workspace["queue"])
+                    pending = any(item["status"] == "queued" and item.get("target_thread_id") == workspace.get("thread_id") for item in workspace["queue"])
                     if workspace["agent"].get("status") == "disconnected" or (workspace["agent"].get("status") == "waiting" and not pending):
                         workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
                         self.store._save()
@@ -332,6 +521,14 @@ class WorkspaceGateway:
         if not payload.get("idempotency_key"):
             raise APIError(400, "idempotency_key is required for direct Codex delivery")
         feedback = self.store.submit_feedback(session_id, payload)
+        if self.external_review and self.adapter is not None:
+            bound_id = workspace.get("thread_id") or getattr(self.adapter, "thread_id", None)
+            if bound_id:
+                with self.store.lock:
+                    item = next(entry for entry in self.store.state["workspace"]["queue"] if entry["feedback_id"] == feedback["feedback_id"])
+                    if item.get("target_thread_id") is None:
+                        item["target_thread_id"] = bound_id
+                        self.store._save()
         if self.external_review and self.adapter is None:
             with self.store.lock:
                 item = next(entry for entry in self.store.state["workspace"]["queue"] if entry["feedback_id"] == feedback["feedback_id"])
@@ -514,6 +711,13 @@ class WorkspaceGateway:
             return result
 
     def confirm_queue(self, feedback_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        # Keep the adapter used to inspect an uncertain delivery bound until
+        # its state transition is saved. Switching in between would inspect
+        # the wrong Codex task and could replay a packet there.
+        with self._supervisor_lock:
+            return self._confirm_queue_bound(feedback_id, payload)
+
+    def _confirm_queue_bound(self, feedback_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         retry_requested = payload.get("retry_uncertain") is True or payload.get("retry_failed") is True
         if retry_requested:
             if self.adapter is None:
@@ -525,6 +729,8 @@ class WorkspaceGateway:
                     raise APIError(404, "queued feedback not found")
                 if item["status"] not in {"delivery_uncertain", "failed"}:
                     raise APIError(409, "feedback is not awaiting retry")
+                if item.get("target_thread_id") != workspace.get("thread_id"):
+                    raise APIError(409, "switch back to this feedback's Codex task before retrying")
                 if workspace.get("active_feedback_id") not in {None, feedback_id}:
                     raise APIError(409, "another feedback is active")
             try:
@@ -627,7 +833,7 @@ class WorkspaceGateway:
                 # A feedback captured against an older scene needs a human
                 # decision, but must not hold up newer feedback that already
                 # targets the current revision.
-                item = next((entry for entry in workspace["queue"] if entry["status"] == "queued"), None)
+                item = next((entry for entry in workspace["queue"] if entry["status"] == "queued" and entry.get("target_thread_id") == workspace.get("thread_id")), None)
                 if item is None:
                     return
                 revision = self.store.state["scene"]["revision"]
@@ -685,7 +891,7 @@ class WorkspaceGateway:
                 self._worker_running = False
             with self.store.lock:
                 workspace = self.store.state.get("workspace", {})
-                pending = not workspace.get("active_feedback_id") and any(item["status"] == "queued" for item in workspace.get("queue", []))
+                pending = not workspace.get("active_feedback_id") and any(item["status"] == "queued" and item.get("target_thread_id") == workspace.get("thread_id") for item in workspace.get("queue", []))
             if pending and not defer_retry and self.adapter.status().get("connected"):
                 self.wake()
 
@@ -741,6 +947,13 @@ class WorkspaceGateway:
         method = event.get("method", "")
         params = event.get("params") or {}
         try:
+            if self.external_review and isinstance(params, dict):
+                source_thread_id = params.get("threadId") or params.get("thread_id")
+                if source_thread_id:
+                    with self.store.lock:
+                        current_thread_id = self.store.state["workspace"].get("thread_id")
+                    if current_thread_id != source_thread_id:
+                        return
             if method == "adapter/request_pending":
                 approval_id = __import__("uuid").uuid4().hex
                 details = params.get("params", {})

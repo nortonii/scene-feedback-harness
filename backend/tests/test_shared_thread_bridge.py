@@ -54,6 +54,8 @@ class FakeWebSocket:
             self.responses.append({"id": request_id, "result": {"thread": thread}})
         elif method == "thread/resume":
             self.responses.append({"id": request_id, "result": {"thread": {"id": THREAD_ID, "status": {"type": self.status}}}})
+        elif method == "thread/loaded/list":
+            self.responses.append({"id": request_id, "result": {"data": [THREAD_ID], "nextCursor": None}})
         elif method == "turn/start" and self.reject_turn:
             self.responses.append({"id": request_id, "error": {"code": -32602, "message": self.reject_error}})
         elif method == "turn/start" and not self.fail_turn_receive:
@@ -73,6 +75,19 @@ class FakeWebSocket:
 
 
 class SharedThreadBridgeTests(unittest.TestCase):
+    def test_discovers_loaded_tasks_without_requiring_old_task_to_remain_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = root / ("a" * 64)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                path.chmod(0o600)
+                ws = FakeWebSocket()
+                records = SharedThreadBridge.discover_loaded_threads(socket_dir=root, connector=lambda _path, _timeout: ws)
+                self.assertEqual([(entry_path, thread["id"]) for entry_path, thread in records], [(path, THREAD_ID)])
+                self.assertTrue(ws.closed)
+
     def test_reads_exact_turn_history_without_inferring_from_idle(self) -> None:
         ws = FakeWebSocket("idle")
         ws.turns = [

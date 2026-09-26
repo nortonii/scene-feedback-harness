@@ -185,6 +185,46 @@ class SharedThreadBridge:
                 raise
         return bridge
 
+    @classmethod
+    def discover_loaded_threads(
+        cls,
+        *,
+        socket_dir: Path | None = None,
+        timeout: float = 10.0,
+        connector: Callable[[Path, float], Any] = _connect,
+    ) -> list[tuple[Path, dict[str, Any]]]:
+        """Inspect loaded tasks on private same-user Desktop daemon sockets.
+
+        This does not depend on the workspace's previous task still being
+        loaded, so a user can rebind after Desktop unloads an idle task.
+        """
+        records: list[tuple[Path, dict[str, Any]]] = []
+        connected = False
+        errors: list[str] = []
+        for path in _private_socket_candidates(socket_dir):
+            bridge: SharedThreadBridge | None = None
+            try:
+                bridge = cls(connector(path, timeout), "00000000-0000-0000-0000-000000000000", timeout=timeout, socket_path=path)
+                bridge._initialize()
+                loaded_ids = bridge.loaded_thread_ids()
+                connected = True
+                for thread_id in loaded_ids:
+                    try:
+                        thread = bridge.read_loaded_thread(thread_id)
+                    except Exception as exc:
+                        errors.append(f"{path.name}: cannot read {thread_id}: {exc}")
+                        continue
+                    if thread.get("status", {}).get("type") != "notLoaded":
+                        records.append((path, thread))
+            except Exception as exc:
+                errors.append(f"{path.name}: {exc}")
+            finally:
+                if bridge is not None:
+                    bridge.close()
+        if not connected:
+            raise SharedThreadBridgeError("no private Codex Desktop daemon is reachable" + (f" ({'; '.join(errors)})" if errors else ""))
+        return records
+
     def _send(self, message: dict[str, Any]) -> None:
         if self._closed:
             raise SharedThreadBridgeError("connection is closed")
@@ -229,6 +269,40 @@ class SharedThreadBridge:
         """Read task state; optionally include its persisted turn outcomes."""
         thread = self._rpc("thread/read", {"threadId": self.thread_id, "includeTurns": include_turns}).get("thread")
         if not isinstance(thread, dict) or thread.get("id") != self.thread_id:
+            raise SharedThreadBridgeError("thread/read returned the wrong task")
+        return thread
+
+    def loaded_thread_ids(self) -> list[str]:
+        """List task IDs loaded by this exact desktop daemon connection."""
+        found: list[str] = []
+        seen: set[str] = set()
+        cursor: str | None = None
+        for _ in range(10):
+            params: dict[str, Any] = {"limit": 100}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = self._rpc("thread/loaded/list", params)
+            page = response.get("data")
+            if not isinstance(page, list) or any(not isinstance(item, str) or not _THREAD_ID.fullmatch(item) for item in page):
+                raise SharedThreadBridgeError("thread/loaded/list returned invalid task IDs")
+            for item in page:
+                if item not in seen:
+                    found.append(item)
+                    seen.add(item)
+            next_cursor = response.get("nextCursor")
+            if next_cursor is None:
+                return found
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+                raise SharedThreadBridgeError("thread/loaded/list returned an invalid cursor")
+            cursor = next_cursor
+        raise SharedThreadBridgeError("too many loaded Codex tasks to list safely")
+
+    def read_loaded_thread(self, thread_id: str) -> dict[str, Any]:
+        """Read another task through the same daemon; caller checks membership."""
+        if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id):
+            raise ValueError("thread_id must be a Codex task UUID")
+        thread = self._rpc("thread/read", {"threadId": thread_id, "includeTurns": False}).get("thread")
+        if not isinstance(thread, dict) or thread.get("id") != thread_id:
             raise SharedThreadBridgeError("thread/read returned the wrong task")
         return thread
 
