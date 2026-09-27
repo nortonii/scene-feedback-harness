@@ -902,6 +902,9 @@ class SceneStore:
                 if isinstance(historic_selected, list):
                     object_ids.update(item for item in historic_selected if isinstance(item, str) and ID_RE.fullmatch(item))
                 object_ids.update(item.get("object_id") for item in annotations if isinstance(item, dict) and isinstance(item.get("object_id"), str) and ID_RE.fullmatch(item["object_id"]))
+                historic_prompts = payload.get("object_prompts", [])
+                if isinstance(historic_prompts, list):
+                    object_ids.update(item.get("object_id") for item in historic_prompts if isinstance(item, dict) and isinstance(item.get("object_id"), str) and ID_RE.fullmatch(item["object_id"]))
                 historic_nodes = payload.get("selected_scene_nodes", [])
                 if isinstance(historic_nodes, list):
                     model_ids.update(node.get("parent_object_id") for node in historic_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
@@ -917,8 +920,27 @@ class SceneStore:
             note = payload.get("note", "")
             if not isinstance(note, str) or len(note) > 10_000:
                 raise APIError(400, "note must be text up to 10000 characters")
-            if not annotations and not note.strip() and not session.get("reference_images"):
-                raise APIError(400, "add a reference, annotation or note before submitting")
+            object_prompts = payload.get("object_prompts", [])
+            if not isinstance(object_prompts, list) or len(object_prompts) > 24:
+                raise APIError(400, "object_prompts must be an array with at most 24 items")
+            normalized_prompts = []
+            for item in object_prompts:
+                if not isinstance(item, dict) or set(item) - {"object", "prompt", "object_id"}:
+                    raise APIError(400, "each object prompt needs object and prompt text")
+                name, prompt = item.get("object"), item.get("prompt")
+                if not isinstance(name, str) or not 1 <= len(name.strip()) <= 180:
+                    raise APIError(400, "object prompt object must be 1 to 180 characters")
+                if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 2000:
+                    raise APIError(400, "object prompt text must be 1 to 2000 characters")
+                normalized = {"object": name.strip(), "prompt": prompt.strip()}
+                object_id = item.get("object_id")
+                if object_id is not None:
+                    if not isinstance(object_id, str) or object_id not in object_ids:
+                        raise APIError(400, "object prompt refers to an unknown object id")
+                    normalized["object_id"] = object_id
+                normalized_prompts.append(normalized)
+            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images"):
+                raise APIError(400, "add a reference, annotation, object prompt or note before submitting")
             camera = payload.get("camera")
             if camera is not None:
                 _safe_json(camera)
@@ -967,7 +989,7 @@ class SceneStore:
                 if crop["source"] == "scene" and ref_id is not None:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
-            feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes}
+            feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "object_prompts": normalized_prompts, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes}
             if active_reference_id is not None:
                 feedback["active_reference_id"] = active_reference_id
             if aligned_reference_id is not None:
@@ -995,7 +1017,10 @@ class SceneStore:
                 workspace["queue"].append(queue_item)
                 workspace["request_feedback"] = None
                 workspace["event_seq"] += 1
-                workspace["events"].append({"id": workspace["event_seq"], "type": "feedback_queued", "payload": {"feedback_id": feedback["feedback_id"], "scene_revision": revision, "note": note[:4000]}, "at": _now()})
+                object_prompts_summary = "\n".join(f"{item['object']}：{item['prompt']}" for item in normalized_prompts)
+                if len(object_prompts_summary) > 4000:
+                    object_prompts_summary = object_prompts_summary[:3999] + "…"
+                workspace["events"].append({"id": workspace["event_seq"], "type": "feedback_queued", "payload": {"feedback_id": feedback["feedback_id"], "scene_revision": revision, "note": note[:4000], "object_prompts_summary": object_prompts_summary}, "at": _now()})
                 workspace["events"] = workspace["events"][-500:]
             self._save()
             return copy.deepcopy(feedback)

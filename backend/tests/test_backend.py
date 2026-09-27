@@ -102,6 +102,60 @@ class SceneStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(APIError, "scene revision changed"):
                 store.submit_feedback(second["session_id"], {"scene_revision": revision, "note": "stale"})
 
+    def test_multiple_object_prompts_reach_codex_and_remain_in_visual_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SceneStore(root / "data")
+            seed_chair(store)
+            session_id = store.ensure_workspace(root)["session_id"]
+            prompts = [
+                {"object": "椅背", "prompt": "顶部靠近左图红线。", "object_id": "chair_back"},
+                {"object": "缺失的柜子", "prompt": "请参考右上角补出这个柜子。"},
+            ]
+            packet = store.submit_feedback(session_id, {"scene_revision": store.scene()["revision"], "object_prompts": prompts})
+            self.assertEqual(packet["object_prompts"], prompts)
+            queued = store.workspace_events()["items"][-1]
+            self.assertEqual(queued["payload"]["note"], "")
+            self.assertEqual(queued["payload"]["object_prompts_summary"], "椅背：顶部靠近左图红线。\n缺失的柜子：请参考右上角补出这个柜子。")
+            self.assertEqual(SceneStore(store.data_dir).feedback_by_id(packet["feedback_id"])["object_prompts"], prompts)
+            gateway = WorkspaceGateway(store, root)
+            self.assertTrue(gateway.state()["object_prompts_supported"])
+            text, paths = gateway._turn_input(packet)
+            self.assertEqual(paths, [])
+            self.assertIn('"object": "椅背", "prompt": "顶部靠近左图红线。", "object_id": "chair_back"', text)
+            self.assertIn('"object": "缺失的柜子", "prompt": "请参考右上角补出这个柜子。"', text)
+            self.assertLess(text.index('"object": "椅背"'), text.index('"object": "缺失的柜子"'))
+            visual = mcp_server._visual_tool_result({"items": [packet]})
+            self.assertEqual(visual.structured_content["items"][0]["object_prompts"], prompts)
+            legacy = store.submit_feedback(session_id, {"scene_revision": store.scene()["revision"], "note": "Keep the chair."})
+            self.assertEqual(legacy["object_prompts"], [])
+            store.replace_scene(store.scene()["revision"], [])
+            stale = store.submit_feedback(session_id, {"scene_revision": packet["scene_revision"], "confirm_stale": True, "object_prompts": prompts})
+            self.assertEqual(stale["object_prompts"], prompts)
+            self.assertTrue(stale["submitted_from_stale_snapshot"])
+            large_prompts = [{"object": "item", "prompt": "x" * 2000}] * 3
+            store.submit_feedback(session_id, {"scene_revision": store.scene()["revision"], "object_prompts": large_prompts})
+            summary = store.workspace_events()["items"][-1]["payload"]["object_prompts_summary"]
+            self.assertEqual(len(summary), 4000)
+            self.assertTrue(summary.endswith("…"))
+
+    def test_object_prompts_validate_text_and_optional_scene_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SceneStore(temporary)
+            session_id = store.create_session()["session_id"]
+            bad_prompts = [
+                {"object": "", "prompt": "move it"},
+                {"object": "cup", "prompt": " "},
+                {"object": "cup", "prompt": "move it", "object_id": "missing"},
+                {"object": "cup", "prompt": "move it", "operation": "delete"},
+            ]
+            for prompt in bad_prompts:
+                with self.subTest(prompt=prompt), self.assertRaises(APIError):
+                    store.submit_feedback(session_id, {"scene_revision": 1, "object_prompts": [prompt]})
+            with self.assertRaisesRegex(APIError, "at most 24"):
+                store.submit_feedback(session_id, {"scene_revision": 1, "object_prompts": [{"object": "cup", "prompt": "move it"}] * 25})
+            self.assertEqual(store.get_session(session_id)["feedback_count"], 0)
+
     def test_visual_packet_persists_originals_and_reuses_session_after_scene_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

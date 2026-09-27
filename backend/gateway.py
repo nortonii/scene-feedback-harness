@@ -60,6 +60,7 @@ class WorkspaceGateway:
         result = self.store.workspace()
         result.pop("events", None)
         result["events_cursor"] = result.pop("event_seq")
+        result["object_prompts_supported"] = True
         for approval in result.get("approvals", []):
             approval.pop("request_id", None)
         if include_capability:
@@ -1219,7 +1220,12 @@ class WorkspaceGateway:
                 self.wake()
 
     def _turn_input(self, feedback: dict[str, Any]) -> tuple[str, list[str]]:
-        fallback = "（仅提供参考图，请据图开始或继续重建。）" if feedback.get("reference_images") and not feedback.get("annotations") else "（仅有视觉标记）"
+        if feedback.get("object_prompts"):
+            fallback = "（逐物体提示见下方。）"
+        elif feedback.get("reference_images") and not feedback.get("annotations"):
+            fallback = "（仅提供参考图，请据图开始或继续重建。）"
+        else:
+            fallback = "（仅有视觉标记）"
         lines = ["用户通过 Visual Reconstruction Workspace 发送视觉反馈。", "项目根目录：" + str(self.project_dir), "用户原话：", feedback.get("note", "") or fallback, "", f"场景版本：{feedback['scene_revision']}", f"反馈 ID：{feedback['feedback_id']}"]
         if feedback.get("submitted_from_stale_snapshot"):
             lines.append("这份反馈针对较早的冻结场景截图。用户已确认继续发送；请依据截图和版本判断，不要把旧标记当成当前视角坐标。")
@@ -1227,6 +1233,10 @@ class WorkspaceGateway:
             lines.append("选中对象 ID：" + ", ".join(feedback["selected_object_ids"]))
         if feedback.get("selected_scene_nodes"):
             lines.append("选中 GLB 节点：" + json.dumps(feedback["selected_scene_nodes"], ensure_ascii=False))
+        if feedback.get("object_prompts"):
+            lines.append("逐物体提示（物体名称由用户自由填写，也可能是场景中尚不存在的物体）：")
+            for index, item in enumerate(feedback["object_prompts"], 1):
+                lines.append(f"{index}. " + json.dumps(item, ensure_ascii=False))
         if feedback.get("camera"):
             lines.append("冻结视角：" + json.dumps(feedback["camera"], ensure_ascii=False))
         reference_names = {item["id"]: item["name"] for item in feedback.get("reference_images", [])}

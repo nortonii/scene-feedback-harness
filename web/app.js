@@ -37,7 +37,8 @@ const ui = {
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
-  note:id('feedback-note'), submit:id('submit-button'), caption:id('submit-caption'),
+  objectPrompts:id('object-prompts'), note:id('feedback-note'),
+  submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
@@ -50,6 +51,7 @@ const ui = {
 const state = {
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
+  canSendObjectPrompts:false,
   boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
@@ -157,6 +159,7 @@ function saveDraft() {
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
+      objectPromptsText:ui.objectPrompts.value,
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
         alignmentExact:state.alignmentExact,
@@ -190,6 +193,7 @@ function restoreDraft() {
       ? draft.referencePan : {x:0,y:0};
     ui.groupSelect.value = state.groupId;
     ui.note.value = typeof draft.note === 'string' ? draft.note : '';
+    ui.objectPrompts.value = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText : '';
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
       camera.position.set(...draft.camera.position);
       if (draft.camera.up?.length === 3) camera.up.set(...draft.camera.up);
@@ -215,6 +219,7 @@ function setSession(session) {
   ui.pill.className = 'session-pill ' + state.sessionStatus;
   ui.submit.disabled = !editable();
   ui.note.disabled = state.sessionStatus !== 'open';
+  ui.objectPrompts.disabled = state.sessionStatus !== 'open';
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   id('clear-annotations').disabled = state.sessionStatus !== 'open';
   if (state.sessionStatus !== 'open') {
@@ -317,6 +322,7 @@ function updateSubmitLabel() {
     ui.submit.querySelector('span:first-child').textContent = label;
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+    ui.objectPrompts.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
@@ -337,6 +343,7 @@ function updateSubmitLabel() {
   ui.submit.querySelector('span:first-child').textContent = label;
   ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+  ui.objectPrompts.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
@@ -571,6 +578,7 @@ async function switchTask(threadId) {
 }
 function renderWorkspace(workspace) {
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
+  state.canSendObjectPrompts = workspace.object_prompts_supported === true;
   const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
@@ -1194,6 +1202,10 @@ function addConversation(type, message, time) {
   while (ui.conversation.childElementCount > 100) ui.conversation.firstElementChild.remove();
   ui.conversation.scrollTop = ui.conversation.scrollHeight;
 }
+function feedbackEventText(payload) {
+  return [payload.object_prompts_summary, payload.note].filter((value) => typeof value === 'string' && value.trim()).join('\n') ||
+    '已提交视觉反馈（含原图、标记和场景截图）';
+}
 async function fetchEvents(initial=false) {
   const events = await api('/api/workspace/events?after=' + (initial ? 0 : state.eventCursor));
   const items = Array.isArray(events.items) ? events.items : [];
@@ -1204,7 +1216,7 @@ async function fetchEvents(initial=false) {
     const message = payload.text || payload.message || payload.summary || payload.prompt;
     if (state.deliveryMode === 'external' && !state.boundThreadId) {
       if (event.type === 'feedback_queued' || event.type === 'external_feedback_submitted' || event.type === 'feedback_submitted') {
-        addConversation('user', payload.note || '已提交视觉反馈（含原图、标记和场景截图）', event.at);
+        addConversation('user', feedbackEventText(payload), event.at);
       } else if (event.type === 'feedback_returned_to_mcp' || event.type === 'mcp_feedback_returned') {
         addConversation('status', 'MCP 已读取视觉反馈；请在原 Codex 任务中查看后续。', event.at);
       } else if (event.type === 'scene_published') {
@@ -1217,7 +1229,7 @@ async function fetchEvents(initial=false) {
     if (event.type === 'assistant_message' || event.type === 'assistant_text' || event.type === 'agent_message') {
       addConversation('assistant', message, event.at);
     } else if (event.type === 'feedback_queued') {
-      addConversation('user', payload.note || '已发送视觉反馈（含图片和标注）', event.at);
+      addConversation('user', feedbackEventText(payload), event.at);
     } else if (event.type === 'turn_started') {
       addConversation('status', 'Codex 开始处理这一轮。', event.at);
     } else if (event.type === 'turn_completed') {
@@ -2177,18 +2189,47 @@ async function captureScene(snapshot) {
     scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84)
   };
 }
-async function feedbackPayload() {
+function parseObjectPrompts() {
+  const prompts = [];
+  const lines = ui.objectPrompts.value.split(/\r?\n/);
+  for (const [index, raw] of lines.entries()) {
+    const line = raw.replace(/^\s*(?:[-*•]\s+|\d+[.)、]\s*)/, '').trim();
+    if (!line) continue;
+    const separator = line.search(/[：:]/);
+    const object = separator < 0 ? '' : line.slice(0, separator).trim();
+    const prompt = separator < 0 ? '' : line.slice(separator + 1).trim();
+    if (!object || !prompt) throw new Error('逐项提示第 ' + (index + 1) + ' 行请写成“物体：提示”。');
+    if (object.length > 180) throw new Error('逐项提示第 ' + (index + 1) + ' 行的物体名称过长。');
+    if (prompt.length > 2000) throw new Error('逐项提示第 ' + (index + 1) + ' 行的提示超过 2000 字。');
+    const entry = {object, prompt};
+    const exactId = state.sceneObjects.find((item) => item.id === object);
+    const named = state.sceneObjects.filter((item) => item.name === object);
+    if (exactId) entry.object_id = exactId.id;
+    else if (named.length === 1) entry.object_id = named[0].id;
+    prompts.push(entry);
+    if (prompts.length > 24) throw new Error('一条反馈最多填写 24 项物体提示。');
+  }
+  return prompts;
+}
+async function feedbackPayload(objectPrompts) {
   const snapshot = snapshotForFeedback();
   const imageBundle = await captureScene(snapshot);
   const annotatedReferences = await captureReferenceAnnotations();
   const submittedCamera = snapshot?.camera || cameraData();
+  const generalNote = ui.note.value.trim();
+  const promptText = objectPrompts.map((entry) => entry.object + '：' + entry.prompt).join('\n');
+  const note = state.canSendObjectPrompts ? generalNote : [promptText, generalNote].filter(Boolean).join('\n\n');
+  if (!state.canSendObjectPrompts && note.length > 10_000) {
+    throw new Error('当前服务尚未更新，逐项提示和整体说明合计不能超过 10000 字。');
+  }
   return {
     scene_revision:snapshot?.scene_revision || state.sceneRevision,
     latest_scene_revision:state.sceneRevision,
     active_reference_id:state.activeReferenceId,
     aligned_reference_id:submittedCamera.alignment_exact && submittedCamera.reference_image_id === state.activeReferenceId
       ? state.activeReferenceId : null,
-    note:ui.note.value.trim() || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
+    note:note || (state.references.length && !state.annotations.length && !objectPrompts.length ? '请参考这些图片开始或继续重建场景。' : ''),
+    ...(state.canSendObjectPrompts ? {object_prompts:objectPrompts} : {}),
     annotations:state.annotations.map((annotation) => {
       const item = {...annotation};
       if (!snapshot && item.object_id && !sceneObject(item.object_id)) {
@@ -2212,8 +2253,13 @@ async function feedbackPayload() {
 }
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || state.submitting || state.uploading) return;
-  if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length) {
-    announce('请添加参考图、画标记，或写一句话后再发送。', true);
+  let objectPrompts = [];
+  if (!state.pendingSubmission) {
+    try { objectPrompts = parseObjectPrompts(); }
+    catch (error) { announce(error.message, true); ui.objectPrompts.focus(); return; }
+  }
+  if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length && !objectPrompts.length) {
+    announce('请添加参考图、画标记，或填写物体提示后再发送。', true);
     return;
   }
   const chosenSnapshot = snapshotForFeedback();
@@ -2225,7 +2271,7 @@ async function submitFeedback() {
   ui.submit.querySelector('span:first-child').textContent = '正在准备图片…';
   try {
     if (!state.pendingSubmission) {
-      const payload = await feedbackPayload();
+      const payload = await feedbackPayload(objectPrompts);
       const key = newId();
       state.pendingSubmission = {key, payload:{...payload, idempotency_key:key,
         confirm_stale:!!staleSnapshot}};
@@ -2455,6 +2501,7 @@ function bindEvents() {
     });
   }
   ui.note.addEventListener('input', saveDraft);
+  ui.objectPrompts.addEventListener('input', saveDraft);
   ui.submit.addEventListener('click', submitFeedback);
   ui.stop.addEventListener('click', async () => {
     ui.stop.disabled = true;
