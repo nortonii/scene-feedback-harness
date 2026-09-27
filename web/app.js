@@ -59,6 +59,7 @@ const state = {
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
+  lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
@@ -156,6 +157,8 @@ function saveDraft() {
     localStorage.setItem(storageKey(), JSON.stringify({
       annotations:state.annotations, selectedId:state.selectedId,
       selectedSceneNode:state.selectedSceneNode,
+      lastPickedDetailNode:state.lastPickedDetailNode,
+      selectionLevel:state.selectionLevel,
       referencedSceneNodes:state.referencedSceneNodes,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
@@ -177,6 +180,11 @@ function restoreDraft() {
     state.selectedId = typeof draft.selectedId === 'string' ? draft.selectedId : null;
     state.selectedSceneNode = draft.selectedSceneNode && Array.isArray(draft.selectedSceneNode.node_path)
       ? draft.selectedSceneNode : null;
+    state.lastPickedDetailNode = draft.lastPickedDetailNode && Array.isArray(draft.lastPickedDetailNode.node_path)
+      ? draft.lastPickedDetailNode : null;
+    state.selectionLevel = ['item','part'].includes(draft.selectionLevel)
+      ? draft.selectionLevel : state.selectedSceneNode ? 'part' : 'item';
+    updateSelectionLevelControls();
     state.referencedSceneNodes = Array.isArray(draft.referencedSceneNodes)
       ? draft.referencedSceneNodes.filter((node) => node && typeof node.parent_object_id === 'string' && Array.isArray(node.node_path))
       : [];
@@ -1327,14 +1335,19 @@ function resolveSceneNode(reference) {
   if (reference.node_name && node.name?.trim().slice(0, 160) !== reference.node_name) return null;
   return node;
 }
-function nodeReference(objectId, hitObject) {
+function nodeReference(objectId, hitObject, level='part') {
   const modelRoot = state.objectNodes.get(objectId)?.userData.gltfRoot;
   if (!modelRoot) return null;
   let chosen = hitObject;
-  // A named group is usually the human-readable part; unnamed meshes still
-  // retain a stable child-index path within this GLB's scene graph.
-  while (chosen !== modelRoot && !chosen.name?.trim()) chosen = chosen.parent;
-  if (chosen === modelRoot) chosen = hitObject;
+  if (level === 'item') {
+    // One direct child of the glTF scene is one selectable item in this viewer.
+    while (chosen?.parent && chosen.parent !== modelRoot) chosen = chosen.parent;
+    if (chosen?.parent !== modelRoot) return null;
+  } else {
+    // Use the named hit node for a detailed part, skipping unnamed loader meshes.
+    while (chosen !== modelRoot && !chosen.name?.trim()) chosen = chosen.parent;
+    if (chosen === modelRoot) chosen = hitObject;
+  }
   const path = [];
   let child = chosen;
   while (child && child !== modelRoot) {
@@ -1507,13 +1520,13 @@ function renderSelection() {
       const cite = document.createElement('button');
       cite.type = 'button';
       cite.className = 'reference-insert selected-reference-insert';
-      cite.textContent = '在提示中引用这个节点';
+      cite.textContent = '在提示中引用这个' + (state.selectionLevel === 'item' ? '物品' : '部件');
       cite.disabled = !editable();
       cite.addEventListener('mousedown', (event) => event.preventDefault());
       cite.addEventListener('click', () => insertSceneNodeReference({...state.selectedSceneNode}, nodeLabel));
       ui.selectionSummary.append(cite);
     }
-    ui.selectedChip.textContent = '已选 · ' + (nodeLabel || item.name || item.id);
+    ui.selectedChip.textContent = '已选' + (state.selectedSceneNode ? (state.selectionLevel === 'item' ? '物品' : '部件') : '对象') + ' · ' + (nodeLabel || item.name || item.id);
     ui.selectedChip.classList.remove('hidden');
     ui.clearSelection.classList.remove('hidden');
   } else {
@@ -1564,10 +1577,11 @@ function renderObjectList() {
     ui.objectList.append(row);
   }
 }
-function selectObject(objectId, sceneNode=null) {
+function selectObject(objectId, sceneNode=null, detailNode=null) {
   if (!sceneObject(objectId)) return;
   state.selectedId = objectId;
   state.selectedSceneNode = sceneNode;
+  state.lastPickedDetailNode = detailNode;
   renderSelection();
   saveDraft();
 }
@@ -1578,13 +1592,15 @@ async function loadScene(sceneData) {
   const priorSelectedObject = sceneObject(state.selectedId);
   state.sceneRevision = scene.revision;
   state.sceneObjects = scene.objects || [];
-  if (priorRevision !== null && state.selectedSceneNode && priorSelectedObject?.url !== sceneObject(state.selectedId)?.url) {
+  if (priorRevision !== null && priorSelectedObject?.url !== sceneObject(state.selectedId)?.url) {
     state.selectedSceneNode = null;
+    state.lastPickedDetailNode = null;
   }
-  if (priorRevision === null && state.selectedSceneNode &&
+  if (priorRevision === null && (state.selectedSceneNode || state.lastPickedDetailNode) &&
       (state.restoredModelUrl !== (sceneObject(state.selectedId)?.url || null) ||
        (state.restoredModelUrl === null && state.restoredSceneRevision !== scene.revision))) {
     state.selectedSceneNode = null;
+    state.lastPickedDetailNode = null;
   }
   objectLayer.clear();
   state.objectNodes.clear();
@@ -1592,6 +1608,7 @@ async function loadScene(sceneData) {
   frameAllIfReady();
   if (state.selectedId && !sceneObject(state.selectedId)) state.selectedId = null;
   if (state.selectedSceneNode && !resolveSceneNode(state.selectedSceneNode)) state.selectedSceneNode = null;
+  if (state.lastPickedDetailNode && !resolveSceneNode(state.lastPickedDetailNode)) state.lastPickedDetailNode = null;
   renderSelection();
   renderAnnotations();
   drawOverlays();
@@ -1853,10 +1870,10 @@ function cameraData() {
 function updateSceneHint() {
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
-      ? '拖拽旋转 · 滚轮缩放 · 点击对象 · 标注前先固定视角'
+      ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 标注前先固定视角'
       : '点击「标注当前视角」后，在固定截图上圈画';
   } else if (state.mode === 'select') {
-    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「浏览新结果」可继续旋转';
+    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「返回 3D 点选」可继续选择';
   } else {
     ui.sceneHint.textContent = '在场景上' +
       ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
@@ -1880,7 +1897,33 @@ function setMode(mode) {
   if (!['select','point','rectangle','line','arrow','text','freehand'].includes(mode)) return;
   state.mode = mode;
   hideTextEditor();
-  updateMode();
+  if (mode === 'select' && state.sceneView === 'snapshot') {
+    state.sceneView = 'live';
+    renderSceneView();
+  } else updateMode();
+}
+function updateSelectionLevelControls() {
+  document.querySelectorAll('[data-selection-level]').forEach((button) => {
+    const active = button.dataset.selectionLevel === state.selectionLevel;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  id('selection-level-hint').textContent = state.selectionLevel === 'item'
+    ? '物品：点击 GLB 的顶层物品；基本图元整体选中。'
+    : '部件：点击 GLB 的具体节点；基本图元整体选中。';
+}
+function setSelectionLevel(level) {
+  if (!['item','part'].includes(level)) return;
+  state.selectionLevel = level;
+  updateSelectionLevelControls();
+  const detail = resolveSceneNode(state.lastPickedDetailNode || state.selectedSceneNode);
+  if (detail && state.selectedId) {
+    state.selectedSceneNode = nodeReference(state.selectedId, detail, level);
+    renderSelection();
+  }
+  setMode('select');
+  updateSceneHint();
+  saveDraft();
 }
 function pointFromPointer(event, canvas) {
   const rect = canvas.getBoundingClientRect();
@@ -2229,6 +2272,9 @@ function insertNoteReference(label, token) {
   const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
   const after = end < ui.note.value.length && !/\s/.test(ui.note.value[end]) ? ' ' : '';
   ui.note.setRangeText(before + label + ' ' + token + after, start, end, 'end');
+  // Return to live picking after inserting a reference. The frozen annotated
+  // image remains available through the Back to annotation button.
+  setMode('select');
   ui.note.focus();
   saveDraft();
 }
@@ -2404,14 +2450,17 @@ function pickScene(event) {
     let node = hit.object;
     while (node && !node.userData.objectId) node = node.parent;
     if (node?.userData.objectId) {
-      return {objectId:node.userData.objectId, sceneNode:nodeReference(node.userData.objectId, hit.object)};
+      const objectId = node.userData.objectId;
+      const detailNode = nodeReference(objectId, hit.object, 'part');
+      return {objectId, detailNode,
+        sceneNode:state.selectionLevel === 'item' ? nodeReference(objectId, hit.object, 'item') : detailNode};
     }
   }
   return null;
 }
 function handleSceneClick(event) {
   const selection = pickScene(event);
-  if (selection) selectObject(selection.objectId, selection.sceneNode);
+  if (selection) selectObject(selection.objectId, selection.sceneNode, selection.detailNode);
 }
 function resizeScene() {
   const width = ui.sceneStage.clientWidth;
@@ -2512,6 +2561,8 @@ function bindEvents() {
   });
   ui.createTarget.addEventListener('click', createTask);
   document.querySelectorAll('.tool-button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.tool)));
+  document.querySelectorAll('[data-selection-level]').forEach((button) => button.addEventListener('click', () => setSelectionLevel(button.dataset.selectionLevel)));
+  updateSelectionLevelControls();
   ui.groupSelect.addEventListener('change', () => {
     state.groupId = ui.groupSelect.value;
     saveDraft();
@@ -2555,7 +2606,7 @@ function bindEvents() {
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
   ui.freeze.addEventListener('click', freezeScene);
-  ui.browse.addEventListener('click', () => { state.sceneView = 'live'; setMode('select'); renderSceneView(); });
+  ui.browse.addEventListener('click', () => setMode('select'));
   ui.snapshotButton.addEventListener('click', () => { state.sceneView = 'snapshot'; renderSceneView(); });
   ui.compareOpacity.addEventListener('input', () => {
     ui.opacityValue.textContent = ui.compareOpacity.value + '%';
@@ -2592,10 +2643,16 @@ function bindEvents() {
     if (!editable()) return;
     state.selectedId = null;
     state.selectedSceneNode = null;
+    state.lastPickedDetailNode = null;
     renderSelection();
     saveDraft();
   });
-  id('frame-button').addEventListener('click', () => state.selectedId ? frameBox(objectBox(state.selectedId)) : frameAll());
+  id('frame-button').addEventListener('click', () => {
+    const selectedNode = resolveSceneNode(state.selectedSceneNode);
+    if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
+    else if (state.selectedId) frameBox(objectBox(state.selectedId));
+    else frameAll();
+  });
   id('reset-button').addEventListener('click', frameAll);
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);

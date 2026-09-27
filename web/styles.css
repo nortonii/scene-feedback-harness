@@ -50,6 +50,12 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .tool-button strong { display: block; color: #e4eced; font-size: 11px; font-weight: 700; }
 .tool-button small { display: block; color: #8798a3; font-size: 9px; margin-top: 3px; }
 .tool-button kbd { color: #748792; font-size: 10px; font-family: inherit; }
+.selection-level-section { padding: 0 16px 15px; }
+.selection-level-buttons { display: flex; gap: 5px; margin-top: 8px; }
+.selection-level-button { flex: 1; min-width: 0; border: 1px solid #465a64; border-radius: 5px; padding: 7px 5px; background: #25343e; color: #abbcc3; font-size: 11px; font-weight: 700; }
+.selection-level-button:hover { border-color: #d8aa77; color: #f6dfc4; }
+.selection-level-button.active { border-color: #d8aa77; background: #4c3b2d; color: #ffd7aa; }
+.selection-level-section p { margin: 7px 0 0; color: #8499a2; font-size: 10px; line-height: 1.45; }
 .pair-section { padding: 15px 16px 18px; border-top: 1px solid #30404a; border-bottom: 1px solid #30404a; }
 .pair-section label { display: block; color: #bdcbd1; font-size: 11px; font-weight: 700; }
 .pair-section label span { color: #8fa1aa; font-weight: 400; margin-left: 3px; }
@@ -251,6 +257,8 @@ dialog p { color: #aebfc5; font-size: 12px; line-height: 1.7; }
   .tool-list { display: flex; flex-wrap: wrap; padding: 0 9px 10px; }
   .tool-button { width: auto; min-height: 34px; }
   .tool-button small { display: none; }
+  .selection-level-section { padding: 0 13px 10px; }
+  .selection-level-buttons { max-width: 230px; }
   .pair-section { padding-top: 9px; padding-bottom: 9px; }
   .pair-section select { width: 130px; }
   .object-section { display: none; }
