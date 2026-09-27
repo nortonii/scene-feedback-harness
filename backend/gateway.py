@@ -16,7 +16,8 @@ from appserver_adapter import TurnBusyError
 from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
 from shared_thread_adapter import DeliveryNotReadyError, DeliveryRejectedError
 from shared_thread_adapter import SharedDesktopAdapter
-from shared_thread_bridge import SharedThreadBridge, SharedThreadNotIdle
+from shared_thread_bridge import OwnedEmptyThreadMissing, SharedThreadBridge, SharedThreadNotIdle
+from shared_thread_bridge import SharedThreadBridgeError, SharedThreadRPCRejected
 
 
 class WorkspaceGateway:
@@ -219,7 +220,303 @@ class WorkspaceGateway:
                 "reasoning_effort": thread.get("reasoningEffort") if isinstance(thread.get("reasoningEffort"), str) else None,
                 "status": status.get("type") if isinstance(status, dict) else None,
             })
+        with self.store.lock:
+            owned_ids = tuple(self.store.state["workspace"].get("created_thread_ids", []))
+        loaded_ids = {item["thread_id"] for item in candidates}
+        if any(thread_id not in loaded_ids for thread_id in owned_ids):
+            try:
+                bridge = SharedThreadBridge.connect_to_desktop(current_id)
+                try:
+                    for thread_id in owned_ids:
+                        if thread_id in loaded_ids:
+                            continue
+                        try:
+                            thread = bridge.read_loaded_thread(thread_id)
+                        except SharedThreadRPCRejected as exc:
+                            if "no rollout found" in str(exc).lower():
+                                with self.store.lock:
+                                    spec = self.store.state["workspace"].get("created_thread_specs", {}).get(thread_id)
+                                if isinstance(spec, dict):
+                                    candidates.append({"thread_id": thread_id, "title": spec.get("title") or "Untitled Codex task", "model": spec.get("model"), "reasoning_effort": spec.get("reasoning_effort"), "status": "recoverable"})
+                            continue
+                        except Exception:
+                            continue
+                        if not self._target_cwd_allowed(thread):
+                            continue
+                        status = thread.get("status") or {}
+                        title = thread.get("name") or thread.get("preview") or "Untitled Codex task"
+                        if not isinstance(title, str):
+                            title = "Untitled Codex task"
+                        candidates.append({
+                            "thread_id": thread_id,
+                            "title": title.strip()[:160] or "Untitled Codex task",
+                            "model": thread.get("model") if isinstance(thread.get("model"), str) else None,
+                            "reasoning_effort": thread.get("reasoningEffort") if isinstance(thread.get("reasoningEffort"), str) else None,
+                            "status": status.get("type") if isinstance(status, dict) else None,
+                        })
+                finally:
+                    bridge.close()
+            except Exception:
+                logging.exception("Could not inspect unloaded workbench-owned Codex tasks")
         return {"targets": candidates, "thread_id": current_id}
+
+    @staticmethod
+    def _visible_models(bridge: SharedThreadBridge) -> dict[str, Any]:
+        models = []
+        for item in bridge.list_models():
+            model = item.get("model") or item.get("id")
+            modalities = item.get("inputModalities", ["text", "image"])
+            if (not isinstance(model, str) or not model or item.get("hidden") is True
+                    or not isinstance(modalities, list) or "image" not in modalities):
+                continue
+            raw_efforts = item.get("supportedReasoningEfforts")
+            efforts = [entry["reasoningEffort"] for entry in (raw_efforts if isinstance(raw_efforts, list) else [])
+                       if isinstance(entry, dict) and isinstance(entry.get("reasoningEffort"), str)]
+            default_effort = item.get("defaultReasoningEffort")
+            if not isinstance(default_effort, str):
+                default_effort = efforts[0] if efforts else None
+            models.append({
+                "model": model,
+                "display_name": item.get("displayName") if isinstance(item.get("displayName"), str) else model,
+                "default_reasoning_effort": default_effort,
+                "supported_reasoning_efforts": efforts,
+                "is_default": item.get("isDefault") is True,
+            })
+        default_model = next((entry["model"] for entry in models if entry["is_default"]), None)
+        return {"models": models, "default_model": default_model or (models[0]["model"] if models else None)}
+
+    def list_models(self) -> dict[str, Any]:
+        current_id = self._target_thread()
+        try:
+            bridge = SharedThreadBridge.connect_to_desktop(current_id)
+            try:
+                return self._visible_models(bridge)
+            finally:
+                bridge.close()
+        except Exception as exc:
+            raise APIError(503, f"cannot list Codex Desktop models: {exc}") from exc
+
+    @staticmethod
+    def _check_switchable_workspace(workspace: dict[str, Any], current_id: str) -> None:
+        if workspace.get("thread_id") != current_id:
+            raise APIError(409, "workspace target changed; reload before switching")
+        if workspace.get("active_feedback_id") or any(
+            item["status"] in {"dispatching", "running"}
+            or (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
+            for item in workspace["queue"]
+        ):
+            raise APIError(409, "finish or resolve the active feedback before switching tasks")
+
+    def _commit_target(self, current_id: str, thread_id: str, replacement: SharedDesktopAdapter, replacement_token: object) -> Any:
+        """Commit a prevalidated binding while supervisor, event, and worker locks are held."""
+        with self.store.lock:
+            workspace = self.store.state["workspace"]
+            self._check_switchable_workspace(workspace, current_id)
+            previous_workspace = copy.deepcopy(workspace)
+            old_adapter = self.adapter
+            old_initialized = self._adapter_initialized
+            old_token = self._adapter_token
+            try:
+                for item in workspace["queue"]:
+                    if item.get("target_thread_id") is None:
+                        item["target_thread_id"] = current_id
+                workspace["thread_id"] = thread_id
+                workspace["approvals"] = []
+                workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                workspace["event_seq"] += 1
+                workspace["events"].append({"id": workspace["event_seq"], "type": "target_switched", "payload": {"old_thread_id": current_id, "thread_id": thread_id}, "at": _now()})
+                workspace["events"] = workspace["events"][-500:]
+                self.store._save()
+                self.adapter = replacement
+                self._adapter_token = replacement_token
+                self._adapter_initialized = True
+                return old_adapter
+            except Exception:
+                self.store.state["workspace"] = previous_workspace
+                self.adapter = old_adapter
+                self._adapter_initialized = old_initialized
+                self._adapter_token = old_token
+                raise
+
+    def _recover_empty_owned_task(self, missing_id: str, *, current_id: str) -> None:
+        """Replace only a workbench-owned task proven to have no rollout.
+
+        Called with the supervisor lock held.  No packet that might have
+        reached Codex may be rerouted by this path.
+        """
+        with self._adapter_event_lock, self._worker_lock:
+            with self.store.lock:
+                workspace = self.store.state["workspace"]
+                spec = workspace.get("created_thread_specs", {}).get(missing_id)
+                pending_replacement = next((thread_id for thread_id, options in workspace.get("created_thread_specs", {}).items()
+                                            if isinstance(options, dict) and options.get("replaces") == missing_id), None)
+                if (workspace.get("thread_id") != current_id or not isinstance(spec, dict)
+                        or self._worker_running or workspace.get("active_feedback_id")
+                        or any(item["status"] in {"dispatching", "running"} or
+                               (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
+                               for item in workspace["queue"])
+                        or any(item.get("target_thread_id") == missing_id and
+                               (item.get("status") not in {"queued", "blocked_stale", "awaiting_mcp"} or item.get("turn_id"))
+                               for item in workspace["queue"])):
+                    raise SharedThreadBridgeError("empty task cannot be recreated after a feedback delivery attempt")
+                if pending_replacement:
+                    raise SharedThreadBridgeError(f"replacement task {pending_replacement} already exists; select it from the task picker")
+                spec = copy.deepcopy(spec)
+            bridge = SharedThreadBridge.connect_to_desktop(current_id)
+            replacement: SharedDesktopAdapter | None = None
+            try:
+                catalog = self._visible_models(bridge)
+                selection = next((item for item in catalog["models"] if item["model"] == spec.get("model")), None)
+                if selection is None or spec.get("reasoning_effort") not in selection["supported_reasoning_efforts"]:
+                    raise SharedThreadBridgeError("saved model or reasoning effort is no longer available")
+                new_id = bridge.create_thread(spec["model"], self.project_dir, reasoning_effort=spec["reasoning_effort"], title=spec.get("title"))
+                with self.store.lock:
+                    workspace = self.store.state["workspace"]
+                    owned = workspace.setdefault("created_thread_ids", [])
+                    specs = workspace.setdefault("created_thread_specs", {})
+                    owned.append(new_id)
+                    specs[new_id] = {**spec, "replaces": missing_id}
+                    try:
+                        self.store._save()
+                    except Exception:
+                        owned.remove(new_id)
+                        specs.pop(new_id, None)
+                        raise
+                if bridge.read_thread().get("status", {}).get("type") != "idle":
+                    raise SharedThreadBridgeError("replacement empty task is not idle")
+                token = object()
+                replacement = SharedDesktopAdapter(new_id, on_event=self.scoped_adapter_callback(token), allow_owned_resume=True, initial_bridge=bridge)
+                replacement.start()
+                with self.store.lock:
+                    workspace = self.store.state["workspace"]
+                    if (workspace.get("thread_id") != current_id or workspace.get("active_feedback_id")
+                            or any(item["status"] in {"dispatching", "running"} or
+                                   (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
+                                   for item in workspace["queue"])
+                            or any(item.get("target_thread_id") == missing_id and
+                                   (item.get("status") not in {"queued", "blocked_stale", "awaiting_mcp"} or item.get("turn_id"))
+                                   for item in workspace["queue"])):
+                        raise SharedThreadBridgeError("feedback state changed during empty task recovery")
+                    previous = copy.deepcopy(workspace)
+                    old_adapter = self.adapter
+                    old_initialized = self._adapter_initialized
+                    old_token = self._adapter_token
+                    try:
+                        owned = workspace.setdefault("created_thread_ids", [])
+                        owned[:] = [thread_id for thread_id in owned if thread_id != missing_id]
+                        specs = workspace.setdefault("created_thread_specs", {})
+                        specs.pop(missing_id, None)
+                        specs[new_id] = spec
+                        for item in workspace["queue"]:
+                            if item.get("target_thread_id") is None:
+                                item["target_thread_id"] = current_id
+                            if item.get("target_thread_id") == missing_id:
+                                item["target_thread_id"] = new_id
+                        workspace["thread_id"] = new_id
+                        workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
+                        workspace["event_seq"] += 1
+                        workspace["events"].append({"id": workspace["event_seq"], "type": "empty_thread_recreated", "payload": {"old_thread_id": missing_id, "previous_bound_thread_id": current_id, "thread_id": new_id}, "at": _now()})
+                        workspace["events"] = workspace["events"][-500:]
+                        self.store._save()
+                        self.adapter = replacement
+                        self._adapter_token = token
+                        self._adapter_initialized = True
+                    except Exception:
+                        self.store.state["workspace"] = previous
+                        self.adapter = old_adapter
+                        self._adapter_initialized = old_initialized
+                        self._adapter_token = old_token
+                        raise
+            finally:
+                if replacement is None or self.adapter is not replacement:
+                    if replacement is not None:
+                        replacement.close()
+                    else:
+                        bridge.close()
+            try:
+                old_adapter.close()
+            except Exception:
+                logging.exception("Could not close missing empty Codex task adapter")
+        self.wake()
+
+    def create_target(self, model: Any, *, reasoning_effort: Any = None, title: Any = None) -> dict[str, Any]:
+        """Create a fresh Desktop task, then route future feedback to it."""
+        current_id = self._target_thread()
+        if not isinstance(model, str) or not model:
+            raise APIError(400, "select a Codex model")
+        if reasoning_effort is not None and not isinstance(reasoning_effort, str):
+            raise APIError(400, "reasoning_effort must be a supported value")
+        if title is not None and (not isinstance(title, str) or not title.strip() or len(title.strip()) > 120 or any(ord(ch) < 32 for ch in title)):
+            raise APIError(400, "title must contain 1 to 120 printable characters")
+        name = title.strip() if isinstance(title, str) else f"Scene feedback · {self.project_dir.name}"[:120]
+        created_id: str | None = None
+        replacement: SharedDesktopAdapter | None = None
+        old_adapter: Any = None
+        with self._supervisor_lock, self._adapter_event_lock, self._worker_lock:
+            with self.store.lock:
+                self._check_switchable_workspace(self.store.state["workspace"], current_id)
+                if self._worker_running:
+                    raise APIError(409, "finish active feedback delivery before creating a task")
+            try:
+                bridge = SharedThreadBridge.connect_to_desktop(current_id)
+            except Exception as exc:
+                raise APIError(503, f"cannot connect to Codex Desktop: {exc}") from exc
+            try:
+                catalog = self._visible_models(bridge)
+                selection = next((item for item in catalog["models"] if item["model"] == model), None)
+                if selection is None:
+                    raise APIError(400, "selected model is not available with image input")
+                efforts = selection["supported_reasoning_efforts"]
+                effort = reasoning_effort if reasoning_effort is not None else selection["default_reasoning_effort"]
+                if effort is not None and effort not in efforts:
+                    raise APIError(400, "reasoning_effort is not supported by the selected model")
+                try:
+                    created_id = bridge.create_thread(model, self.project_dir, reasoning_effort=effort, title=name)
+                except SharedThreadRPCRejected as exc:
+                    raise APIError(409, f"Codex Desktop rejected task creation: {exc}") from exc
+                except SharedThreadBridgeError as exc:
+                    raise APIError(503, f"task creation result is uncertain; inspect Codex Desktop before trying again: {exc}") from exc
+                # Persist ownership immediately.  If later binding fails the
+                # task remains recoverable in the picker, including after a
+                # service restart or Desktop's inactivity unload.
+                with self.store.lock:
+                    workspace = self.store.state["workspace"]
+                    owned = workspace.setdefault("created_thread_ids", [])
+                    if created_id not in owned:
+                        owned.append(created_id)
+                        workspace.setdefault("created_thread_specs", {})[created_id] = {"model": model, "reasoning_effort": effort, "title": name}
+                        try:
+                            self.store._save()
+                        except Exception:
+                            owned.remove(created_id)
+                            workspace["created_thread_specs"].pop(created_id, None)
+                            raise
+                replacement_token = object()
+                replacement = SharedDesktopAdapter(created_id, on_event=self.scoped_adapter_callback(replacement_token), allow_owned_resume=True, initial_bridge=bridge)
+                replacement.start()
+                if replacement.inspect_thread_status() != "idle":
+                    raise APIError(409, "new Codex task is not idle")
+                old_adapter = self._commit_target(current_id, created_id, replacement, replacement_token)
+            except APIError as exc:
+                if created_id is not None:
+                    raise APIError(exc.status, f"{exc.message}; created task can be selected in the picker", detail={"thread_id": created_id}) from exc
+                raise
+            except Exception as exc:
+                if created_id is not None:
+                    raise APIError(503, f"created Codex task, but could not bind it: {exc}; choose it from the task picker", detail={"thread_id": created_id}) from exc
+                raise APIError(503, f"cannot create Codex task: {exc}") from exc
+            finally:
+                if replacement is not None and self.adapter is not replacement:
+                    replacement.close()
+                if replacement is None:
+                    bridge.close()
+        if old_adapter is not None:
+            try:
+                old_adapter.close()
+            except Exception:
+                logging.exception("Could not close previous Codex task adapter after creating a task")
+        self.wake()
+        return {"thread_id": created_id, "workspace": self.state()}
 
     def switch_target(self, thread_id: Any) -> dict[str, Any]:
         """Route future feedback to another idle task without moving old packets."""
@@ -240,13 +537,31 @@ class WorkspaceGateway:
             if len(current_paths) > 1 or (not current_paths and len(loaded_paths) > 1):
                 raise APIError(409, "cannot identify a single Codex Desktop daemon for this workspace")
             matches = [(path, thread) for path, thread in discovered if thread.get("id") == thread_id]
+            with self.store.lock:
+                owned = thread_id in self.store.state["workspace"].get("created_thread_ids", [])
+            if not matches and owned:
+                bridge = SharedThreadBridge.connect_to_desktop(current_id)
+                try:
+                    try:
+                        matches = [(bridge.socket_path, bridge.read_loaded_thread(thread_id))]
+                    except SharedThreadRPCRejected as exc:
+                        if "no rollout found" not in str(exc).lower():
+                            raise
+                        # The user explicitly selected a workbench-owned
+                        # empty task that vanished after Desktop unloaded it.
+                        # A fresh zero-turn task can safely replace it.
+                        with self._supervisor_lock:
+                            self._recover_empty_owned_task(thread_id, current_id=current_id)
+                        return self.state()
+                finally:
+                    bridge.close()
             if len(matches) != 1 or (current_paths and matches[0][0] not in current_paths):
-                raise APIError(409, "target task is not loaded in the same Codex Desktop daemon")
+                raise APIError(409, "target task is not available in the same Codex Desktop daemon")
             target = matches[0][1]
             if not self._target_cwd_allowed(target):
                 raise APIError(409, "target task cwd cannot access this workspace project")
             status = target.get("status")
-            if not isinstance(status, dict) or status.get("type") != "idle":
+            if not isinstance(status, dict) or status.get("type") not in ({"idle", "notLoaded"} if owned else {"idle"}):
                 raise APIError(409, "target Codex task is active; switch after it becomes idle")
         except APIError:
             raise
@@ -255,8 +570,11 @@ class WorkspaceGateway:
         except Exception as exc:
             raise APIError(503, f"cannot inspect Codex Desktop target: {exc}") from exc
 
+        with self.store.lock:
+            owned = thread_id in self.store.state["workspace"].get("created_thread_ids", [])
         replacement_token = object()
-        replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token))
+        kwargs = {"allow_owned_resume": True} if owned else {}
+        replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token), **kwargs)
         try:
             try:
                 replacement.start()
@@ -265,54 +583,16 @@ class WorkspaceGateway:
             with self._supervisor_lock, self._adapter_event_lock:
                 with self._worker_lock:
                     with self.store.lock:
-                        workspace = self.store.state["workspace"]
-                        if workspace.get("thread_id") != current_id:
-                            raise APIError(409, "workspace target changed; reload before switching")
-                        if self._worker_running or workspace.get("active_feedback_id") or any(
-                            item["status"] in {"dispatching", "running"}
-                            or (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
-                            for item in workspace["queue"]
-                        ):
-                            raise APIError(409, "finish or resolve the active feedback before switching tasks")
+                        self._check_switchable_workspace(self.store.state["workspace"], current_id)
+                        if self._worker_running:
+                            raise APIError(409, "finish active feedback delivery before switching tasks")
                     try:
                         runtime_status = replacement.inspect_thread_status()
                     except Exception as exc:
                         raise APIError(503, f"cannot verify target Codex task status: {exc}") from exc
                     if runtime_status != "idle":
                         raise APIError(409, "target Codex task became active; switch after it becomes idle")
-                    with self.store.lock:
-                        workspace = self.store.state["workspace"]
-                        if workspace.get("thread_id") != current_id or workspace.get("active_feedback_id") or any(
-                            item["status"] in {"dispatching", "running"}
-                            or (item["status"] == "delivery_uncertain" and not item.get("quarantined_at"))
-                            for item in workspace["queue"]
-                        ):
-                            raise APIError(409, "feedback state changed while switching tasks; retry after it settles")
-                        previous_workspace = copy.deepcopy(workspace)
-                        old_adapter = self.adapter
-                        old_initialized = self._adapter_initialized
-                        try:
-                            # Older packets have no route metadata. They
-                            # belong to the task being left, including stale
-                            # and unknown packets needing a human decision.
-                            for item in workspace["queue"]:
-                                if item.get("target_thread_id") is None:
-                                    item["target_thread_id"] = current_id
-                            workspace["thread_id"] = thread_id
-                            workspace["approvals"] = []
-                            workspace["agent"] = {"status": "idle", "turn_id": None, "error": None}
-                            workspace["event_seq"] += 1
-                            workspace["events"].append({"id": workspace["event_seq"], "type": "target_switched", "payload": {"old_thread_id": current_id, "thread_id": thread_id}, "at": _now()})
-                            workspace["events"] = workspace["events"][-500:]
-                            self.store._save()
-                            self.adapter = replacement
-                            self._adapter_token = replacement_token
-                            self._adapter_initialized = True
-                        except Exception:
-                            self.store.state["workspace"] = previous_workspace
-                            self.adapter = old_adapter
-                            self._adapter_initialized = old_initialized
-                            raise
+                    old_adapter = self._commit_target(current_id, thread_id, replacement, replacement_token)
         except Exception:
             if self.adapter is not replacement:
                 replacement.close()
@@ -350,6 +630,12 @@ class WorkspaceGateway:
                             self.store._save()
                     self._adapter_initialized = True
             except Exception as exc:
+                if isinstance(exc, OwnedEmptyThreadMissing):
+                    try:
+                        self._recover_empty_owned_task(self.adapter.thread_id, current_id=self.adapter.thread_id)
+                        return
+                    except Exception as recovery_exc:
+                        exc = recovery_exc
                 error = str(exc)[:500]
                 with self.store.lock:
                     workspace = self.store.state["workspace"]

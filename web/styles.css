@@ -125,6 +125,16 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .target-manual { margin-top: 7px; color: #96aeb6; font-size: 9px; }
 .target-manual summary { cursor: pointer; }
 .target-manual .target-actions { margin-top: 7px; }
+.target-create { margin-top: 9px; padding: 8px 9px; border: 1px solid #52656f; border-radius: 6px; background: #22323c; }
+.target-create summary { color: #e5f2ef; cursor: pointer; font-size: 10px; font-weight: 700; }
+.target-create-form { display: grid; gap: 5px; margin-top: 10px; }
+.target-create-form label { color: #b7cbd0; font-size: 9px; }
+.target-create-form label span { color: #849ba3; font-weight: 400; }
+.target-create-form input, .target-create-form select { min-width: 0; width: 100%; height: 31px; padding: 0 7px; border: 1px solid #52636d; border-radius: 5px; background: #192832; color: #e0eaeb; font-size: 10px; }
+.target-create-form input:disabled, .target-create-form select:disabled { opacity: 0.62; }
+.target-create-form .create-target-button { margin-top: 5px; min-height: 31px; border-color: #83a99f; color: #e5fbf2; background: #30574d; font-weight: 700; }
+.target-create-form .create-target-button:disabled { opacity: 0.55; }
+.target-picker .target-create-form p { margin: 2px 0 0; }
 .target-picker p { margin: 7px 0 0; color: #8498a2; font-size: 9px; line-height: 1.45; }
 .queue-target { margin-top: 6px; color: #b5cbd4; font-size: 9px; }
 .queue-target.old-target { color: #ffce9a; }

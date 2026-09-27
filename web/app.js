@@ -30,6 +30,8 @@ const ui = {
   targetPicker:id('target-picker'), currentTarget:id('current-target'), targetSelect:id('target-select'),
   switchTarget:id('switch-target'), refreshTargets:id('refresh-targets'), targetHelp:id('target-help'),
   manualTargetId:id('manual-target-id'), manualSwitchTarget:id('manual-switch-target'),
+  createTargetPanel:id('create-target-panel'), createTitle:id('create-title'), createModel:id('create-model'),
+  createEffort:id('create-effort'), createTarget:id('create-target'), createTargetHelp:id('create-target-help'),
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
@@ -48,6 +50,8 @@ const state = {
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
   boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
+  models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
+  modelOptionsSignature:null, effortOptionsSignature:null, modelLoadError:null, creatingTarget:false,
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
@@ -242,6 +246,9 @@ async function ensureSession() {
   if (state.deliveryMode === 'external' && state.boundThreadId) loadTargets().catch((error) => {
     ui.targetHelp.textContent = '无法读取任务列表：' + error.message;
   });
+  if (state.deliveryMode === 'external' && state.boundThreadId) loadModels().catch(() => {
+    /* The new-task form shows the connection error. */
+  });
 }
 
 function outboxKey() { return 'visual-outbox:' + state.sessionId; }
@@ -339,7 +346,7 @@ function shortTaskId(threadId) {
 }
 function targetStatusLabel(status) {
   return ({idle:'空闲',inProgress:'执行中',in_progress:'执行中',running:'执行中',active:'执行中',completed:'已完成',
-    archived:'已归档',unknown:'状态未知'})[status] || (status || '');
+    archived:'已归档',notLoaded:'可恢复',recoverable:'可恢复',unknown:'状态未知'})[status] || (status || '');
 }
 function targetIsBusy(item) {
   return ['inProgress', 'in_progress', 'running', 'active', 'awaiting_approval'].includes(item?.status);
@@ -350,6 +357,62 @@ function targetModelLabel(item) {
 function targetName(threadId) {
   const target = state.targets?.find((item) => item.thread_id === threadId);
   return target?.title || shortTaskId(threadId);
+}
+function renderCreateTarget() {
+  const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
+  if (!models.some((item) => item.model === state.modelChoice)) {
+    state.modelChoice = models.find((item) => item.model === state.defaultModel)?.model ||
+      models.find((item) => item.is_default)?.model || models[0]?.model || null;
+    state.effortChoice = '';
+  }
+  const modelSignature = JSON.stringify({models:models.map((item) => [item.model, item.display_name]),
+    loading:state.loadingModels});
+  if (modelSignature !== state.modelOptionsSignature) {
+    state.modelOptionsSignature = modelSignature;
+    ui.createModel.replaceChildren();
+    if (!models.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = state.loadingModels ? '正在读取可用模型…' : '暂无可用模型';
+      ui.createModel.append(option);
+    }
+    for (const item of models) {
+      const option = document.createElement('option');
+      option.value = item.model;
+      option.textContent = item.display_name || item.model;
+      ui.createModel.append(option);
+    }
+  }
+  ui.createModel.value = state.modelChoice || '';
+  const model = models.find((item) => item.model === state.modelChoice);
+  const efforts = Array.isArray(model?.supported_reasoning_efforts) ? model.supported_reasoning_efforts : [];
+  if (state.effortChoice && !efforts.includes(state.effortChoice)) state.effortChoice = '';
+  const effortSignature = JSON.stringify([model?.model, model?.default_reasoning_effort, efforts]);
+  if (effortSignature !== state.effortOptionsSignature) {
+    state.effortOptionsSignature = effortSignature;
+    ui.createEffort.replaceChildren();
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = model?.default_reasoning_effort
+      ? '模型默认（' + model.default_reasoning_effort + '）' : '模型默认';
+    ui.createEffort.append(defaultOption);
+    for (const effort of efforts) {
+      const option = document.createElement('option');
+      option.value = effort;
+      option.textContent = effort;
+      ui.createEffort.append(option);
+    }
+  }
+  ui.createEffort.value = state.effortChoice;
+  const busy = state.creatingTarget || state.switchingTarget || state.submitting || !!state.pendingSubmission;
+  ui.createModel.disabled = !models.length || busy;
+  ui.createEffort.disabled = !models.length || !efforts.length || busy;
+  ui.createTitle.disabled = busy;
+  ui.createTarget.disabled = !models.length || busy;
+  if (state.creatingTarget) ui.createTargetHelp.textContent = '正在创建任务并连接工作台…';
+  else if (state.pendingSubmission) ui.createTargetHelp.textContent = '请先确认上一条反馈的送达状态。';
+  else if (state.modelLoadError) ui.createTargetHelp.textContent = '无法读取可用模型：' + state.modelLoadError;
+  else ui.createTargetHelp.textContent = '新任务不会继承旧对话；当前场景和参考图会留在工作台。';
 }
 function renderTargetPicker() {
   ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.boundThreadId);
@@ -389,20 +452,21 @@ function renderTargetPicker() {
   }
   if (!targets.some((item) => item.thread_id === state.targetChoice)) state.targetChoice = bound || targets[0]?.thread_id || null;
   ui.targetSelect.value = state.targetChoice || '';
-  ui.targetSelect.disabled = !targets.length || state.switchingTarget;
+  ui.targetSelect.disabled = !targets.length || state.switchingTarget || state.creatingTarget;
   const chosen = targets.find((item) => item.thread_id === state.targetChoice);
-  ui.switchTarget.disabled = !state.targetChoice || state.targetChoice === bound || state.switchingTarget ||
+  ui.switchTarget.disabled = !state.targetChoice || state.targetChoice === bound || state.switchingTarget || state.creatingTarget ||
     state.submitting || !!state.pendingSubmission || targetIsBusy(chosen);
   const manualId = ui.manualTargetId.value.trim();
   const manualItem = targets.find((item) => item.thread_id === manualId);
   ui.manualSwitchTarget.disabled = !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(manualId) || manualId === bound ||
-    state.switchingTarget || state.submitting || !!state.pendingSubmission || targetIsBusy(manualItem);
-  ui.manualTargetId.disabled = state.switchingTarget;
-  ui.refreshTargets.disabled = state.loadingTargets || state.switchingTarget;
+    state.switchingTarget || state.creatingTarget || state.submitting || !!state.pendingSubmission || targetIsBusy(manualItem);
+  ui.manualTargetId.disabled = state.switchingTarget || state.creatingTarget;
+  ui.refreshTargets.disabled = state.loadingTargets || state.loadingModels || state.switchingTarget || state.creatingTarget;
   if (state.pendingSubmission) ui.targetHelp.textContent = '请先完成上次未确认的提交，再切换目标任务。';
   else if (targetIsBusy(chosen)) ui.targetHelp.textContent = '所选任务仍在执行；请等它空闲后切换。';
   else if (state.targetLoadError) ui.targetHelp.textContent = '无法读取任务列表：' + state.targetLoadError;
-  else ui.targetHelp.textContent = '先在 Codex 打开接手的任务；切换只影响之后提交的反馈。旧反馈仍留在原任务。';
+  else ui.targetHelp.textContent = '选择已打开的任务，或在下方新建。新反馈发往所选任务；未送达的旧反馈会等切回原任务。';
+  renderCreateTarget();
 }
 async function loadTargets() {
   if (state.deliveryMode !== 'external' || !state.boundThreadId || state.loadingTargets) return;
@@ -420,8 +484,61 @@ async function loadTargets() {
     renderTargetPicker();
   }
 }
+async function loadModels() {
+  if (state.deliveryMode !== 'external' || !state.boundThreadId || state.loadingModels) return;
+  state.loadingModels = true;
+  renderTargetPicker();
+  try {
+    const result = await api('/api/workspace/models');
+    state.models = Array.isArray(result.models) ? result.models : [];
+    state.defaultModel = typeof result.default_model === 'string' ? result.default_model : null;
+    state.modelLoadError = null;
+  } catch (error) {
+    state.modelLoadError = error.message;
+    throw error;
+  } finally {
+    state.loadingModels = false;
+    renderTargetPicker();
+  }
+}
+async function createTask() {
+  if (!state.modelChoice || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission) return;
+  const oldThreadId = state.boundThreadId;
+  const body = {model:state.modelChoice};
+  const title = ui.createTitle.value.trim();
+  if (title) body.title = title;
+  if (state.effortChoice) body.reasoning_effort = state.effortChoice;
+  state.creatingTarget = true;
+  renderTargetPicker();
+  try {
+    const result = await api('/api/workspace/targets', {method:'POST', body});
+    if (result.workspace) renderWorkspace(result.workspace);
+    await refreshWorkspace();
+    await loadTargets();
+    ui.createTitle.value = '';
+    ui.createTargetPanel.open = false;
+    announce('已新建并切换到任务：' + targetName(result.thread_id || state.boundThreadId));
+  } catch (error) {
+    try {
+      await refreshWorkspace();
+      await loadTargets();
+    } catch { /* Keep the original creation error visible. */ }
+    if (state.boundThreadId && state.boundThreadId !== oldThreadId) {
+      ui.createTargetPanel.open = false;
+      announce('新任务已连接：' + targetName(state.boundThreadId));
+    } else if (error.detail?.detail?.thread_id || error.detail?.thread_id) {
+      const createdThreadId = error.detail?.detail?.thread_id || error.detail.thread_id;
+      announce('任务已创建但未连接。请刷新任务列表后选择该任务：' + shortTaskId(createdThreadId), true);
+    } else {
+      announce('新建任务失败：' + error.message + '。请先刷新任务列表核对，再决定是否重试。', true);
+    }
+  } finally {
+    state.creatingTarget = false;
+    renderTargetPicker();
+  }
+}
 async function switchTask(threadId) {
-  if (!threadId || threadId === state.boundThreadId || state.switchingTarget || state.pendingSubmission) return;
+  if (!threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.pendingSubmission) return;
   const target = state.targets?.find((item) => item.thread_id === threadId);
   if (targetIsBusy(target)) return;
   state.switchingTarget = true;
@@ -431,7 +548,7 @@ async function switchTask(threadId) {
     await refreshWorkspace();
     ui.manualTargetId.value = '';
     await loadTargets();
-    announce('目标任务已切换到：' + targetName(threadId));
+    announce('目标任务已切换到：' + targetName(state.boundThreadId || threadId));
   } catch (error) {
     announce('切换任务失败：' + error.message, true);
   } finally {
@@ -2245,10 +2362,26 @@ function bindEvents() {
   });
   ui.refreshTargets.addEventListener('click', () => {
     loadTargets().catch((error) => announce('刷新任务列表失败：' + error.message, true));
+    loadModels().catch((error) => announce('刷新模型列表失败：' + error.message, true));
   });
   ui.switchTarget.addEventListener('click', () => switchTask(state.targetChoice));
   ui.manualTargetId.addEventListener('input', renderTargetPicker);
   ui.manualSwitchTarget.addEventListener('click', () => switchTask(ui.manualTargetId.value.trim()));
+  ui.createTargetPanel.addEventListener('toggle', () => {
+    if (ui.createTargetPanel.open && !state.models && !state.loadingModels) {
+      loadModels().catch(() => { /* The form shows the connection error. */ });
+    }
+  });
+  ui.createModel.addEventListener('change', () => {
+    state.modelChoice = ui.createModel.value || null;
+    state.effortChoice = '';
+    renderCreateTarget();
+  });
+  ui.createEffort.addEventListener('change', () => {
+    state.effortChoice = ui.createEffort.value || '';
+    renderCreateTarget();
+  });
+  ui.createTarget.addEventListener('click', createTask);
   document.querySelectorAll('.tool-button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.tool)));
   ui.groupSelect.addEventListener('change', () => {
     state.groupId = ui.groupSelect.value;

@@ -105,7 +105,10 @@ def _make_server_unlocked(
         # The CLI ID bootstraps the first binding. A later user-selected task
         # is durable and must survive service restarts with the same unit.
         persisted_id = (store.state.get("workspace") or {}).get("thread_id")
-        gateway.adapter = SharedDesktopAdapter(persisted_id or shared_thread_id, on_event=gateway.scoped_adapter_callback())
+        target_id = persisted_id or shared_thread_id
+        owned_ids = (store.state.get("workspace") or {}).get("created_thread_ids", [])
+        kwargs = {"allow_owned_resume": True} if target_id in owned_ids else {}
+        gateway.adapter = SharedDesktopAdapter(target_id, on_event=gateway.scoped_adapter_callback(), **kwargs)
     if enable_codex and adapter is None:
         from appserver_adapter import CodexAppServerAdapter
         gateway.adapter = CodexAppServerAdapter(
@@ -266,6 +269,12 @@ def _make_server_unlocked(
                 return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "delivery_mode": workspace["delivery_mode"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "request_feedback": workspace["request_feedback"]})
             if self.command == "GET" and path == "/api/workspace/targets":
                 return self._send_json(200, gateway.list_targets())
+            if self.command == "GET" and path == "/api/workspace/models":
+                return self._send_json(200, gateway.list_models())
+            if self.command == "POST" and path == "/api/workspace/targets":
+                self._require_browser_capability()
+                payload = self._read_json()
+                return self._send_json(201, gateway.create_target(payload.get("model"), reasoning_effort=payload.get("reasoning_effort"), title=payload.get("title")))
             if self.command == "POST" and path == "/api/workspace/target":
                 self._require_browser_capability()
                 payload = self._read_json()
@@ -409,7 +418,10 @@ def _make_server_unlocked(
             try:
                 self._dispatch()
             except APIError as exc:
-                self._send_json(exc.status, {"error": exc.message})
+                result = {"error": exc.message}
+                if exc.detail is not None:
+                    result.update(exc.detail)
+                self._send_json(exc.status, result)
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except Exception:

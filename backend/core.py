@@ -32,10 +32,11 @@ MAX_CROPS = 8
 
 
 class APIError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, *, detail: dict[str, Any] | None = None):
         super().__init__(message)
         self.status = status
         self.message = message
+        self.detail = detail
 
 
 def _now() -> str:
@@ -652,6 +653,8 @@ class SceneStore:
             if workspace is not None:
                 if workspace["project_dir"] != str(project):
                     raise APIError(409, "workspace is already bound to another project directory")
+                workspace.setdefault("created_thread_ids", [])
+                workspace.setdefault("created_thread_specs", {})
                 return copy.deepcopy(workspace)
             sessions = self.state["sessions"]
             if preferred_session_id is not None:
@@ -667,6 +670,8 @@ class SceneStore:
                 "project_dir": str(project),
                 "session_id": session_id,
                 "thread_id": None,
+                "created_thread_ids": [],
+                "created_thread_specs": {},
                 "created_at": _now(),
                 "agent": {"status": "disconnected", "turn_id": None, "error": None},
                 "queue": [],

@@ -21,6 +21,7 @@ from shared_thread_adapter import (  # noqa: E402
     SharedDesktopAdapter,
 )
 from shared_thread_bridge import (  # noqa: E402
+    OwnedEmptyThreadMissing,
     SharedThreadBridgeError,
     SharedThreadNotIdle,
     SharedThreadRPCRejected,
@@ -126,6 +127,35 @@ class FakeBoundAdapter:
 
 
 class SharedDesktopAdapterTests(unittest.TestCase):
+    def test_dead_creation_socket_falls_back_to_owned_resume(self) -> None:
+        class DeadBridge(FakeBridge):
+            def read_thread(self, include_turns: bool = False) -> dict:
+                raise SharedThreadBridgeError("socket closed before first turn")
+
+        anchor = DeadBridge()
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True, initial_bridge=anchor)
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", side_effect=OwnedEmptyThreadMissing("no rollout found")) as connect:
+            with self.assertRaises(OwnedEmptyThreadMissing):
+                adapter.start()
+        self.assertTrue(anchor.closed)
+        self.assertIsNone(adapter._initial_bridge)
+        self.assertTrue(connect.call_args.kwargs["allow_owned_resume"])
+        adapter.close()
+
+    def test_new_task_keeps_creation_subscription_until_first_feedback_turn(self) -> None:
+        bridge = FakeBridge()
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True, initial_bridge=bridge)
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread") as fresh_connection:
+            self.assertEqual(adapter.start(), THREAD_ID)
+            self.assertEqual(adapter.inspect_thread_status(), "idle")
+            self.assertFalse(bridge.closed)
+            started = adapter.start_turn("first visual feedback", [], message_id="feedback-first")
+            self.assertEqual(started["turn_id"], "turn-1")
+            fresh_connection.assert_not_called()
+            bridge.incoming.put({"method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": "turn-1", "status": "completed"}}})
+            wait_for(lambda: bridge.closed)
+        adapter.close()
+
     def test_busy_or_unavailable_preflight_returns_promptly_without_sending(self) -> None:
         for error in (SharedThreadNotIdle("task busy"), SharedThreadBridgeError("daemon unavailable")):
             with self.subTest(error=type(error).__name__):

@@ -88,6 +88,82 @@ class SharedThreadBridgeTests(unittest.TestCase):
                 self.assertEqual([(entry_path, thread["id"]) for entry_path, thread in records], [(path, THREAD_ID)])
                 self.assertTrue(ws.closed)
 
+    def test_owned_unloaded_task_resumes_only_on_unique_desktop_daemon(self) -> None:
+        class ResumableWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                super().send(data)
+                if json.loads(data).get("method") == "thread/resume":
+                    self.status = "idle"
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = root / ("a" * 64)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                path.chmod(0o600)
+                ws = ResumableWebSocket("notLoaded")
+                bridge = SharedThreadBridge.connect_for_thread(
+                    THREAD_ID, socket_dir=root, connector=lambda _path, _timeout: ws,
+                    allow_owned_resume=True, subscribe=True,
+                )
+                try:
+                    self.assertEqual(bridge.read_thread()["status"]["type"], "idle")
+                    self.assertEqual([item["method"] for item in ws.sent].count("thread/resume"), 1)
+                finally:
+                    bridge.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            first = root / ("a" * 64)
+            second = root / ("b" * 64)
+            connections = {first: ResumableWebSocket("notLoaded"), second: ResumableWebSocket("notLoaded")}
+            with socket.socket(socket.AF_UNIX) as left, socket.socket(socket.AF_UNIX) as right:
+                left.bind(str(first))
+                right.bind(str(second))
+                first.chmod(0o600)
+                second.chmod(0o600)
+                with self.assertRaisesRegex(SharedThreadBridgeError, "not loaded"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, socket_dir=root, connector=lambda path, _timeout: connections[path], allow_owned_resume=True,
+                    )
+                self.assertFalse(any(item["method"] == "thread/resume" for ws in connections.values() for item in ws.sent))
+
+    def test_model_catalog_and_task_creation_use_same_connection(self) -> None:
+        created = "01a0de73-9763-7432-8ca4-5892c0904234"
+
+        class CreationWebSocket(FakeWebSocket):
+            created = False
+
+            def send(self, data: str) -> None:
+                message = json.loads(data)
+                if message.get("method") == "thread/read" and self.created:
+                    self.sent.append(message)
+                    self.responses.append({"id": message["id"], "result": {"thread": {"id": created, "status": {"type": "idle"}}}})
+                    return
+                super().send(data)
+                if message.get("method") == "model/list":
+                    self.responses.append({"id": message["id"], "result": {"data": [{"model": "gpt-6-astra"}], "nextCursor": None}})
+                elif message.get("method") == "thread/start":
+                    self.created = True
+                    self.responses.append({"id": message["id"], "result": {"thread": {"id": created, "ephemeral": False}}})
+                elif message.get("method") == "thread/name/set":
+                    self.responses.append({"id": message["id"], "result": {}})
+
+        ws = CreationWebSocket()
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        self.assertEqual(bridge.list_models(), [{"model": "gpt-6-astra"}])
+        self.assertEqual(bridge.create_thread("gpt-6-astra", Path("/tmp/project"), reasoning_effort="ultra", title="Astra feedback"), created)
+        start = next(item for item in ws.sent if item.get("method") == "thread/start")
+        self.assertEqual(bridge.thread_id, created)
+        self.assertEqual(bridge.read_thread()["id"], created)
+        self.assertEqual(start["params"], {
+            "model": "gpt-6-astra", "cwd": "/tmp/project", "ephemeral": False,
+            "serviceName": "scene_feedback_workspace", "config": {"model_reasoning_effort": "ultra"},
+        })
+        self.assertTrue(any(item.get("method") == "thread/name/set" for item in ws.sent))
+
     def test_reads_exact_turn_history_without_inferring_from_idle(self) -> None:
         ws = FakeWebSocket("idle")
         ws.turns = [

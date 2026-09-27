@@ -1,8 +1,8 @@
 """Connect a visual-feedback gateway to a task already loaded by Codex Desktop.
 
 This module speaks App Server JSON-RPC over the desktop daemon's private Unix
-WebSocket.  It deliberately never starts or resumes a thread: another App
-Server process cannot own the desktop task's writer lock.  A caller must keep
+WebSocket.  Existing Desktop tasks are only used while loaded; workbench-owned
+tasks may be resumed on the same daemon after they unload.  A caller must keep
 the returned bridge connected while its turn runs and handle server requests
 (approvals, elicitation, user input) rather than approving them automatically.
 """
@@ -10,6 +10,7 @@ the returned bridge connected while its turn runs and handle server requests
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -48,6 +49,10 @@ class SharedThreadRPCRejected(SharedThreadBridgeError):
         self.method = method
         self.error = error
         super().__init__(f"{method} failed: {error}")
+
+
+class OwnedEmptyThreadMissing(SharedThreadBridgeError):
+    """A workbench-created zero-turn task has no persisted rollout to resume."""
 
 
 def _private_socket_candidates(socket_dir: Path | None = None) -> list[Path]:
@@ -105,12 +110,11 @@ def _connect(path: Path, timeout: float) -> Any:
 
 
 class SharedThreadBridge:
-    """One connection to an existing, idle desktop task.
+    """One connection to a task on the current Desktop App Server daemon.
 
-    Use :meth:`connect_for_thread` to find the daemon that already loaded the
-    task.  Do not create a fresh App Server or call ``thread/resume``.  Keep
-    this object open until a started turn finishes, and process messages from
-    :meth:`receive_message`, including server-initiated requests.
+    Use :meth:`connect_for_thread` for an existing task and
+    :meth:`connect_to_desktop` when creating a new one. Keep this connection
+    open until a started turn finishes, and process server-initiated requests.
     """
 
     def __init__(self, websocket_connection: Any, thread_id: str, *, timeout: float = 10.0, socket_path: Path | None = None) -> None:
@@ -134,6 +138,7 @@ class SharedThreadBridge:
         timeout: float = 10.0,
         require_idle: bool = True,
         subscribe: bool = False,
+        allow_owned_resume: bool = False,
         connector: Callable[[Path, float], Any] = _connect,
     ) -> "SharedThreadBridge":
         """Select the single daemon where ``thread_id`` is already loaded.
@@ -146,8 +151,11 @@ class SharedThreadBridge:
         if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id):
             raise ValueError("thread_id must be a Codex task UUID")
         loaded: list[tuple[SharedThreadBridge, dict[str, Any]]] = []
+        unloaded: list[SharedThreadBridge] = []
         errors: list[str] = []
-        for path in _private_socket_candidates(socket_dir):
+        missing_empty_rollout = False
+        candidates = _private_socket_candidates(socket_dir)
+        for path in candidates:
             bridge: SharedThreadBridge | None = None
             try:
                 ws = connector(path, timeout)
@@ -159,14 +167,37 @@ class SharedThreadBridge:
                 if thread.get("status", {}).get("type") != "notLoaded":
                     loaded.append((bridge, thread))
                 else:
-                    bridge.close()
+                    unloaded.append(bridge)
             except Exception as exc:
                 if bridge is not None:
                     bridge.close()
                 errors.append(f"{path.name}: {exc}")
+                if isinstance(exc, SharedThreadRPCRejected) and "no rollout found" in str(exc).lower():
+                    missing_empty_rollout = True
+        if not loaded and allow_owned_resume and len(unloaded) == 1 and len(candidates) == 1:
+            bridge = unloaded.pop()
+            try:
+                resumed = bridge._rpc("thread/resume", {"threadId": thread_id}).get("thread")
+                if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
+                    raise SharedThreadBridgeError("thread/resume returned the wrong owned task")
+                thread = bridge.read_thread()
+                loaded.append((bridge, thread))
+                subscribe = False  # thread/resume already subscribed this connection
+            except SharedThreadRPCRejected as exc:
+                bridge.close()
+                if "no rollout found" in str(exc).lower():
+                    raise OwnedEmptyThreadMissing(f"workbench-owned task {thread_id} has no persisted rollout") from exc
+                raise
+            except Exception:
+                bridge.close()
+                raise
+        for bridge in unloaded:
+            bridge.close()
         if len(loaded) != 1:
             for bridge, _thread in loaded:
                 bridge.close()
+            if allow_owned_resume and len(candidates) == 1 and missing_empty_rollout:
+                raise OwnedEmptyThreadMissing(f"workbench-owned task {thread_id} has no persisted rollout")
             detail = "multiple daemons have this task loaded" if loaded else "desktop task is not loaded by a shared daemon"
             if errors:
                 detail += f" ({'; '.join(errors)})"
@@ -184,6 +215,78 @@ class SharedThreadBridge:
                 bridge.close()
                 raise
         return bridge
+
+    @classmethod
+    def connect_to_desktop(
+        cls,
+        current_thread_id: str,
+        *,
+        socket_dir: Path | None = None,
+        timeout: float = 10.0,
+        connector: Callable[[Path, float], Any] = _connect,
+    ) -> "SharedThreadBridge":
+        """Open the current task's daemon, or the sole Desktop daemon if unloaded."""
+        if not isinstance(current_thread_id, str) or not _THREAD_ID.fullmatch(current_thread_id):
+            raise ValueError("current_thread_id must be a Codex task UUID")
+        paths = _private_socket_candidates(socket_dir)
+        if len(paths) != 1:
+            records = cls.discover_loaded_threads(socket_dir=socket_dir, timeout=timeout, connector=connector)
+            matches = {path for path, thread in records if thread.get("id") == current_thread_id}
+            if len(matches) != 1:
+                raise SharedThreadBridgeError("cannot identify a single Codex Desktop daemon for this workspace")
+            path = matches.pop()
+        else:
+            path = paths[0]
+        bridge: SharedThreadBridge | None = None
+        try:
+            bridge = cls(connector(path, timeout), current_thread_id, timeout=timeout, socket_path=path)
+            bridge._initialize()
+            return bridge
+        except Exception:
+            if bridge is not None:
+                bridge.close()
+            raise
+
+    def list_models(self) -> list[dict[str, Any]]:
+        """Return all visible model catalog entries from this Desktop daemon."""
+        entries: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(10):
+            params: dict[str, Any] = {"limit": 100, "includeHidden": False}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = self._rpc("model/list", params)
+            page = response.get("data")
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise SharedThreadBridgeError("model/list returned invalid models")
+            entries.extend(page)
+            next_cursor = response.get("nextCursor")
+            if next_cursor is None:
+                return entries
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+                raise SharedThreadBridgeError("model/list returned an invalid cursor")
+            cursor = next_cursor
+        raise SharedThreadBridgeError("too many Codex models to list safely")
+
+    def create_thread(self, model: str, cwd: Path, *, reasoning_effort: str | None = None, title: str | None = None) -> str:
+        """Create one persistent blank task on this exact Desktop daemon."""
+        params: dict[str, Any] = {"model": model, "cwd": str(cwd), "ephemeral": False, "serviceName": "scene_feedback_workspace"}
+        if reasoning_effort is not None:
+            params["config"] = {"model_reasoning_effort": reasoning_effort}
+        result = self._rpc("thread/start", params)
+        thread = result.get("thread")
+        thread_id = thread.get("id") if isinstance(thread, dict) else None
+        if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id) or thread.get("ephemeral") is True:
+            raise SharedThreadBridgeError("thread/start returned no persistent task ID")
+        if title:
+            try:
+                self._rpc("thread/name/set", {"threadId": thread_id, "name": title})
+            except SharedThreadBridgeError as exc:
+                # The task exists even if its optional title fails.  The
+                # caller must still record and bind it.
+                logging.warning("Could not name new Codex task %s: %s", thread_id, exc)
+        self.thread_id = thread_id
+        return thread_id
 
     @classmethod
     def discover_loaded_threads(
