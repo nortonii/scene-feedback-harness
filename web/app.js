@@ -231,7 +231,7 @@ function setSession(session) {
   ui.pill.textContent = ({open:'工作台已连接', submitted:'已结束', cancelled:'已取消', error:'连接失败', connecting:'连接中'})[state.sessionStatus] || state.sessionStatus;
   ui.pill.className = 'session-pill ' + state.sessionStatus;
   ui.submit.disabled = !editable();
-  ui.note.disabled = state.sessionStatus !== 'open';
+  ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   id('clear-annotations').disabled = state.sessionStatus !== 'open';
   if (state.sessionStatus !== 'open') {
@@ -333,7 +333,7 @@ function updateSubmitLabel() {
       : bound ? '发送到目标 Codex 任务' : '保存视觉反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
-    ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+    ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
@@ -353,7 +353,7 @@ function updateSubmitLabel() {
     : '发送到 Codex';
   ui.submit.querySelector('span:first-child').textContent = label;
   ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
-  ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+  ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
@@ -2288,8 +2288,7 @@ function insertSceneNodeReference(node, label) {
   else state.referencedSceneNodes[index] = captured;
   insertNoteReference(label || '场景节点', `[[node:${key}]]`);
 }
-function promptReferences() {
-  const note = ui.note.value;
+function promptReferences(note=ui.note.value) {
   if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
   const tokenPattern = /\[\[(object|annotation|node):([A-Za-z0-9_-]{1,64})(?::(\d+(?:\/\d+)*))?\]\]/g;
   const tokens = [...note.matchAll(tokenPattern)];
@@ -2328,12 +2327,23 @@ function promptReferences() {
   }
   return nodes;
 }
-async function feedbackPayload(referencedSceneNodes) {
+function clearSubmittedPrompt(submission) {
+  const submittedDraft = submission.draftNote;
+  const submittedNote = submission.payload.note;
+  const unchanged = typeof submittedDraft === 'string'
+    ? ui.note.value === submittedDraft
+    : ui.note.value.trim() === String(submittedNote || '').trim();
+  if (!unchanged) return false;
+  ui.note.value = '';
+  state.referencedSceneNodes = [];
+  return true;
+}
+async function feedbackPayload(referencedSceneNodes, promptText) {
   const snapshot = snapshotForFeedback();
   const imageBundle = await captureScene(snapshot);
   const annotatedReferences = await captureReferenceAnnotations();
   const submittedCamera = snapshot?.camera || cameraData();
-  const note = ui.note.value.trim();
+  const note = promptText.trim();
   return {
     scene_revision:snapshot?.scene_revision || state.sceneRevision,
     latest_scene_revision:state.sceneRevision,
@@ -2365,12 +2375,13 @@ async function feedbackPayload(referencedSceneNodes) {
 }
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || state.submitting || state.uploading) return;
+  const promptText = ui.note.value;
   let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
-    try { referencedSceneNodes = promptReferences(); }
+    try { referencedSceneNodes = promptReferences(promptText); }
     catch (error) { announce(error.message, true); ui.note.focus(); return; }
   }
-  if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length) {
+  if (!state.pendingSubmission && !state.annotations.length && !promptText.trim() && !state.references.length) {
     announce('请添加参考图、画标记，或填写提示后再发送。', true);
     return;
   }
@@ -2380,13 +2391,14 @@ async function submitFeedback() {
       !window.confirm('这条反馈针对场景版本 ' + chosenSnapshot.scene_revision + ' 的固定截图，当前已是版本 ' + state.sceneRevision + '。仍按旧截图发送给 Codex？')) return;
   state.submitting = true;
   ui.submit.disabled = true;
+  ui.note.disabled = true;
   ui.submit.querySelector('span:first-child').textContent = '正在准备图片…';
   try {
     if (!state.pendingSubmission) {
-      const payload = await feedbackPayload(referencedSceneNodes);
+      const payload = await feedbackPayload(referencedSceneNodes, promptText);
       const key = newId();
       state.pendingSubmission = {key, payload:{...payload, idempotency_key:key,
-        confirm_stale:!!staleSnapshot}};
+        confirm_stale:!!staleSnapshot}, draftNote:promptText};
       try { await writeOutbox(state.pendingSubmission); }
       catch (error) { state.pendingSubmission = null; throw error; }
     }
@@ -2394,8 +2406,10 @@ async function submitFeedback() {
     const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/feedback', {
       method:'POST', body:state.pendingSubmission.payload
     });
+    const submitted = state.pendingSubmission;
     await clearOutbox();
     state.pendingSubmission = null;
+    clearSubmittedPrompt(submitted);
     state.feedbackCount += 1;
     id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
     const delivery = result.delivery?.status || (state.deliveryMode === 'external' ? 'submitted' : 'queued');
