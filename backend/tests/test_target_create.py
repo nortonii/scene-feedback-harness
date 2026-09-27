@@ -148,6 +148,7 @@ class CreateTargetTests(unittest.TestCase):
         with patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=self.bridge):
             catalog = self.gateway.list_models()
         self.assertEqual(catalog["default_model"], "gpt-6-astra")
+        self.assertIs(catalog["permission_modes_supported"], True)
         self.assertEqual([item["model"] for item in catalog["models"]], ["gpt-6-astra"])
         self.assertEqual(catalog["models"][0]["supported_reasoning_efforts"], ["high", "ultra"])
 
@@ -226,7 +227,9 @@ class CreateTargetTests(unittest.TestCase):
                 connection.request("GET", "/api/workspace/models")
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
-                self.assertEqual(json.loads(response.read())["default_model"], "gpt-6-astra")
+                catalog = json.loads(response.read())
+                self.assertEqual(catalog["default_model"], "gpt-6-astra")
+                self.assertIs(catalog["permission_modes_supported"], True)
                 body = json.dumps({"model": "gpt-6-astra", "reasoning_effort": "high", "permission_mode": "read_only"})
                 connection.request("POST", "/api/workspace/targets", body=body, headers={"Content-Type": "application/json"})
                 response = connection.getresponse()

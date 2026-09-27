@@ -53,6 +53,7 @@ const state = {
   boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
+  canSetPermissions:false,
   modelOptionsSignature:null, effortOptionsSignature:null, modelLoadError:null, creatingTarget:false,
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
@@ -410,12 +411,13 @@ function renderCreateTarget() {
   const busy = state.creatingTarget || state.switchingTarget || state.submitting || !!state.pendingSubmission;
   ui.createModel.disabled = !models.length || busy;
   ui.createEffort.disabled = !models.length || !efforts.length || busy;
-  ui.createPermissions.disabled = busy;
+  ui.createPermissions.disabled = busy || !state.canSetPermissions;
   ui.createTitle.disabled = busy;
-  ui.createTarget.disabled = !models.length || busy;
+  ui.createTarget.disabled = !models.length || busy || !state.canSetPermissions;
   if (state.creatingTarget) ui.createTargetHelp.textContent = '正在创建任务并连接工作台…';
   else if (state.pendingSubmission) ui.createTargetHelp.textContent = '请先确认上一条反馈的送达状态。';
   else if (state.modelLoadError) ui.createTargetHelp.textContent = '无法读取可用模型：' + state.modelLoadError;
+  else if (!state.canSetPermissions) ui.createTargetHelp.textContent = '服务正在更新任务权限功能；请等当前回合结束后刷新页面。';
   else ui.createTargetHelp.textContent = '权限模式只应用于新任务；当前场景和参考图会留在工作台。';
 }
 function renderTargetPicker() {
@@ -501,8 +503,10 @@ async function loadModels() {
     const result = await api('/api/workspace/models');
     state.models = Array.isArray(result.models) ? result.models : [];
     state.defaultModel = typeof result.default_model === 'string' ? result.default_model : null;
+    state.canSetPermissions = result.permission_modes_supported === true;
     state.modelLoadError = null;
   } catch (error) {
+    state.canSetPermissions = false;
     state.modelLoadError = error.message;
     throw error;
   } finally {
@@ -511,7 +515,7 @@ async function loadModels() {
   }
 }
 async function createTask() {
-  if (!state.modelChoice || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission) return;
+  if (!state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission) return;
   const oldThreadId = state.boundThreadId;
   const body = {model:state.modelChoice, permission_mode:ui.createPermissions.value};
   const title = ui.createTitle.value.trim();

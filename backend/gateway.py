@@ -295,7 +295,7 @@ class WorkspaceGateway:
         try:
             bridge = SharedThreadBridge.connect_to_desktop(current_id)
             try:
-                return self._visible_models(bridge)
+                return {**self._visible_models(bridge), "permission_modes_supported": True}
             finally:
                 bridge.close()
         except Exception as exc:
