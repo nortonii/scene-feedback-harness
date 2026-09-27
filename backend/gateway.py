@@ -188,8 +188,29 @@ class WorkspaceGateway:
             return False
         return directory == self.project_dir or directory in self.project_dir.parents or self.project_dir in directory.parents
 
+    @staticmethod
+    def _target_accepts_direct_input(thread: dict[str, Any]) -> bool:
+        """Exclude child agents, which are not user-owned Desktop tasks."""
+        return (thread.get("threadSource") != "subagent"
+                and thread.get("canAcceptDirectInput") is not False
+                and not thread.get("parentThreadId"))
+
+    @staticmethod
+    def _target_summary(thread: dict[str, Any]) -> dict[str, Any]:
+        thread_id = thread["id"]
+        name = thread.get("name")
+        title = name.strip()[:160] if isinstance(name, str) else ""
+        status = thread.get("status")
+        return {
+            "thread_id": thread_id,
+            "title": title or f"未命名任务 · {thread_id[:13]}",
+            "model": thread.get("model") if isinstance(thread.get("model"), str) else None,
+            "reasoning_effort": thread.get("reasoningEffort") if isinstance(thread.get("reasoningEffort"), str) else None,
+            "status": status.get("type") if isinstance(status, dict) else None,
+        }
+
     def list_targets(self) -> dict[str, Any]:
-        """Show compatible tasks already loaded by the bound Desktop daemon."""
+        """Show compatible user tasks and the current task's saved title."""
         current_id = self._target_thread()
         try:
             discovered = SharedThreadBridge.discover_loaded_threads()
@@ -207,57 +228,41 @@ class WorkspaceGateway:
         candidates = []
         for path, thread in discovered:
             thread_id = thread.get("id")
-            if not isinstance(thread_id, str) or counts.get(thread_id) != 1 or (current_paths and path not in current_paths) or not self._target_cwd_allowed(thread):
+            if (not isinstance(thread_id, str) or counts.get(thread_id) != 1
+                    or (current_paths and path not in current_paths)
+                    or not self._target_cwd_allowed(thread)
+                    or not self._target_accepts_direct_input(thread)):
                 continue
-            title = thread.get("name") or thread.get("preview") or "Untitled Codex task"
-            if not isinstance(title, str):
-                title = "Untitled Codex task"
-            status = thread.get("status")
-            candidates.append({
-                "thread_id": thread_id,
-                "title": title.strip()[:160] or "Untitled Codex task",
-                "model": thread.get("model") if isinstance(thread.get("model"), str) else None,
-                "reasoning_effort": thread.get("reasoningEffort") if isinstance(thread.get("reasoningEffort"), str) else None,
-                "status": status.get("type") if isinstance(status, dict) else None,
-            })
+            candidates.append(self._target_summary(thread))
         with self.store.lock:
             owned_ids = tuple(self.store.state["workspace"].get("created_thread_ids", []))
         loaded_ids = {item["thread_id"] for item in candidates}
-        if any(thread_id not in loaded_ids for thread_id in owned_ids):
+        missing_ids = [thread_id for thread_id in dict.fromkeys((current_id, *owned_ids)) if thread_id not in loaded_ids]
+        if missing_ids:
             try:
                 bridge = SharedThreadBridge.connect_to_desktop(current_id)
                 try:
-                    for thread_id in owned_ids:
-                        if thread_id in loaded_ids:
-                            continue
+                    for thread_id in missing_ids:
                         try:
                             thread = bridge.read_loaded_thread(thread_id)
                         except SharedThreadRPCRejected as exc:
-                            if "no rollout found" in str(exc).lower():
+                            if thread_id in owned_ids and "no rollout found" in str(exc).lower():
                                 with self.store.lock:
                                     spec = self.store.state["workspace"].get("created_thread_specs", {}).get(thread_id)
                                 if isinstance(spec, dict):
-                                    candidates.append({"thread_id": thread_id, "title": spec.get("title") or "Untitled Codex task", "model": spec.get("model"), "reasoning_effort": spec.get("reasoning_effort"), "status": "recoverable"})
+                                    name = spec.get("title")
+                                    title = name.strip()[:160] if isinstance(name, str) else ""
+                                    candidates.append({"thread_id": thread_id, "title": title or f"未命名任务 · {thread_id[:13]}", "model": spec.get("model"), "reasoning_effort": spec.get("reasoning_effort"), "status": "recoverable"})
                             continue
                         except Exception:
                             continue
-                        if not self._target_cwd_allowed(thread):
+                        if not self._target_cwd_allowed(thread) or not self._target_accepts_direct_input(thread):
                             continue
-                        status = thread.get("status") or {}
-                        title = thread.get("name") or thread.get("preview") or "Untitled Codex task"
-                        if not isinstance(title, str):
-                            title = "Untitled Codex task"
-                        candidates.append({
-                            "thread_id": thread_id,
-                            "title": title.strip()[:160] or "Untitled Codex task",
-                            "model": thread.get("model") if isinstance(thread.get("model"), str) else None,
-                            "reasoning_effort": thread.get("reasoningEffort") if isinstance(thread.get("reasoningEffort"), str) else None,
-                            "status": status.get("type") if isinstance(status, dict) else None,
-                        })
+                        candidates.append(self._target_summary(thread))
                 finally:
                     bridge.close()
             except Exception:
-                logging.exception("Could not inspect unloaded workbench-owned Codex tasks")
+                logging.exception("Could not inspect unloaded Codex tasks")
         return {"targets": candidates, "thread_id": current_id}
 
     @staticmethod
@@ -558,6 +563,8 @@ class WorkspaceGateway:
             if len(matches) != 1 or (current_paths and matches[0][0] not in current_paths):
                 raise APIError(409, "target task is not available in the same Codex Desktop daemon")
             target = matches[0][1]
+            if not self._target_accepts_direct_input(target):
+                raise APIError(409, "target is a Codex subagent and cannot receive direct input")
             if not self._target_cwd_allowed(target):
                 raise APIError(409, "target task cwd cannot access this workspace project")
             status = target.get("status")

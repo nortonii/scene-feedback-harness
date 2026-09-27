@@ -28,6 +28,7 @@ const ui = {
   compareImage:id('compare-image'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
   targetPicker:id('target-picker'), currentTarget:id('current-target'), targetSelect:id('target-select'),
+  targetChoiceDetails:id('target-choice-details'),
   switchTarget:id('switch-target'), refreshTargets:id('refresh-targets'), targetHelp:id('target-help'),
   manualTargetId:id('manual-target-id'), manualSwitchTarget:id('manual-switch-target'),
   createTargetPanel:id('create-target-panel'), createTitle:id('create-title'), createModel:id('create-model'),
@@ -342,11 +343,12 @@ function updateSubmitLabel() {
   else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
 }
 function shortTaskId(threadId) {
-  return typeof threadId === 'string' && threadId.length > 12 ? threadId.slice(0, 8) + '…' : (threadId || '未绑定');
+  return typeof threadId === 'string' && threadId.length > 12
+    ? threadId.slice(0, 8) + '…' + threadId.slice(-6) : (threadId || '未绑定');
 }
 function targetStatusLabel(status) {
   return ({idle:'空闲',inProgress:'执行中',in_progress:'执行中',running:'执行中',active:'执行中',completed:'已完成',
-    archived:'已归档',notLoaded:'可恢复',recoverable:'可恢复',unknown:'状态未知'})[status] || (status || '');
+    archived:'已归档',notLoaded:'未打开',recoverable:'可恢复',unknown:'状态未知'})[status] || (status || '');
 }
 function targetIsBusy(item) {
   return ['inProgress', 'in_progress', 'running', 'active', 'awaiting_approval'].includes(item?.status);
@@ -436,11 +438,12 @@ function renderTargetPicker() {
     for (const item of targets) {
       const option = document.createElement('option');
       option.value = item.thread_id;
-      option.textContent = (item.title || shortTaskId(item.thread_id)) +
+      const displayTitle = item.title?.startsWith('未命名任务 · ') ? '未命名任务' : (item.title || '未命名任务');
+      option.textContent = displayTitle + ' · ' + shortTaskId(item.thread_id) +
         (targetModelLabel(item) ? ' · ' + targetModelLabel(item) : '') +
         (item.status ? ' · ' + targetStatusLabel(item.status) : '') +
         (item.thread_id === bound ? '（当前）' : '');
-      option.title = item.thread_id;
+      option.title = (item.title || '未命名任务') + ' · ' + item.thread_id;
       ui.targetSelect.append(option);
     }
     if (!targets.length) {
@@ -454,6 +457,10 @@ function renderTargetPicker() {
   ui.targetSelect.value = state.targetChoice || '';
   ui.targetSelect.disabled = !targets.length || state.switchingTarget || state.creatingTarget;
   const chosen = targets.find((item) => item.thread_id === state.targetChoice);
+  ui.targetChoiceDetails.textContent = chosen
+    ? '已选：' + (chosen.title || '未命名任务') +
+      (targetModelLabel(chosen) ? ' · ' + targetModelLabel(chosen) : '') + ' · ' + chosen.thread_id
+    : '尚未选择任务';
   ui.switchTarget.disabled = !state.targetChoice || state.targetChoice === bound || state.switchingTarget || state.creatingTarget ||
     state.submitting || !!state.pendingSubmission || targetIsBusy(chosen);
   const manualId = ui.manualTargetId.value.trim();

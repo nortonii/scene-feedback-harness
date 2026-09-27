@@ -9,7 +9,7 @@ import json
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -129,6 +129,50 @@ class TargetSwitchTests(unittest.TestCase):
             with self.assertRaisesRegex(APIError, "single Codex Desktop daemon"):
                 self.gateway.switch_target(NEW)
         self.assertEqual(self.gateway.state()["thread_id"], OLD)
+
+    def test_list_uses_task_names_and_excludes_subagents(self) -> None:
+        self.gateway.start()
+        subagent_id = "31a0de73-9763-7432-8ca4-5892c0904234"
+        unnamed_id = "41a0de73-9763-7432-8ca4-5892c0904234"
+        socket = Path("/tmp/private-desktop-a")
+        records = self.catalog()
+        records[0][1]["preview"] = "First user message, not the task title"
+        records[1][1]["preview"] = "Another first message"
+        records.extend([
+            (socket, {"id": subagent_id, "cwd": str(self.project), "status": {"type": "idle"},
+                      "threadSource": "subagent", "canAcceptDirectInput": False, "parentThreadId": OLD}),
+            (socket, {"id": unnamed_id, "cwd": str(self.project), "status": {"type": "idle"},
+                      "threadSource": "user", "canAcceptDirectInput": True, "preview": "Long instruction that is not a name"}),
+        ])
+        with patch("gateway.SharedThreadBridge.discover_loaded_threads", return_value=records):
+            result = self.gateway.list_targets()
+            with self.assertRaisesRegex(APIError, "subagent"):
+                self.gateway.switch_target(subagent_id)
+        titles = {entry["thread_id"]: entry["title"] for entry in result["targets"]}
+        self.assertEqual(titles[OLD], "Previous Astra")
+        self.assertEqual(titles[NEW], "New Astra")
+        self.assertEqual(titles[unnamed_id], "未命名任务 · " + unnamed_id[:13])
+        self.assertNotIn(subagent_id, titles)
+
+    def test_list_reads_unloaded_current_task_name(self) -> None:
+        self.gateway.start()
+        socket = Path("/tmp/private-desktop-a")
+        other = self.catalog()[1]
+        bridge = Mock()
+        bridge.read_loaded_thread.return_value = {
+            "id": OLD, "cwd": str(self.root), "status": {"type": "notLoaded"},
+            "threadSource": "user", "name": "重建 Assembly101 非人体部分", "preview": "Unhelpful first message",
+            "model": "gpt-6-sol",
+        }
+        with patch("gateway.SharedThreadBridge.discover_loaded_threads", return_value=[other]), \
+                patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=bridge):
+            targets = self.gateway.list_targets()["targets"]
+        self.assertEqual(len(targets), 2)
+        current = next(entry for entry in targets if entry["thread_id"] == OLD)
+        self.assertEqual(current["title"], "重建 Assembly101 非人体部分")
+        self.assertEqual(current["status"], "notLoaded")
+        bridge.read_loaded_thread.assert_called_once_with(OLD)
+        bridge.close.assert_called_once()
 
     def test_unloaded_old_task_can_be_replaced_but_active_delivery_cannot(self) -> None:
         with patch("gateway.SharedThreadBridge.discover_loaded_threads", return_value=[self.catalog()[1]]), patch("gateway.SharedDesktopAdapter", side_effect=self.replacement), patch.object(self.gateway, "wake"):

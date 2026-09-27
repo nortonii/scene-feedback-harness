@@ -122,6 +122,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .target-actions select { min-width: 0; flex: 1; height: 30px; border: 1px solid #52636d; border-radius: 5px; background: #24333d; color: #e0eaeb; padding: 0 5px; font-size: 10px; }
 .target-actions input { min-width: 0; flex: 1; height: 30px; border: 1px solid #52636d; border-radius: 5px; background: #24333d; color: #e0eaeb; padding: 0 7px; font-size: 10px; }
 .target-actions .compact-button { padding: 0 7px; }
+.target-choice-details { margin-top: 6px; color: #b9cbd1; font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
 .target-manual { margin-top: 7px; color: #96aeb6; font-size: 9px; }
 .target-manual summary { cursor: pointer; }
 .target-manual .target-actions { margin-top: 7px; }
