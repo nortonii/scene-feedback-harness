@@ -109,7 +109,7 @@ Feedback known not to have been sent stays queued while the connection is unavai
 
 To change agents, open the task that should take over in Codex Desktop, then select it under “Codex task receiving feedback” in the workbench. The current scene and references stay in place. New feedback goes to the selected task; unsent feedback remains assigned to its original task and resumes only if you switch back. The Codex task controls its own model; changing the workbench target does not change that model.
 
-You can also expand “Create Codex task” in the same panel, select an available model and reasoning effort, and click “Create and switch.” This starts a fresh conversation without copying the previous chat history. The scene, references, and workbench annotations remain available. No task is created until you click the button.
+You can also expand “Create Codex task” in the same panel, select an available model, reasoning effort, and permission mode, then click “Create and switch.” The default is workspace write with approvals when needed. You can explicitly choose full access (`never` approval policy, removing routine file and command sandbox approvals) or read only (writes require approval). Tool-specific consent or interaction may still need a response. This starts a fresh conversation without copying the previous chat history. The scene, references, and workbench annotations remain available. No task is created until you click the button. The new task's permissions cannot retroactively change a turn already running or awaiting approval.
 
 ## Open the page from another device on the LAN
 

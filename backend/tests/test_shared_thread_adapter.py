@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -54,6 +55,12 @@ class FakeBridge:
         self.responses: list[tuple[int | str, dict]] = []
         self.active_turn_id: str | None = None
         self.closed = False
+        self.descendants: set[str] = set()
+        self.verified_threads: list[str] = []
+
+    def is_descendant_thread(self, thread_id: str) -> bool:
+        self.verified_threads.append(thread_id)
+        return thread_id in self.descendants
 
     def settimeout(self, _seconds: float) -> None:
         pass
@@ -281,6 +288,10 @@ class SharedDesktopAdapterTests(unittest.TestCase):
             self.assertEqual(events[-1]["method"], "adapter/request_pending")
             active.incoming.put({"method": "serverRequest/resolved", "params": {"threadId": THREAD_ID, "requestId": 99}})
             wait_for(lambda: adapter.status()["pending_requests"] == [])
+            resolved = [event for event in events if event["method"] == "adapter/request_resolved"]
+            self.assertEqual(resolved[-1]["params"], {
+                "thread_id": THREAD_ID, "source_thread_id": THREAD_ID, "request_id": 99,
+            })
             active.incoming.put({"id": 100, "method": "item/commandExecution/requestApproval", "params": {"threadId": THREAD_ID, "turnId": "turn-1", "command": "echo inspect"}})
             wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
             adapter.respond_to_request(100, {"decision": "decline"})
@@ -289,6 +300,93 @@ class SharedDesktopAdapterTests(unittest.TestCase):
             wait_for(lambda: adapter.status()["turn_state"] == "idle" and active.closed)
             self.assertTrue(any(event["method"] == "turn/completed" for event in events))
             self.assertEqual(adapter.status()["pending_requests"], [])
+            adapter.close()
+
+    def test_ignores_requests_for_other_threads_without_losing_own_requests_or_rpc_replies(self) -> None:
+        bridge = FakeBridge()
+        events: list[dict] = []
+        other_thread_id = "01a0e1e3-a8d6-7a10-a33b-ac3bc245fd24"
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge):
+            adapter = SharedDesktopAdapter(THREAD_ID, events.append)
+            adapter.start_turn("Fix the cabinet", [], message_id="feedback-1")
+            bridge.incoming.put({"id": 200, "method": "item/tool/call", "params": {
+                "threadId": other_thread_id, "turnId": "other-turn", "tool": "list_threads",
+            }})
+            bridge.incoming.put({"id": 201, "method": "item/commandExecution/requestApproval", "params": {
+                "threadId": THREAD_ID, "turnId": "turn-1", "command": "echo inspect",
+            }})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
+            self.assertEqual(adapter.status()["pending_requests"][0]["id"], 201)
+            self.assertEqual([event["params"]["request_id"] for event in events if event["method"] == "adapter/request_pending"], [201])
+
+            # Some App Server requests omit threadId. Keep them on the
+            # subscribed task's connection rather than dropping a real prompt.
+            bridge.incoming.put({"id": 202, "method": "mcpServer/elicitation/request", "params": {"mode": "form"}})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 2)
+            self.assertEqual({request["id"] for request in adapter.status()["pending_requests"]}, {201, 202})
+
+            reply_ready = threading.Event()
+            reply: dict = {}
+            with adapter._lock:
+                adapter._pending_rpc["203"] = (reply_ready, reply)
+            bridge.incoming.put({"id": 203, "result": {"ok": True}})
+            self.assertTrue(reply_ready.wait(2.0))
+            self.assertEqual(reply, {"id": 203, "result": {"ok": True}})
+
+            bridge.incoming.put({"method": "turn/completed", "params": {
+                "threadId": THREAD_ID, "turn": {"id": "turn-1", "status": "completed"},
+            }})
+            wait_for(lambda: bridge.closed)
+            adapter.close()
+
+    def test_verified_subagent_approval_keeps_its_thread_id_and_original_response_socket(self) -> None:
+        bridge = FakeBridge()
+        events: list[dict] = []
+        child_thread_id = "01a0e1e3-a8d6-7a10-a33b-ac3bc245fd24"
+        bridge.descendants.add(child_thread_id)
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge):
+            adapter = SharedDesktopAdapter(THREAD_ID, events.append)
+            adapter.start_turn("Fix the cabinet", [], message_id="feedback-1")
+            bridge.incoming.put({"id": 220, "method": "item/commandExecution/requestApproval", "params": {
+                "threadId": child_thread_id, "turnId": "child-turn", "command": "echo inspect",
+            }})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
+            self.assertEqual(bridge.verified_threads, [child_thread_id])
+            request_event = next(event for event in events if event["method"] == "adapter/request_pending")
+            self.assertEqual(request_event["params"]["thread_id"], THREAD_ID)
+            self.assertEqual(request_event["params"]["source_thread_id"], child_thread_id)
+            self.assertEqual(request_event["params"]["params"]["threadId"], child_thread_id)
+            adapter.respond_to_request(220, {"decision": "decline"})
+            self.assertEqual(bridge.responses, [(220, {"decision": "decline"})])
+
+            bridge.incoming.put({"id": 221, "method": "item/tool/requestUserInput", "params": {
+                "threadId": child_thread_id, "turnId": "child-turn", "questions": [],
+            }})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
+            bridge.incoming.put({"method": "serverRequest/resolved", "params": {
+                "threadId": THREAD_ID, "requestId": 221,
+            }})
+            bridge.incoming.put({"method": "serverRequest/resolved", "params": {
+                "threadId": child_thread_id, "requestId": "221",
+            }})
+            # Processed in order: a later unrelated request confirms that
+            # both incorrect resolutions have passed through the read loop.
+            bridge.incoming.put({"id": 222, "method": "item/commandExecution/requestApproval", "params": {
+                "threadId": THREAD_ID, "turnId": "turn-1", "command": "true",
+            }})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 2)
+            self.assertEqual({entry["id"] for entry in adapter.status()["pending_requests"]}, {221, 222})
+            bridge.incoming.put({"method": "serverRequest/resolved", "params": {
+                "threadId": child_thread_id, "requestId": 221,
+            }})
+            wait_for(lambda: len(adapter.status()["pending_requests"]) == 1)
+            self.assertEqual(adapter.status()["pending_requests"][0]["id"], 222)
+            resolved = [event for event in events if event["method"] == "adapter/request_resolved"]
+            self.assertEqual([event["params"]["source_thread_id"] for event in resolved], [child_thread_id])
+            bridge.incoming.put({"method": "turn/completed", "params": {
+                "threadId": THREAD_ID, "turn": {"id": "turn-1", "status": "completed"},
+            }})
+            wait_for(lambda: bridge.closed)
             adapter.close()
 
     def test_uncertain_turn_is_reported_and_not_retried(self) -> None:
@@ -385,6 +483,63 @@ class BoundGatewayTests(unittest.TestCase):
         self.assertIsNone(state["active_feedback_id"])
         self.assertEqual(state["agent"]["status"], "idle")
         self.assertEqual(len(adapter.calls), 1)
+        gateway.close()
+
+    def test_resolved_requests_clear_only_matching_source_and_keep_agent_status_accurate(self) -> None:
+        adapter = FakeBoundAdapter()
+        gateway = WorkspaceGateway(self.store, self.project, adapter=adapter, external_review=True)
+        gateway.start()
+        packet = gateway.submit(gateway.state()["session_id"], {
+            "idempotency_key": "resolution-1", "scene_revision": 1, "note": "Fix the cabinet",
+        })
+        wait_for(lambda: gateway.state()["agent"]["status"] == "running")
+        child_thread_id = "01a0e1e3-a8d6-7a10-a33b-ac3bc245fd24"
+        unrelated_thread_id = "01a0e1e3-d089-7d60-aff6-12210b9d8e54"
+
+        def pending(source: str, request_id: int) -> None:
+            gateway.on_adapter_event({"method": "adapter/request_pending", "params": {
+                "thread_id": THREAD_ID, "source_thread_id": source, "request_id": request_id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"threadId": source, "command": "echo inspect"},
+            }})
+
+        pending(THREAD_ID, 700)
+        pending(child_thread_id, 700)
+        self.assertEqual(len(gateway.state()["approvals"]), 2)
+        self.assertEqual(gateway.state()["agent"]["status"], "awaiting_approval")
+        gateway.on_adapter_event({"method": "adapter/request_resolved", "params": {
+            "thread_id": unrelated_thread_id, "source_thread_id": unrelated_thread_id, "request_id": 700,
+        }})
+        gateway.on_adapter_event({"method": "adapter/request_resolved", "params": {
+            "thread_id": THREAD_ID, "source_thread_id": unrelated_thread_id, "request_id": 700,
+        }})
+        self.assertEqual(len(gateway.state()["approvals"]), 2)
+        gateway.on_adapter_event({"method": "adapter/request_resolved", "params": {
+            "thread_id": THREAD_ID, "source_thread_id": child_thread_id, "request_id": 700,
+        }})
+        self.assertEqual([item["source_thread_id"] for item in gateway.state()["approvals"]], [THREAD_ID])
+        self.assertEqual(gateway.state()["agent"]["status"], "awaiting_approval")
+        gateway.on_adapter_event({"method": "serverRequest/resolved", "params": {
+            "threadId": THREAD_ID, "requestId": 700,
+        }})
+        self.assertEqual(gateway.state()["approvals"], [])
+        self.assertEqual(gateway.state()["agent"]["status"], "running")
+
+        pending(THREAD_ID, 701)
+        pending(child_thread_id, 702)
+        first_id = gateway.state()["approvals"][0]["approval_id"]
+        second_id = gateway.state()["approvals"][1]["approval_id"]
+        gateway.respond_to_approval(first_id, {"decision": "decline"})
+        self.assertEqual(gateway.state()["agent"]["status"], "awaiting_approval")
+        gateway.respond_to_approval(second_id, {"decision": "decline"})
+        self.assertEqual(gateway.state()["agent"]["status"], "running")
+        self.assertEqual(adapter.responses, [(701, {"decision": "decline"}), (702, {"decision": "decline"})])
+
+        gateway.on_adapter_event({"method": "turn/completed", "params": {
+            "threadId": THREAD_ID, "turn": {"id": gateway.state()["agent"]["turn_id"], "status": "completed"},
+        }})
+        self.assertEqual(gateway.state()["queue"][0]["feedback_id"], packet["feedback_id"])
+        self.assertEqual(gateway.state()["agent"]["status"], "idle")
         gateway.close()
 
     def test_durable_queue_moves_from_queued_to_running_to_completed(self) -> None:

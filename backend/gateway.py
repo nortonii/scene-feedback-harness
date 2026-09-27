@@ -374,7 +374,17 @@ class WorkspaceGateway:
                 selection = next((item for item in catalog["models"] if item["model"] == spec.get("model")), None)
                 if selection is None or spec.get("reasoning_effort") not in selection["supported_reasoning_efforts"]:
                     raise SharedThreadBridgeError("saved model or reasoning effort is no longer available")
-                new_id = bridge.create_thread(spec["model"], self.project_dir, reasoning_effort=spec["reasoning_effort"], title=spec.get("title"))
+                # Legacy specs did not record permissions.  Preserve the
+                # narrower behavior when recreating them instead of silently
+                # granting workspace writes.
+                spec.setdefault("permission_mode", "read_only")
+                new_id = bridge.create_thread(
+                    spec["model"],
+                    self.project_dir,
+                    reasoning_effort=spec["reasoning_effort"],
+                    title=spec.get("title"),
+                    permission_mode=spec["permission_mode"],
+                )
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
                     owned = workspace.setdefault("created_thread_ids", [])
@@ -444,11 +454,20 @@ class WorkspaceGateway:
                 logging.exception("Could not close missing empty Codex task adapter")
         self.wake()
 
-    def create_target(self, model: Any, *, reasoning_effort: Any = None, title: Any = None) -> dict[str, Any]:
+    def create_target(
+        self,
+        model: Any,
+        *,
+        reasoning_effort: Any = None,
+        title: Any = None,
+        permission_mode: Any = "workspace_write",
+    ) -> dict[str, Any]:
         """Create a fresh Desktop task, then route future feedback to it."""
         current_id = self._target_thread()
         if not isinstance(model, str) or not model:
             raise APIError(400, "select a Codex model")
+        if not isinstance(permission_mode, str) or permission_mode not in {"full_access", "workspace_write", "read_only"}:
+            raise APIError(400, "permission_mode must be full_access, workspace_write, or read_only")
         if reasoning_effort is not None and not isinstance(reasoning_effort, str):
             raise APIError(400, "reasoning_effort must be a supported value")
         if title is not None and (not isinstance(title, str) or not title.strip() or len(title.strip()) > 120 or any(ord(ch) < 32 for ch in title)):
@@ -476,7 +495,13 @@ class WorkspaceGateway:
                 if effort is not None and effort not in efforts:
                     raise APIError(400, "reasoning_effort is not supported by the selected model")
                 try:
-                    created_id = bridge.create_thread(model, self.project_dir, reasoning_effort=effort, title=name)
+                    created_id = bridge.create_thread(
+                        model,
+                        self.project_dir,
+                        reasoning_effort=effort,
+                        title=name,
+                        permission_mode=permission_mode,
+                    )
                 except SharedThreadRPCRejected as exc:
                     raise APIError(409, f"Codex Desktop rejected task creation: {exc}") from exc
                 except SharedThreadBridgeError as exc:
@@ -489,7 +514,12 @@ class WorkspaceGateway:
                     owned = workspace.setdefault("created_thread_ids", [])
                     if created_id not in owned:
                         owned.append(created_id)
-                        workspace.setdefault("created_thread_specs", {})[created_id] = {"model": model, "reasoning_effort": effort, "title": name}
+                        workspace.setdefault("created_thread_specs", {})[created_id] = {
+                            "model": model,
+                            "reasoning_effort": effort,
+                            "title": name,
+                            "permission_mode": permission_mode,
+                        }
                         try:
                             self.store._save()
                         except Exception:
@@ -1236,6 +1266,16 @@ class WorkspaceGateway:
         lines += ["", "红线、箭头、编号、框和画笔痕迹是用户后画的提示，不是参考图中的真实几何。请结合图像和原话继续当前重建任务；修改完成后调用 workspace_publish_scene 发布新的 GLB。"]
         return "\n".join(lines), image_paths
 
+    @staticmethod
+    def _update_agent_after_approval(workspace: dict[str, Any]) -> None:
+        agent = workspace["agent"]
+        if workspace["approvals"]:
+            agent["status"] = "awaiting_approval"
+        elif workspace.get("active_feedback_id"):
+            agent["status"] = "running"
+        elif agent.get("status") == "awaiting_approval":
+            agent["status"] = "idle"
+
     def on_adapter_event(self, event: dict[str, Any]) -> None:
         method = event.get("method", "")
         params = event.get("params") or {}
@@ -1252,6 +1292,7 @@ class WorkspaceGateway:
                 details = params.get("params", {})
                 if not isinstance(details, dict):
                     details = {}
+                source_thread_id = params.get("source_thread_id") or details.get("threadId") or params.get("thread_id")
                 encoded = json.dumps(details, ensure_ascii=False, allow_nan=False)
                 too_large = len(encoded.encode("utf-8")) > 64 * 1024
                 questions = details.get("questions")
@@ -1263,6 +1304,7 @@ class WorkspaceGateway:
                 request = {
                     "approval_id": approval_id,
                     "request_id": params.get("request_id"),
+                    "source_thread_id": source_thread_id,
                     "kind": params.get("method"),
                     "prompt": encoded[:4000],
                     "details": None if too_large else copy.deepcopy(details),
@@ -1276,6 +1318,29 @@ class WorkspaceGateway:
                     workspace["agent"]["status"] = "awaiting_approval"
                     self.store._save()
                 self.store.workspace_event("approval_requested", {"approval_id": approval_id, "kind": request["kind"], "prompt": request["prompt"], "details_truncated": too_large})
+            elif method in {"adapter/request_resolved", "serverRequest/resolved"}:
+                request_id = params.get("request_id") if method == "adapter/request_resolved" else params.get("requestId")
+                source_thread_id = params.get("source_thread_id") or params.get("threadId")
+                if not isinstance(request_id, (int, str)) or isinstance(request_id, bool):
+                    return
+                with self.store.lock:
+                    workspace = self.store.state["workspace"]
+                    if source_thread_id is None:
+                        source_thread_id = workspace.get("thread_id")
+                    if not isinstance(source_thread_id, str) or not source_thread_id:
+                        return
+                    resolved = [entry for entry in workspace["approvals"]
+                                if type(entry.get("request_id")) is type(request_id)
+                                and entry.get("request_id") == request_id
+                                and (entry.get("source_thread_id") or workspace.get("thread_id")) == source_thread_id]
+                    if not resolved:
+                        return
+                    resolved_ids = {entry["approval_id"] for entry in resolved}
+                    workspace["approvals"] = [entry for entry in workspace["approvals"] if entry["approval_id"] not in resolved_ids]
+                    self._update_agent_after_approval(workspace)
+                    self.store._save()
+                for entry in resolved:
+                    self.store.workspace_event("approval_resolved", {"approval_id": entry["approval_id"], "decision": "resolved_elsewhere"})
             elif method == "turn/completed":
                 turn = params.get("turn") or {}
                 turn_id = turn.get("id")
@@ -1475,7 +1540,7 @@ class WorkspaceGateway:
         with self.store.lock:
             workspace = self.store.state["workspace"]
             workspace["approvals"] = [entry for entry in workspace["approvals"] if entry["approval_id"] != approval_id]
-            workspace["agent"]["status"] = "running"
+            self._update_agent_after_approval(workspace)
             self.store._save()
         self.store.workspace_event("approval_resolved", {"approval_id": approval_id, "decision": decision or "structured"})
         return {"approval_id": approval_id, "status": "responded"}

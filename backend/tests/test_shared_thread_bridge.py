@@ -161,8 +161,78 @@ class SharedThreadBridgeTests(unittest.TestCase):
         self.assertEqual(start["params"], {
             "model": "gpt-6-astra", "cwd": "/tmp/project", "ephemeral": False,
             "serviceName": "scene_feedback_workspace", "config": {"model_reasoning_effort": "ultra"},
+            "approvalPolicy": "on-request", "sandbox": "workspace-write", "approvalsReviewer": "user",
         })
         self.assertTrue(any(item.get("method") == "thread/name/set" for item in ws.sent))
+
+    def test_new_task_permission_modes_are_sent_explicitly(self) -> None:
+        created = "01a0de73-9763-7432-8ca4-5892c0904234"
+
+        class CreationWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                super().send(data)
+                message = json.loads(data)
+                if message.get("method") == "thread/start":
+                    self.responses.append({"id": message["id"], "result": {"thread": {"id": created, "ephemeral": False}}})
+
+        for mode, policy, sandbox in (
+            ("full_access", "never", "danger-full-access"),
+            ("workspace_write", "on-request", "workspace-write"),
+            ("read_only", "on-request", "read-only"),
+        ):
+            with self.subTest(mode=mode):
+                ws = CreationWebSocket()
+                bridge = SharedThreadBridge(ws, THREAD_ID)
+                self.assertEqual(bridge.create_thread("gpt-6-astra", Path("/tmp/project"), permission_mode=mode), created)
+                params = next(item["params"] for item in ws.sent if item.get("method") == "thread/start")
+                self.assertEqual((params["approvalPolicy"], params["sandbox"], params["approvalsReviewer"]), (policy, sandbox, "user"))
+
+        ws = CreationWebSocket()
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        with self.assertRaisesRegex(ValueError, "permission_mode"):
+            bridge.create_thread("gpt-6-astra", Path("/tmp/project"), permission_mode="invalid")
+        self.assertFalse(ws.sent)
+
+    def test_child_request_verification_uses_separate_connection_and_parent_chain(self) -> None:
+        session_id = "01a0e1e0-1e1f-7010-8324-0906fa533d7a"
+        child = "01a0e1e3-a8d6-7a10-a33b-ac3bc245fd24"
+        grandchild = "01a0e1e3-d089-7d60-aff6-12210b9d8e54"
+        sibling = "01a0e1ee-718e-70f2-b5b4-61d9634e89e9"
+        unrelated = "01a0e1ee-8d79-7151-b3dc-08556654a41d"
+        records = {
+            THREAD_ID: {"id": THREAD_ID, "sessionId": session_id, "parentThreadId": session_id},
+            child: {"id": child, "sessionId": session_id, "parentThreadId": THREAD_ID},
+            grandchild: {"id": grandchild, "sessionId": session_id, "parentThreadId": child},
+            sibling: {"id": sibling, "sessionId": session_id, "parentThreadId": session_id},
+            session_id: {"id": session_id, "sessionId": session_id, "parentThreadId": None},
+            unrelated: {"id": unrelated, "sessionId": unrelated, "parentThreadId": None},
+        }
+
+        class MetadataWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                message = json.loads(data)
+                if message.get("method") == "thread/read":
+                    self.sent.append(message)
+                    self.responses.append({"id": message["id"], "result": {"thread": records[message["params"]["threadId"]]}})
+                    return
+                super().send(data)
+
+        main_ws = FakeWebSocket()
+        bridge = SharedThreadBridge(main_ws, THREAD_ID, socket_path=Path("/tmp/fake-codex-socket"))
+        readers = []
+
+        def connector(_path, _timeout):
+            reader = MetadataWebSocket()
+            readers.append(reader)
+            return reader
+
+        self.assertTrue(bridge.is_descendant_thread(child, connector=connector))
+        self.assertTrue(bridge.is_descendant_thread(grandchild, connector=connector))
+        self.assertFalse(bridge.is_descendant_thread(sibling, connector=connector))
+        self.assertFalse(bridge.is_descendant_thread(unrelated, connector=connector))
+        self.assertEqual(main_ws.sent, [])
+        self.assertTrue(all(reader.closed for reader in readers))
+        self.assertEqual(len(readers), 4)
 
     def test_reads_exact_turn_history_without_inferring_from_idle(self) -> None:
         ws = FakeWebSocket("idle")

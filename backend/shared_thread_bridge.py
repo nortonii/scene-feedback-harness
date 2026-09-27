@@ -24,6 +24,11 @@ from typing import Any, Callable, Iterable
 
 _SOCKET_NAME = re.compile(r"[0-9a-f]{64}\Z")
 _THREAD_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_CREATE_PERMISSION_POLICIES = {
+    "full_access": ("never", "danger-full-access"),
+    "workspace_write": ("on-request", "workspace-write"),
+    "read_only": ("on-request", "read-only"),
+}
 
 
 class SharedThreadBridgeError(RuntimeError):
@@ -268,9 +273,29 @@ class SharedThreadBridge:
             cursor = next_cursor
         raise SharedThreadBridgeError("too many Codex models to list safely")
 
-    def create_thread(self, model: str, cwd: Path, *, reasoning_effort: str | None = None, title: str | None = None) -> str:
+    def create_thread(
+        self,
+        model: str,
+        cwd: Path,
+        *,
+        reasoning_effort: str | None = None,
+        title: str | None = None,
+        permission_mode: str = "workspace_write",
+    ) -> str:
         """Create one persistent blank task on this exact Desktop daemon."""
-        params: dict[str, Any] = {"model": model, "cwd": str(cwd), "ephemeral": False, "serviceName": "scene_feedback_workspace"}
+        try:
+            approval_policy, sandbox = _CREATE_PERMISSION_POLICIES[permission_mode]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("invalid permission_mode") from exc
+        params: dict[str, Any] = {
+            "model": model,
+            "cwd": str(cwd),
+            "ephemeral": False,
+            "serviceName": "scene_feedback_workspace",
+            "approvalPolicy": approval_policy,
+            "sandbox": sandbox,
+            "approvalsReviewer": "user",
+        }
         if reasoning_effort is not None:
             params["config"] = {"model_reasoning_effort": reasoning_effort}
         result = self._rpc("thread/start", params)
@@ -408,6 +433,54 @@ class SharedThreadBridge:
         if not isinstance(thread, dict) or thread.get("id") != thread_id:
             raise SharedThreadBridgeError("thread/read returned the wrong task")
         return thread
+
+    def is_descendant_thread(
+        self,
+        thread_id: str,
+        *,
+        timeout: float = 3.0,
+        connector: Callable[[Path, float], Any] = _connect,
+    ) -> bool:
+        """Verify a child request belongs to this task without reading this connection.
+
+        A request may originate in a spawned subagent and carry that child's
+        threadId.  Read the parent chain on a fresh connection to the same
+        daemon; never call _rpc on the subscribed event connection while its
+        reader is running.
+        """
+        if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id):
+            return False
+        if thread_id == self.thread_id:
+            return True
+        if self.socket_path is None:
+            raise SharedThreadBridgeError("cannot verify child task without the original daemon socket")
+        reader: SharedThreadBridge | None = None
+        try:
+            reader = type(self)(connector(self.socket_path, timeout), self.thread_id, timeout=timeout, socket_path=self.socket_path)
+            reader._initialize()
+            root = reader.read_thread()
+            session_id = root.get("sessionId")
+            if not isinstance(session_id, str) or not session_id:
+                return False
+            current_id = thread_id
+            visited = {self.thread_id}
+            for _ in range(32):
+                if current_id in visited:
+                    return False
+                visited.add(current_id)
+                current = reader.read_loaded_thread(current_id)
+                if current.get("sessionId") != session_id:
+                    return False
+                parent_id = current.get("parentThreadId")
+                if parent_id == self.thread_id:
+                    return True
+                if not isinstance(parent_id, str) or not _THREAD_ID.fullmatch(parent_id):
+                    return False
+                current_id = parent_id
+            return False
+        finally:
+            if reader is not None:
+                reader.close()
 
     def start_turn(
         self,

@@ -32,7 +32,8 @@ const ui = {
   switchTarget:id('switch-target'), refreshTargets:id('refresh-targets'), targetHelp:id('target-help'),
   manualTargetId:id('manual-target-id'), manualSwitchTarget:id('manual-switch-target'),
   createTargetPanel:id('create-target-panel'), createTitle:id('create-title'), createModel:id('create-model'),
-  createEffort:id('create-effort'), createTarget:id('create-target'), createTargetHelp:id('create-target-help'),
+  createEffort:id('create-effort'), createPermissions:id('create-permissions'),
+  createTarget:id('create-target'), createTargetHelp:id('create-target-help'),
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
@@ -409,12 +410,13 @@ function renderCreateTarget() {
   const busy = state.creatingTarget || state.switchingTarget || state.submitting || !!state.pendingSubmission;
   ui.createModel.disabled = !models.length || busy;
   ui.createEffort.disabled = !models.length || !efforts.length || busy;
+  ui.createPermissions.disabled = busy;
   ui.createTitle.disabled = busy;
   ui.createTarget.disabled = !models.length || busy;
   if (state.creatingTarget) ui.createTargetHelp.textContent = '正在创建任务并连接工作台…';
   else if (state.pendingSubmission) ui.createTargetHelp.textContent = '请先确认上一条反馈的送达状态。';
   else if (state.modelLoadError) ui.createTargetHelp.textContent = '无法读取可用模型：' + state.modelLoadError;
-  else ui.createTargetHelp.textContent = '新任务不会继承旧对话；当前场景和参考图会留在工作台。';
+  else ui.createTargetHelp.textContent = '权限模式只应用于新任务；当前场景和参考图会留在工作台。';
 }
 function renderTargetPicker() {
   ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.boundThreadId);
@@ -511,7 +513,7 @@ async function loadModels() {
 async function createTask() {
   if (!state.modelChoice || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission) return;
   const oldThreadId = state.boundThreadId;
-  const body = {model:state.modelChoice};
+  const body = {model:state.modelChoice, permission_mode:ui.createPermissions.value};
   const title = ui.createTitle.value.trim();
   if (title) body.title = title;
   if (state.effortChoice) body.reasoning_effort = state.effortChoice;

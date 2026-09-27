@@ -183,9 +183,24 @@ class SharedDesktopAdapter:
                                     return
                     continue
                 if "id" in message and "method" in message:
+                    request_params = message.get("params")
+                    request_thread_id = None
+                    if isinstance(request_params, dict):
+                        request_thread_id = request_params.get("threadId")
+                        if request_thread_id is not None and request_thread_id != self.thread_id:
+                            # Subagents use their own threadId. Verify the
+                            # parent chain on a separate daemon connection;
+                            # an unrelated task must never enter this panel.
+                            try:
+                                descendant = bridge.is_descendant_thread(request_thread_id)
+                            except Exception:
+                                logging.exception("Could not verify Codex child request %s", request_thread_id)
+                                continue
+                            if not descendant:
+                                continue
                     with self._lock:
                         self._pending_requests[str(message["id"])] = message
-                    self.on_event({"method": "adapter/request_pending", "params": {"thread_id": self.thread_id, "request_id": message["id"], "method": message["method"], "params": message.get("params", {})}})
+                    self.on_event({"method": "adapter/request_pending", "params": {"thread_id": self.thread_id, "source_thread_id": request_thread_id or self.thread_id, "request_id": message["id"], "method": message["method"], "params": request_params if isinstance(request_params, dict) else {}}})
                 elif "id" in message:
                     with self._lock:
                         pending = self._pending_rpc.pop(str(message["id"]), None)
@@ -195,13 +210,34 @@ class SharedDesktopAdapter:
                         event.set()
                 elif "method" in message:
                     params = message.get("params") or {}
+                    if message["method"] == "serverRequest/resolved" and isinstance(params, dict):
+                        request_id = params.get("requestId")
+                        if isinstance(request_id, (int, str)) and not isinstance(request_id, bool):
+                            resolved_source: str | None = None
+                            with self._lock:
+                                pending = self._pending_requests.get(str(request_id))
+                                pending_params = pending.get("params") if isinstance(pending, dict) else None
+                                pending_thread_id = pending_params.get("threadId") if isinstance(pending_params, dict) else None
+                                pending_source = pending_thread_id or self.thread_id
+                                notice_source = params.get("threadId")
+                                same_id = (pending is not None and type(pending.get("id")) is type(request_id)
+                                           and pending["id"] == request_id)
+                                # A child request must name that same child in
+                                # the resolution. Parent requests may omit the
+                                # thread ID on older App Server notifications.
+                                same_source = notice_source == pending_source or (notice_source is None and pending_source == self.thread_id)
+                                if same_id and same_source:
+                                    self._pending_requests.pop(str(request_id), None)
+                                    resolved_source = pending_source
+                            if resolved_source is not None:
+                                self.on_event({"method": "adapter/request_resolved", "params": {
+                                    "thread_id": self.thread_id,
+                                    "source_thread_id": resolved_source,
+                                    "request_id": request_id,
+                                }})
+                        continue
                     if isinstance(params, dict) and params.get("threadId") not in {None, self.thread_id}:
                         continue
-                    if message["method"] == "serverRequest/resolved":
-                        request_id = params.get("requestId") if isinstance(params, dict) else None
-                        if request_id is not None:
-                            with self._lock:
-                                self._pending_requests.pop(str(request_id), None)
                     if message["method"] == "turn/completed":
                         if bridge.active_turn_id:
                             continue

@@ -38,8 +38,8 @@ class FakeBridge:
             {"model": "hidden", "hidden": True, "supportedReasoningEfforts": None},
         ]
 
-    def create_thread(self, model, cwd, *, reasoning_effort=None, title=None):
-        self.created.append((model, cwd, reasoning_effort, title))
+    def create_thread(self, model, cwd, *, reasoning_effort=None, title=None, permission_mode="workspace_write"):
+        self.created.append((model, cwd, reasoning_effort, title, permission_mode))
         return NEW
 
     def close(self):
@@ -100,7 +100,7 @@ class CreateTargetTests(unittest.TestCase):
         old = self.gateway.submit(session, {"idempotency_key": "older-one", "scene_revision": 1, "note": "older"})
         scene = self.store.scene()
         with patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=self.bridge), patch("gateway.SharedDesktopAdapter", FakeAdapter), patch.object(self.gateway, "wake"):
-            created = self.gateway.create_target("gpt-6-astra", reasoning_effort="ultra", title="New Astra")
+            created = self.gateway.create_target("gpt-6-astra", reasoning_effort="ultra", title="New Astra", permission_mode="full_access")
         self.assertEqual(created["thread_id"], NEW)
         self.assertEqual(created["workspace"]["thread_id"], NEW)
         self.assertEqual(created["workspace"]["created_thread_ids"], [NEW])
@@ -108,7 +108,8 @@ class CreateTargetTests(unittest.TestCase):
         self.assertEqual(self.store.scene(), scene)
         self.assertTrue(self.gateway.adapter.allow_owned_resume)
         self.assertTrue(self.original.closed)
-        self.assertEqual(self.bridge.created, [("gpt-6-astra", self.project, "ultra", "New Astra")])
+        self.assertEqual(self.bridge.created, [("gpt-6-astra", self.project, "ultra", "New Astra", "full_access")])
+        self.assertEqual(created["workspace"]["created_thread_specs"][NEW]["permission_mode"], "full_access")
         self.assertFalse(self.bridge.closed)
         self.assertEqual(self.gateway.submit(session, {"idempotency_key": "newer-one", "scene_revision": 1, "note": "later"})["delivery"]["target_thread_id"], NEW)
         self.assertEqual(old["delivery"]["target_thread_id"], OLD)
@@ -119,6 +120,10 @@ class CreateTargetTests(unittest.TestCase):
                 self.gateway.create_target("text-only")
             with self.assertRaisesRegex(APIError, "not supported"):
                 self.gateway.create_target("gpt-6-astra", reasoning_effort="none")
+            with self.assertRaisesRegex(APIError, "permission_mode"):
+                self.gateway.create_target("gpt-6-astra", permission_mode="unrestricted")
+            with self.assertRaisesRegex(APIError, "permission_mode"):
+                self.gateway.create_target("gpt-6-astra", permission_mode=None)
             with self.store.lock:
                 self.store.state["workspace"]["active_feedback_id"] = "pending"
             with self.assertRaisesRegex(APIError, "active feedback"):
@@ -136,6 +141,7 @@ class CreateTargetTests(unittest.TestCase):
                 self.gateway.create_target("gpt-6-astra")
         self.assertEqual(raised.exception.detail, {"thread_id": NEW})
         self.assertEqual(self.gateway.state()["created_thread_ids"], [NEW])
+        self.assertEqual(self.gateway.state()["created_thread_specs"][NEW]["permission_mode"], "workspace_write")
         self.assertEqual(self.gateway.state()["thread_id"], OLD)
 
     def test_model_catalog_only_offers_visible_image_models(self):
@@ -149,7 +155,7 @@ class CreateTargetTests(unittest.TestCase):
         with self.store.lock:
             workspace = self.store.state["workspace"]
             workspace["created_thread_ids"] = [OLD]
-            workspace["created_thread_specs"] = {OLD: {"model": "gpt-6-astra", "reasoning_effort": "high", "title": "Astra feedback"}}
+            workspace["created_thread_specs"] = {OLD: {"model": "gpt-6-astra", "reasoning_effort": "high", "title": "Astra feedback", "permission_mode": "full_access"}}
             workspace["queue"] = [{"feedback_id": "feedback-1", "target_thread_id": OLD, "status": "queued", "turn_id": None}]
             self.store._save()
 
@@ -165,6 +171,8 @@ class CreateTargetTests(unittest.TestCase):
         self.assertEqual(state["thread_id"], NEW)
         self.assertEqual(state["queue"][0]["target_thread_id"], NEW)
         self.assertEqual(state["created_thread_specs"][NEW]["model"], "gpt-6-astra")
+        self.assertEqual(state["created_thread_specs"][NEW]["permission_mode"], "full_access")
+        self.assertEqual(self.bridge.created[0][-1], "full_access")
         self.assertTrue(self.gateway.adapter.allow_owned_resume)
 
     def test_uncertain_delivery_disables_empty_task_recreation(self):
@@ -204,6 +212,8 @@ class CreateTargetTests(unittest.TestCase):
         self.assertEqual(state["queue"][0]["target_thread_id"], NEW)
         self.assertNotIn(MISSING, state["created_thread_ids"])
         self.assertIn(NEW, state["created_thread_ids"])
+        self.assertEqual(self.bridge.created[0][-1], "read_only")
+        self.assertEqual(state["created_thread_specs"][NEW]["permission_mode"], "read_only")
 
     def test_http_create_requires_browser_capability(self):
         self.gateway.close()
@@ -217,7 +227,7 @@ class CreateTargetTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(json.loads(response.read())["default_model"], "gpt-6-astra")
-                body = json.dumps({"model": "gpt-6-astra", "reasoning_effort": "high"})
+                body = json.dumps({"model": "gpt-6-astra", "reasoning_effort": "high", "permission_mode": "read_only"})
                 connection.request("POST", "/api/workspace/targets", body=body, headers={"Content-Type": "application/json"})
                 response = connection.getresponse()
                 self.assertEqual(response.status, 403)
@@ -227,6 +237,7 @@ class CreateTargetTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 201)
                 self.assertEqual(json.loads(response.read())["thread_id"], NEW)
+                self.assertEqual(self.bridge.created[0][-1], "read_only")
                 connection.close()
             finally:
                 server.shutdown()

@@ -274,7 +274,12 @@ def _make_server_unlocked(
             if self.command == "POST" and path == "/api/workspace/targets":
                 self._require_browser_capability()
                 payload = self._read_json()
-                return self._send_json(201, gateway.create_target(payload.get("model"), reasoning_effort=payload.get("reasoning_effort"), title=payload.get("title")))
+                return self._send_json(201, gateway.create_target(
+                    payload.get("model"),
+                    reasoning_effort=payload.get("reasoning_effort"),
+                    title=payload.get("title"),
+                    permission_mode=payload.get("permission_mode", "workspace_write"),
+                ))
             if self.command == "POST" and path == "/api/workspace/target":
                 self._require_browser_capability()
                 payload = self._read_json()
