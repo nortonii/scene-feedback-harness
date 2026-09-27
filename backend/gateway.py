@@ -61,6 +61,7 @@ class WorkspaceGateway:
         result.pop("events", None)
         result["events_cursor"] = result.pop("event_seq")
         result["object_prompts_supported"] = True
+        result["inline_references_supported"] = True
         for approval in result.get("approvals", []):
             approval.pop("request_id", None)
         if include_capability:
@@ -1233,6 +1234,16 @@ class WorkspaceGateway:
             lines.append("选中对象 ID：" + ", ".join(feedback["selected_object_ids"]))
         if feedback.get("selected_scene_nodes"):
             lines.append("选中 GLB 节点：" + json.dumps(feedback["selected_scene_nodes"], ensure_ascii=False))
+        if feedback.get("inline_references"):
+            lines.append("用户原话中的引用（对应本次提交时的场景对象、查看器节点或标记；原话仍以用户表述为准）：")
+            for item in feedback["inline_references"]:
+                target_key = {"object": "object", "annotation": "annotation", "node": "scene_node"}.get(item.get("kind"), "")
+                target = item.get(target_key)
+                lines.append(f"{item['token']} → " + json.dumps(target, ensure_ascii=False))
+                if item.get("from_stale_snapshot"):
+                    lines.append("该引用来自用户确认的旧场景截图，当前场景可能已不存在对应对象或节点。")
+            if any(item.get("kind") == "node" for item in feedback["inline_references"]):
+                lines.append("节点路径是用户查看器中的子节点索引，仅用于指明视觉部位。")
         if feedback.get("object_prompts"):
             lines.append("逐物体提示（物体名称由用户自由填写，也可能是场景中尚不存在的物体）：")
             for index, item in enumerate(feedback["object_prompts"], 1):

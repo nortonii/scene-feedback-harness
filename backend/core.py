@@ -21,6 +21,12 @@ from typing import Any
 
 
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+INLINE_REFERENCE_RE = re.compile(
+    r"\[\[(?:(?P<simple_kind>object|annotation):(?P<simple_id>[A-Za-z0-9_-]{1,64})"
+    r"|node:(?P<node_object>[A-Za-z][A-Za-z0-9_-]{0,63}):"
+    r"(?P<node_path>[0-9]{1,5}(?:/[0-9]{1,5}){0,31}))\]\]"
+)
+INLINE_REFERENCE_START_RE = re.compile(r"\[\[(?:object|annotation|node):")
 CLIENT_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ASSET_RE = re.compile(r"^/assets/[0-9a-f]{32}\.glb$")
 COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -861,6 +867,70 @@ class SceneStore:
         _safe_json(normalized)
         return normalized
 
+    @staticmethod
+    def _inline_references(note: str, scene_objects: dict[str, dict[str, Any]],
+                           object_ids: set[str], annotations: list[dict[str, Any]],
+                           referenced_scene_nodes: list[dict[str, Any]],
+                           *, stale_snapshot: bool) -> list[dict[str, Any]]:
+        """Resolve tokens in the user's prose against this frozen submission."""
+        matches = list(INLINE_REFERENCE_RE.finditer(note))
+        matched_starts = {match.start() for match in matches}
+        if any(match.start() not in matched_starts for match in INLINE_REFERENCE_START_RE.finditer(note)):
+            raise APIError(400, "invalid inline reference; use [[object:ID]], [[annotation:ID]], or [[node:OBJECT_ID:PATH]]")
+        annotations_by_id: dict[str, list[dict[str, Any]]] = {}
+        for annotation in annotations:
+            annotation_id = annotation.get("id")
+            if isinstance(annotation_id, str):
+                annotations_by_id.setdefault(annotation_id, []).append(annotation)
+        nodes_by_path = {
+            (node["parent_object_id"], tuple(node["node_path"])): node
+            for node in referenced_scene_nodes
+        }
+        resolved = []
+        seen: set[tuple[str, str]] = set()
+        used_nodes: set[tuple[str, tuple[int, ...]]] = set()
+        for match in matches:
+            kind = match.group("simple_kind") or "node"
+            reference_id = match.group("simple_id") if kind != "node" else f'{match.group("node_object")}:{match.group("node_path")}'
+            key = (kind, reference_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            entry: dict[str, Any] = {"token": match.group(), "kind": kind, "id": reference_id}
+            if kind == "object":
+                if reference_id not in object_ids:
+                    raise APIError(400, f"inline object reference {reference_id} is not in this scene")
+                scene_object = scene_objects.get(reference_id)
+                if scene_object is None:
+                    if not stale_snapshot:
+                        raise APIError(400, f"inline object reference {reference_id} is not in this scene")
+                    entry["object"] = {"id": reference_id}
+                    entry["from_stale_snapshot"] = True
+                else:
+                    entry["object"] = copy.deepcopy(scene_object)
+            elif kind == "annotation":
+                candidates = annotations_by_id.get(reference_id, [])
+                if len(candidates) != 1:
+                    detail = "ambiguous" if candidates else "unknown"
+                    raise APIError(400, f"inline annotation reference {reference_id} is {detail}")
+                entry["annotation"] = copy.deepcopy(candidates[0])
+            else:
+                node_object = match.group("node_object")
+                node_path_text = match.group("node_path")
+                node_path = tuple(int(index) for index in node_path_text.split("/"))
+                node_key = (node_object, node_path)
+                node = nodes_by_path.get(node_key)
+                if node is None or "/".join(str(index) for index in node_path) != node_path_text:
+                    raise APIError(400, f"inline node reference {reference_id} has no matching submitted scene node")
+                used_nodes.add(node_key)
+                entry["scene_node"] = copy.deepcopy(node)
+                if scene_objects.get(node_object, {}).get("type") != "model":
+                    entry["from_stale_snapshot"] = True
+            resolved.append(entry)
+        if used_nodes != set(nodes_by_path):
+            raise APIError(400, "referenced_scene_nodes contains a node not cited in note")
+        return resolved
+
     def submit_feedback(self, session_id: str, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise APIError(400, "feedback must be a JSON object")
@@ -894,7 +964,8 @@ class SceneStore:
             annotations = payload.get("annotations", [])
             if not isinstance(annotations, list) or len(annotations) > 100:
                 raise APIError(400, "annotations must be an array with at most 100 items")
-            object_ids = {obj["id"] for obj in self.state["scene"]["objects"]}
+            scene_objects = {obj["id"]: obj for obj in self.state["scene"]["objects"]}
+            object_ids = set(scene_objects)
             model_ids = {obj["id"] for obj in self.state["scene"]["objects"] if obj["type"] == "model"}
             if stale_snapshot:
                 # Historic IDs are only visual references; no scene edit is inferred here.
@@ -908,6 +979,9 @@ class SceneStore:
                 historic_nodes = payload.get("selected_scene_nodes", [])
                 if isinstance(historic_nodes, list):
                     model_ids.update(node.get("parent_object_id") for node in historic_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
+                historic_referenced_nodes = payload.get("referenced_scene_nodes", [])
+                if isinstance(historic_referenced_nodes, list):
+                    model_ids.update(node.get("parent_object_id") for node in historic_referenced_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
             reference_ids = {image["id"] for image in session.get("reference_images", [])}
             references_by_id = {image["id"]: image for image in session.get("reference_images", [])}
             active_reference_id = payload.get("active_reference_id")
@@ -917,9 +991,20 @@ class SceneStore:
             if aligned_reference_id is not None and (aligned_reference_id not in reference_ids or "camera" not in references_by_id[aligned_reference_id]):
                 raise APIError(400, "aligned_reference_id must identify a calibrated reference")
             normalized_annotations = [self._normalize_annotation(item, object_ids, model_ids, reference_ids) for item in annotations]
+            referenced_scene_nodes = payload.get("referenced_scene_nodes", [])
+            if not isinstance(referenced_scene_nodes, list) or len(referenced_scene_nodes) > 64:
+                raise APIError(400, "referenced_scene_nodes must be an array of at most 64 nodes")
+            referenced_scene_nodes = [self._scene_node(node, model_ids) for node in referenced_scene_nodes]
+            referenced_node_keys = {(node["parent_object_id"], tuple(node["node_path"])) for node in referenced_scene_nodes}
+            if len(referenced_node_keys) != len(referenced_scene_nodes):
+                raise APIError(400, "referenced_scene_nodes must be unique")
             note = payload.get("note", "")
             if not isinstance(note, str) or len(note) > 10_000:
                 raise APIError(400, "note must be text up to 10000 characters")
+            inline_references = self._inline_references(
+                note, scene_objects, object_ids, normalized_annotations, referenced_scene_nodes,
+                stale_snapshot=stale_snapshot,
+            )
             object_prompts = payload.get("object_prompts", [])
             if not isinstance(object_prompts, list) or len(object_prompts) > 24:
                 raise APIError(400, "object_prompts must be an array with at most 24 items")
@@ -989,7 +1074,7 @@ class SceneStore:
                 if crop["source"] == "scene" and ref_id is not None:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
-            feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "object_prompts": normalized_prompts, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes}
+            feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "inline_references": inline_references, "object_prompts": normalized_prompts, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes, "referenced_scene_nodes": referenced_scene_nodes}
             if active_reference_id is not None:
                 feedback["active_reference_id"] = active_reference_id
             if aligned_reference_id is not None:

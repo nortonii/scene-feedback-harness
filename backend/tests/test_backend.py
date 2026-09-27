@@ -139,6 +139,102 @@ class SceneStoreTests(unittest.TestCase):
             self.assertEqual(len(summary), 4000)
             self.assertTrue(summary.endswith("…"))
 
+    def test_one_note_resolves_multiple_inline_object_and_annotation_references(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SceneStore(root / "data")
+            store.replace_scene(1, [
+                {"id": "chair_back", "name": "椅背", "type": "box", "position": [0, 0, 1], "size": [1, 1, 1]},
+                {"id": "cabinet", "name": "柜子", "type": "box", "position": [2, 0, 1], "size": [1, 1, 2]},
+            ])
+            session_id = store.ensure_workspace(root)["session_id"]
+            image_url, _ = image_data_url()
+            reference = store.add_reference(session_id, "room.png", image_url)
+            note = "把 [[object:cabinet]] 向标记 [[annotation:mark-1]] 靠近，再让 [[object:chair_back]] 与柜子等高。柜子 [[object:cabinet]] 别太深。"
+            mark = {"id": "mark-1", "type": "rectangle", "pane": "reference", "reference_image_id": reference["id"],
+                    "coordinates": {"x": 0.1, "y": 0.2, "x2": 0.5, "y2": 0.7}}
+            packet = store.submit_feedback(session_id, {"scene_revision": 2, "note": note, "annotations": [mark]})
+            self.assertEqual(packet["note"], note)
+            self.assertEqual(packet["object_prompts"], [])
+            self.assertEqual([(item["kind"], item["id"]) for item in packet["inline_references"]],
+                             [("object", "cabinet"), ("annotation", "mark-1"), ("object", "chair_back")])
+            self.assertEqual(packet["inline_references"][0]["object"]["name"], "柜子")
+            self.assertEqual(packet["inline_references"][1]["annotation"]["coordinates"], mark["coordinates"])
+            self.assertEqual(SceneStore(store.data_dir).feedback_by_id(packet["feedback_id"])["inline_references"], packet["inline_references"])
+            gateway = WorkspaceGateway(store, root)
+            self.assertTrue(gateway.state()["inline_references_supported"])
+            message, paths = gateway._turn_input(packet)
+            self.assertIn(note, message)
+            self.assertIn('[[object:cabinet]] → {"id": "cabinet", "name": "柜子"', message)
+            self.assertIn('[[annotation:mark-1]] → {"id": "mark-1"', message)
+            self.assertEqual(len(paths), 1)
+
+    def test_inline_references_reject_unknown_ambiguous_and_malformed_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SceneStore(temporary)
+            seed_chair(store)
+            session_id = store.create_session()["session_id"]
+            mark = {"id": "mark-1", "type": "point", "pane": "scene", "coordinates": {"x": 0.2, "y": 0.3}}
+            cases = [
+                ({"note": "Move [[object:missing]]"}, "inline object reference"),
+                ({"note": "Use [[annotation:missing]]", "annotations": [mark]}, "inline annotation reference"),
+                ({"note": "Use [[annotation:mark-1]]", "annotations": [mark, mark]}, "ambiguous"),
+                ({"note": "Move [[object:chair back]]"}, "invalid inline reference"),
+                ({"note": "Move [[object:chair_back]"}, "invalid inline reference"),
+            ]
+            for fields, error in cases:
+                with self.subTest(fields=fields), self.assertRaisesRegex(APIError, error):
+                    store.submit_feedback(session_id, {"scene_revision": 2, **fields})
+            self.assertEqual(store.get_session(session_id)["feedback_count"], 0)
+
+    def test_one_note_can_reference_multiple_glb_nodes_without_selecting_each_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SceneStore(root / "data")
+            asset_name = "a" * 32 + ".glb"
+            tiny_glb(store.assets_dir / asset_name)
+            store.replace_scene(1, [{"id": "scene_preview", "type": "model", "url": f"/assets/{asset_name}",
+                                     "position": [0, 0, 0], "size": [1, 1, 1]}])
+            session_id = store.ensure_workspace(root)["session_id"]
+            note = "把 [[node:scene_preview:0/2]] 的顶面抬高，并将 [[node:scene_preview:0/5]] 往左移。"
+            nodes = [
+                {"parent_object_id": "scene_preview", "node_path": [0, 2], "node_name": "Cabinet"},
+                {"parent_object_id": "scene_preview", "node_path": [0, 5], "node_name": "Lamp"},
+            ]
+            packet = store.submit_feedback(session_id, {"scene_revision": 2, "note": note,
+                                                        "referenced_scene_nodes": nodes})
+            self.assertEqual([item["id"] for item in packet["inline_references"]],
+                             ["scene_preview:0/2", "scene_preview:0/5"])
+            self.assertEqual(packet["inline_references"][0]["scene_node"], nodes[0])
+            self.assertEqual(packet["selected_scene_nodes"], [])
+            message, _ = WorkspaceGateway(store, root)._turn_input(packet)
+            self.assertIn('[[node:scene_preview:0/5]] → {"parent_object_id": "scene_preview", "node_path": [0, 5]', message)
+            self.assertIn("节点路径是用户查看器中的子节点索引", message)
+
+            invalid = [
+                ({"note": note, "referenced_scene_nodes": [nodes[0]]}, "no matching submitted scene node"),
+                ({"note": note, "referenced_scene_nodes": nodes + [nodes[1]]}, "must be unique"),
+                ({"note": "[[node:scene_preview:0/2]]", "referenced_scene_nodes": nodes}, "not cited in note"),
+                ({"note": "[[node:scene_preview:0/99999]]", "referenced_scene_nodes": nodes}, "no matching submitted scene node"),
+                ({"note": "[[node:scene_preview:0/02]]", "referenced_scene_nodes": nodes}, "no matching submitted scene node"),
+                ({"note": "[[node:scene_preview:0/x]]", "referenced_scene_nodes": nodes}, "invalid inline reference"),
+            ]
+            for fields, error in invalid:
+                with self.subTest(fields=fields), self.assertRaisesRegex(APIError, error):
+                    store.submit_feedback(session_id, {"scene_revision": 2, **fields})
+
+    def test_inline_object_reference_can_identify_selected_object_in_confirmed_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = SceneStore(temporary)
+            seed_chair(store)
+            session_id = store.create_session()["session_id"]
+            store.replace_scene(2, [])
+            packet = store.submit_feedback(session_id, {"scene_revision": 2, "confirm_stale": True,
+                                                        "selected_object_ids": ["chair_back"],
+                                                        "note": "旧图里的 [[object:chair_back]] 需要保留。"})
+            self.assertEqual(packet["inline_references"][0]["object"], {"id": "chair_back"})
+            self.assertTrue(packet["inline_references"][0]["from_stale_snapshot"])
+
     def test_object_prompts_validate_text_and_optional_scene_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = SceneStore(temporary)

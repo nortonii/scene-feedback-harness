@@ -37,7 +37,7 @@ const ui = {
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
-  objectPrompts:id('object-prompts'), note:id('feedback-note'),
+  note:id('feedback-note'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
@@ -51,7 +51,6 @@ const ui = {
 const state = {
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
-  canSendObjectPrompts:false,
   boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
@@ -60,6 +59,7 @@ const state = {
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
   sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
+  referencedSceneNodes:[],
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
   annotations:[], mode:'select', groupId:'', drag:null, textPending:null,
@@ -156,10 +156,10 @@ function saveDraft() {
     localStorage.setItem(storageKey(), JSON.stringify({
       annotations:state.annotations, selectedId:state.selectedId,
       selectedSceneNode:state.selectedSceneNode,
+      referencedSceneNodes:state.referencedSceneNodes,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
-      objectPromptsText:ui.objectPrompts.value,
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
         alignmentExact:state.alignmentExact,
@@ -177,6 +177,9 @@ function restoreDraft() {
     state.selectedId = typeof draft.selectedId === 'string' ? draft.selectedId : null;
     state.selectedSceneNode = draft.selectedSceneNode && Array.isArray(draft.selectedSceneNode.node_path)
       ? draft.selectedSceneNode : null;
+    state.referencedSceneNodes = Array.isArray(draft.referencedSceneNodes)
+      ? draft.referencedSceneNodes.filter((node) => node && typeof node.parent_object_id === 'string' && Array.isArray(node.node_path))
+      : [];
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
     state.restoredModelUrl = typeof draft.selectedModelUrl === 'string' ? draft.selectedModelUrl : null;
     state.activeReferenceId = typeof draft.activeReferenceId === 'string' ? draft.activeReferenceId : null;
@@ -192,8 +195,10 @@ function restoreDraft() {
     state.referencePan = Number.isFinite(draft.referencePan?.x) && Number.isFinite(draft.referencePan?.y)
       ? draft.referencePan : {x:0,y:0};
     ui.groupSelect.value = state.groupId;
-    ui.note.value = typeof draft.note === 'string' ? draft.note : '';
-    ui.objectPrompts.value = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText : '';
+    // Preserve drafts from the former two-field composer as one freeform prompt.
+    const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
+    const currentNote = typeof draft.note === 'string' ? draft.note : '';
+    ui.note.value = [oldPrompts, currentNote].filter(Boolean).join('\n\n');
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
       camera.position.set(...draft.camera.position);
       if (draft.camera.up?.length === 3) camera.up.set(...draft.camera.up);
@@ -219,7 +224,6 @@ function setSession(session) {
   ui.pill.className = 'session-pill ' + state.sessionStatus;
   ui.submit.disabled = !editable();
   ui.note.disabled = state.sessionStatus !== 'open';
-  ui.objectPrompts.disabled = state.sessionStatus !== 'open';
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   id('clear-annotations').disabled = state.sessionStatus !== 'open';
   if (state.sessionStatus !== 'open') {
@@ -322,7 +326,6 @@ function updateSubmitLabel() {
     ui.submit.querySelector('span:first-child').textContent = label;
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
-    ui.objectPrompts.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
@@ -343,7 +346,6 @@ function updateSubmitLabel() {
   ui.submit.querySelector('span:first-child').textContent = label;
   ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
-  ui.objectPrompts.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
@@ -578,7 +580,6 @@ async function switchTask(threadId) {
 }
 function renderWorkspace(workspace) {
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
-  state.canSendObjectPrompts = workspace.object_prompts_supported === true;
   const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
@@ -1502,6 +1503,16 @@ function renderSelection() {
     objectId.className = 'selected-id';
     objectId.textContent = item.id + (state.selectedSceneNode ? ' · 节点 ' + (state.selectedSceneNode.node_path.join('/') || '根') : '');
     ui.selectionSummary.append(name, objectId);
+    if (state.selectedSceneNode) {
+      const cite = document.createElement('button');
+      cite.type = 'button';
+      cite.className = 'reference-insert selected-reference-insert';
+      cite.textContent = '在提示中引用这个节点';
+      cite.disabled = !editable();
+      cite.addEventListener('mousedown', (event) => event.preventDefault());
+      cite.addEventListener('click', () => insertSceneNodeReference({...state.selectedSceneNode}, nodeLabel));
+      ui.selectionSummary.append(cite);
+    }
     ui.selectedChip.textContent = '已选 · ' + (nodeLabel || item.name || item.id);
     ui.selectedChip.classList.remove('hidden');
     ui.clearSelection.classList.remove('hidden');
@@ -1526,6 +1537,8 @@ function renderObjectList() {
     return;
   }
   for (const item of state.sceneObjects) {
+    const row = document.createElement('div');
+    row.className = 'object-row';
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'object-item' + (state.selectedId === item.id ? ' active' : '');
@@ -1539,7 +1552,16 @@ function renderObjectList() {
     kind.textContent = ({box:'方盒',sphere:'球体',cylinder:'圆柱',model:'模型'})[item.type] || item.type;
     button.append(swatch, name, kind);
     button.addEventListener('click', () => selectObject(item.id));
-    ui.objectList.append(button);
+    const cite = document.createElement('button');
+    cite.type = 'button';
+    cite.className = 'reference-insert object-reference-insert';
+    cite.textContent = '引用';
+    cite.title = '在提示中引用 ' + (item.name || item.id);
+    cite.disabled = !editable();
+    cite.addEventListener('mousedown', (event) => event.preventDefault());
+    cite.addEventListener('click', () => insertNoteReference(item.name || item.id, `[[object:${item.id}]]`));
+    row.append(button, cite);
+    ui.objectList.append(row);
   }
 }
 function selectObject(objectId, sceneNode=null) {
@@ -2087,6 +2109,17 @@ function renderAnnotations() {
     subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
     if (stale) subtitle.classList.add('stale-label');
     copy.append(title, subtitle);
+    const cite = document.createElement('button');
+    cite.type = 'button';
+    cite.className = 'reference-insert annotation-reference-insert';
+    cite.textContent = '引用';
+    cite.title = '在提示中引用这条标记';
+    cite.disabled = !editable();
+    cite.addEventListener('mousedown', (event) => event.preventDefault());
+    cite.addEventListener('click', () => insertNoteReference(
+      annotation.group_id ? '标记' + circled[Number(annotation.group_id)] : '这条' + (labels[annotation.type] || '标记'),
+      `[[annotation:${annotation.id}]]`
+    ));
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'annotation-remove';
@@ -2099,7 +2132,7 @@ function renderAnnotations() {
       drawOverlays();
       saveDraft();
     });
-    row.append(glyph, copy, remove);
+    row.append(glyph, copy, cite, remove);
     ui.annotationList.append(row);
   }
 }
@@ -2189,47 +2222,80 @@ async function captureScene(snapshot) {
     scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84)
   };
 }
-function parseObjectPrompts() {
-  const prompts = [];
-  const lines = ui.objectPrompts.value.split(/\r?\n/);
-  for (const [index, raw] of lines.entries()) {
-    const line = raw.replace(/^\s*(?:[-*•]\s+|\d+[.)、]\s*)/, '').trim();
-    if (!line) continue;
-    const separator = line.search(/[：:]/);
-    const object = separator < 0 ? '' : line.slice(0, separator).trim();
-    const prompt = separator < 0 ? '' : line.slice(separator + 1).trim();
-    if (!object || !prompt) throw new Error('逐项提示第 ' + (index + 1) + ' 行请写成“物体：提示”。');
-    if (object.length > 180) throw new Error('逐项提示第 ' + (index + 1) + ' 行的物体名称过长。');
-    if (prompt.length > 2000) throw new Error('逐项提示第 ' + (index + 1) + ' 行的提示超过 2000 字。');
-    const entry = {object, prompt};
-    const exactId = state.sceneObjects.find((item) => item.id === object);
-    const named = state.sceneObjects.filter((item) => item.name === object);
-    if (exactId) entry.object_id = exactId.id;
-    else if (named.length === 1) entry.object_id = named[0].id;
-    prompts.push(entry);
-    if (prompts.length > 24) throw new Error('一条反馈最多填写 24 项物体提示。');
-  }
-  return prompts;
+function insertNoteReference(label, token) {
+  if (!editable()) return;
+  const start = ui.note.selectionStart;
+  const end = ui.note.selectionEnd;
+  const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
+  const after = end < ui.note.value.length && !/\s/.test(ui.note.value[end]) ? ' ' : '';
+  ui.note.setRangeText(before + label + ' ' + token + after, start, end, 'end');
+  ui.note.focus();
+  saveDraft();
 }
-async function feedbackPayload(objectPrompts) {
+function insertSceneNodeReference(node, label) {
+  if (!editable() || !node?.node_path?.length) return;
+  const key = node.parent_object_id + ':' + node.node_path.join('/');
+  const index = state.referencedSceneNodes.findIndex((entry) => entry.parent_object_id + ':' + entry.node_path.join('/') === key);
+  const captured = {...node, model_url:sceneObject(node.parent_object_id)?.url || null,
+    scene_revision:state.sceneRevision};
+  if (index < 0) state.referencedSceneNodes.push(captured);
+  else state.referencedSceneNodes[index] = captured;
+  insertNoteReference(label || '场景节点', `[[node:${key}]]`);
+}
+function promptReferences() {
+  const note = ui.note.value;
+  if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
+  const tokenPattern = /\[\[(object|annotation|node):([A-Za-z0-9_-]{1,64})(?::(\d+(?:\/\d+)*))?\]\]/g;
+  const tokens = [...note.matchAll(tokenPattern)];
+  const starts = new Set(tokens.map((match) => match.index));
+  for (const match of note.matchAll(/\[\[(?:object|annotation|node):/g)) {
+    if (!starts.has(match.index)) throw new Error('提示里有不完整的引用；请重新点击物体或标记旁的「引用」。');
+  }
+  const nodes = [];
+  const seenNodes = new Set();
+  for (const match of tokens) {
+    const [, kind, objectId, path] = match;
+    if (kind !== 'node' && path !== undefined) throw new Error('提示里的物体或标记引用格式不正确。');
+    if (kind === 'annotation') {
+      if (state.annotations.filter((item) => item.id === objectId).length !== 1) {
+        throw new Error('提示引用的标记已删除或重复，请更新这处引用。');
+      }
+    } else if (kind === 'object') {
+      if (!sceneObject(objectId) && !snapshotForFeedback()) {
+        throw new Error('提示引用的对象已不在当前场景，请更新这处引用。');
+      }
+    } else {
+      if (path === undefined) throw new Error('提示里的场景节点引用缺少路径。');
+      const key = objectId + ':' + path;
+      if (seenNodes.has(key)) continue;
+      seenNodes.add(key);
+      const node = state.referencedSceneNodes.find((item) => item.parent_object_id === objectId && item.node_path.join('/') === path);
+      if (!node) throw new Error('提示引用的场景节点已失效，请重新选中并引用它。');
+      const model = sceneObject(objectId);
+      if (model && node.model_url !== model.url && !snapshotForFeedback()) {
+        throw new Error('提示引用的场景节点来自旧模型，请重新选中并引用它。');
+      }
+      nodes.push({parent_object_id:node.parent_object_id, node_path:[...node.node_path],
+        ...(node.node_name ? {node_name:node.node_name} : {})});
+      if (nodes.length > 64) throw new Error('一条提示最多引用 64 个场景节点。');
+    }
+  }
+  return nodes;
+}
+async function feedbackPayload(referencedSceneNodes) {
   const snapshot = snapshotForFeedback();
   const imageBundle = await captureScene(snapshot);
   const annotatedReferences = await captureReferenceAnnotations();
   const submittedCamera = snapshot?.camera || cameraData();
-  const generalNote = ui.note.value.trim();
-  const promptText = objectPrompts.map((entry) => entry.object + '：' + entry.prompt).join('\n');
-  const note = state.canSendObjectPrompts ? generalNote : [promptText, generalNote].filter(Boolean).join('\n\n');
-  if (!state.canSendObjectPrompts && note.length > 10_000) {
-    throw new Error('当前服务尚未更新，逐项提示和整体说明合计不能超过 10000 字。');
-  }
+  const note = ui.note.value.trim();
   return {
     scene_revision:snapshot?.scene_revision || state.sceneRevision,
     latest_scene_revision:state.sceneRevision,
     active_reference_id:state.activeReferenceId,
     aligned_reference_id:submittedCamera.alignment_exact && submittedCamera.reference_image_id === state.activeReferenceId
       ? state.activeReferenceId : null,
-    note:note || (state.references.length && !state.annotations.length && !objectPrompts.length ? '请参考这些图片开始或继续重建场景。' : ''),
-    ...(state.canSendObjectPrompts ? {object_prompts:objectPrompts} : {}),
+    note:note || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
+    referenced_scene_nodes:referencedSceneNodes,
     annotations:state.annotations.map((annotation) => {
       const item = {...annotation};
       if (!snapshot && item.object_id && !sceneObject(item.object_id)) {
@@ -2253,13 +2319,13 @@ async function feedbackPayload(objectPrompts) {
 }
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || state.submitting || state.uploading) return;
-  let objectPrompts = [];
+  let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
-    try { objectPrompts = parseObjectPrompts(); }
-    catch (error) { announce(error.message, true); ui.objectPrompts.focus(); return; }
+    try { referencedSceneNodes = promptReferences(); }
+    catch (error) { announce(error.message, true); ui.note.focus(); return; }
   }
-  if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length && !objectPrompts.length) {
-    announce('请添加参考图、画标记，或填写物体提示后再发送。', true);
+  if (!state.pendingSubmission && !state.annotations.length && !ui.note.value.trim() && !state.references.length) {
+    announce('请添加参考图、画标记，或填写提示后再发送。', true);
     return;
   }
   const chosenSnapshot = snapshotForFeedback();
@@ -2271,7 +2337,7 @@ async function submitFeedback() {
   ui.submit.querySelector('span:first-child').textContent = '正在准备图片…';
   try {
     if (!state.pendingSubmission) {
-      const payload = await feedbackPayload(objectPrompts);
+      const payload = await feedbackPayload(referencedSceneNodes);
       const key = newId();
       state.pendingSubmission = {key, payload:{...payload, idempotency_key:key,
         confirm_stale:!!staleSnapshot}};
@@ -2307,11 +2373,15 @@ async function submitFeedback() {
     }
     try { await refreshWorkspace(); } catch { /* The next poll will recover status. */ }
   } catch (error) {
-    if (error.status === 409 && /scene revision changed/i.test(error.message)) {
+    if (error.status === 400 || error.status === 422 || (error.status === 409 && /scene revision changed/i.test(error.message))) {
       await clearOutbox();
       state.pendingSubmission = null;
-      try { await loadScene(); } catch { /* Poll will retry. */ }
-      announce('场景在发送时更新了，草稿已保留。请检查当前版本后再发送。', true);
+      if (error.status === 409) {
+        try { await loadScene(); } catch { /* Poll will retry. */ }
+        announce('场景在发送时更新了，草稿已保留。请检查当前版本后再发送。', true);
+      } else {
+        announce('反馈需要修改：' + error.message + '。草稿已保留，请修改后再发送。', true);
+      }
     } else {
       announce('发送失败：' + error.message + '。可点击重试，系统会沿用同一消息编号。', true);
     }
@@ -2501,7 +2571,6 @@ function bindEvents() {
     });
   }
   ui.note.addEventListener('input', saveDraft);
-  ui.objectPrompts.addEventListener('input', saveDraft);
   ui.submit.addEventListener('click', submitFeedback);
   ui.stop.addEventListener('click', async () => {
     ui.stop.disabled = true;

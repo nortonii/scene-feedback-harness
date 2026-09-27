@@ -2,7 +2,7 @@
 
 # Codex Visual Reconstruction Workbench
 
-In the default mode, mark the reference image and the current 3D scene, write a sentence, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same workbench-owned Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read. An existing Codex desktop task can use the same review UI through the external MCP mode below.
+In the default mode, mark the reference image and the current 3D scene, write one prompt, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same workbench-owned Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read. An existing Codex desktop task can use the same review UI through the external MCP mode below.
 
 ![Side-by-side annotations on a reference image and scene](preview.png)
 
@@ -29,7 +29,7 @@ This interface helps people point out problems. It does not define a reconstruct
 
 - Switch between reference images and pan or zoom them on the left; rotate, zoom, and select nodes in a GLB scene on the right.
 - Draw points, rectangles, lines, arrows, freehand strokes, and text on either side. Related marks can share a number; a missing object can be marked only on the reference image.
-- Enter several changes in “Objects and individual prompts,” one `object: instruction` per line (for example, `cabinet: move it left`). You can name objects that have not been modeled yet and put overall guidance in the separate note. The scene currently highlights one selected object at a time, but selection is optional when listing multiple objects.
+- Write one freeform prompt to Codex. Put the cursor in your text and click “引用” (“Insert reference”) beside an object, a selected GLB node, or a visual mark to insert multiple references into that same prompt. Their forms are `[[object:ID]]`, `[[node:MODEL_ID:0/2]]`, and `[[annotation:ID]]`. For example, ask Codex to move a cabinet toward a marked spot and align its top with a marked line, then send the prompt once. You can mark and reference something that has not been modeled yet on the reference image; the scene still highlights only one selected object at a time.
 - Click “Annotate current view” to bind scene marks to **the screenshot, camera, selected object, and scene revision at that moment**. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
 - Sending saves an immutable feedback packet: your exact words, original and annotated reference images, clean and annotated scene screenshots, selected nodes, camera, and scene revision. Marks are your hints; the original image is kept separately.
 - New feedback submitted while Codex is running joins a queue for the next turn. If the scene changes while feedback is queued, the page first asks you to confirm feedback made against the old revision. Approval requests and stop actions are also handled on the page. Your project, thread, and drafts remain available after refreshing the page.
