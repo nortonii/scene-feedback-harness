@@ -46,6 +46,7 @@ const ui = {
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
   undoAnnotation:id('undo-annotation'), redoAnnotation:id('redo-annotation'),
   clearAnnotations:id('clear-annotations'),
+  referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
@@ -250,6 +251,7 @@ function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
   ui.clearAnnotations.disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length);
+  ui.referenceAllAnnotations.disabled = !editable() || !state.annotations.length;
 }
 function annotationEditState() {
   return {annotations:[...state.annotations], dynamicSnapshots:[...state.dynamicSnapshots],
@@ -2768,19 +2770,47 @@ async function captureScene(snapshot) {
     scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84)
   };
 }
-function insertNoteReference(label, token) {
-  if (!editable()) return;
-  minimalLayout?.closeReferences();
-  const start = ui.note.selectionStart;
+function insertNoteText(text, {replaceSelection=true}={}) {
+  if (!editable()) return false;
+  const start = replaceSelection ? ui.note.selectionStart : ui.note.selectionEnd;
   const end = ui.note.selectionEnd;
   const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
   const after = end < ui.note.value.length && !/\s/.test(ui.note.value[end]) ? ' ' : '';
-  ui.note.setRangeText(before + label + ' ' + token + after, start, end, 'end');
+  const insertion = before + text + after;
+  if (ui.note.value.length - (end - start) + insertion.length > 10000) {
+    announce('加入引用会超过提示的 10000 字上限，请先精简提示或逐条引用。', true);
+    return false;
+  }
+  minimalLayout?.closeReferences();
+  ui.note.setRangeText(insertion, start, end, 'end');
   // Return to live picking after inserting a reference. The frozen annotated
   // image remains available through the Back to annotation button.
   setMode('select');
   ui.note.focus();
   saveDraft();
+  return true;
+}
+function insertNoteReference(label, token) {
+  return insertNoteText(label + ' ' + token);
+}
+function insertAllAnnotationReferences() {
+  if (!editable() || !state.annotations.length) return;
+  const existing = new Set([...ui.note.value.matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
+  const references = state.annotations.flatMap((annotation, index) => {
+    if (existing.has(annotation.id)) return [];
+    const number = circled[Number(annotation.group_id)] || String(index + 1);
+    const pane = annotation.pane === 'reference' ? '参考图' : '场景';
+    const kind = labels[annotation.type] || '标记';
+    return [`标记${number}（${pane}·${kind}） [[annotation:${annotation.id}]]`];
+  });
+  if (!references.length) {
+    minimalLayout?.closeReferences(); ui.note.focus();
+    announce('全部标记已在提示中引用。');
+    return;
+  }
+  if (insertNoteText(references.join('\n'), {replaceSelection:false})) {
+    announce('已引用 ' + references.length + ' 条标记，可继续补充提示。');
+  }
 }
 function insertSceneNodeReference(node, label) {
   if (!editable() || !node?.node_path?.length) return;
@@ -3192,6 +3222,8 @@ function bindEvents() {
   });
   ui.undoAnnotation.addEventListener('click', undoAnnotationEdit);
   ui.redoAnnotation.addEventListener('click', redoAnnotationEdit);
+  ui.referenceAllAnnotations.addEventListener('mousedown', (event) => event.preventDefault());
+  ui.referenceAllAnnotations.addEventListener('click', insertAllAnnotationReferences);
   ui.clearSelection.addEventListener('click', () => {
     if (!editable()) return;
     state.selectedId = null;
