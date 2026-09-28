@@ -342,7 +342,7 @@ async function ensureSession() {
   setSession(session);
   restoreDraft();
   await restoreMomentDraft();
-  setReferenceClip(session.reference_clip || null);
+  setReferenceClip(session.reference_clip || null, {restore:true});
   setReferences(session.reference_images || []);
   renderSceneView();
   state.pendingSubmission = await readOutbox();
@@ -2047,16 +2047,16 @@ function renderAnimationChoices() {
     label.append(select); ui.animationChoices.append(label);
   }
 }
-function setReferenceClip(clip) {
+function setReferenceClip(clip, {restore=false}={}) {
   if ((state.referenceClip?.clip_id || null) === (clip?.clip_id || null)) return;
+  pauseTimeline();
   annotationHistory.clear();
   updateAnnotationHistory();
-  const previous = state.referenceClip;
+  state.frameImages.clear();
   state.referenceClip = clip;
-  if (previous && previous.clip_id !== clip?.clip_id) {
-    // Keep old evidence available, but make replacement explicit before submission.
-    pauseTimeline();
-  }
+  // A newly published clip follows the timeline by default. Restore deliberate
+  // static inspection on reload until the user next operates the timeline.
+  if (clip?.frames?.length && !restore) state.clipEnabled = true;
   state.time = clamp(state.time, 0, timelineDuration());
   if (state.clipEnabled && clip?.frames.length) state.time = frameAtTime(clip.frames, state.time).time_sec;
   applyAnimationTime(state.time);
@@ -2092,35 +2092,42 @@ async function preparedFrame(ref) {
   return state.frameImages.get(ref.id);
 }
 async function seekTimeline(time, {playback=false}={}) {
-  if (!playback && !editable()) return;
-  if (playback && state.seeking) return;
+  if (!playback && !editable()) return false;
+  if (playback && state.seeking) return false;
   if (!playback) { pauseTimeline(); hideTextEditor(); state.drag = null; }
   const generation = ++state.seekGeneration;
   const wanted = clamp(time, 0, timelineDuration());
-  const ref = state.clipEnabled && frameAtTime(state.referenceClip?.frames, wanted);
+  // Timeline actions always follow GT, including after inspecting a static image.
+  const ref = frameAtTime(state.referenceClip?.frames, wanted);
   const next = ref ? ref.time_sec : wanted;
   try {
-    if (ref && state.activeReferenceId !== ref.id) {
+    if (ref && (state.activeReferenceId !== ref.id || ui.referenceImage.getAttribute('src') !== ref.url)) {
       state.seeking = true;
       const image = await preparedFrame(ref);
-      if (generation !== state.seekGeneration) return;
+      if (generation !== state.seekGeneration) return false;
       // Commit decoded reference pixels and geometry together, so slow image
       // loading cannot leave a newer pose next to an older reference frame.
       image.id = 'reference-image'; image.alt = '当前参考帧';
       ui.referenceImage.replaceWith(image); ui.referenceImage = image;
       image.addEventListener('load', updateReferenceGeometry);
     }
-    if (generation !== state.seekGeneration) return;
+    if (generation !== state.seekGeneration) return false;
+    const resumedReference = !!ref && !state.clipEnabled;
+    if (resumedReference) state.clipEnabled = true;
     const changed = Math.abs(state.time - next) > 1e-7;
     state.time = next;
     if (changed || !playback) applyAnimationTime(next);
     syncTimelineReference();
+    if (resumedReference) renderReferenceStrip();
     if (changed || !playback) { state.sceneView = 'live'; renderSceneView(); }
     updateReferenceGeometry();
     renderTimeline({moments:!playback});
     if (!playback) saveDraft();
+    return true;
   } catch (error) {
+    if (generation !== state.seekGeneration) return false;
     pauseTimeline(); announce('参考帧无法加载：' + error.message, true);
+    return false;
   } finally { if (generation === state.seekGeneration) state.seeking = false; }
 }
 
@@ -2256,20 +2263,21 @@ async function uploadClip(files) {
 }
 function bindTimelineEvents() {
   ui.clipInput.addEventListener('change', () => uploadClip(ui.clipInput.files));
-  ui.play.addEventListener('click', () => {
+  ui.play.addEventListener('click', async () => {
     if (!editable()) return;
     if (state.playing) { pauseTimeline(); saveDraft(); }
     else {
       setMode('select'); hideTextEditor();
-      if (state.time >= timelineDuration() - 1 / timelineFps()) seekTimeline(0);
-      state.sceneView = 'live'; renderSceneView();
+      const startTime = state.time >= timelineDuration() - 1 / timelineFps() ? 0 : state.time;
+      // Decode the starting GT frame before anchoring the playback clock.
+      if (!await seekTimeline(startTime) || !editable()) return;
       state.playing = true; state.playbackStart = null;
     }
     renderTimeline(); drawOverlays();
   });
   ui.seek.addEventListener('input', () => seekTimeline(Number(ui.seek.value)));
-  id('timeline-prev').addEventListener('click', () => seekTimeline(stepTime(state.clipEnabled ? state.referenceClip?.frames : null, state.time, -1, timelineFps(), timelineDuration())));
-  id('timeline-next').addEventListener('click', () => seekTimeline(stepTime(state.clipEnabled ? state.referenceClip?.frames : null, state.time, 1, timelineFps(), timelineDuration())));
+  id('timeline-prev').addEventListener('click', () => seekTimeline(stepTime(state.referenceClip?.frames, state.time, -1, timelineFps(), timelineDuration())));
+  id('timeline-next').addEventListener('click', () => seekTimeline(stepTime(state.referenceClip?.frames, state.time, 1, timelineFps(), timelineDuration())));
   id('save-moment').addEventListener('click', () => ensureDynamicMoment({showSnapshot:true}));
   ui.scope.addEventListener('change', () => { renderTimeline(); saveDraft(); });
   for (const input of [ui.rangeStart, ui.rangeEnd]) input.addEventListener('change', saveDraft);

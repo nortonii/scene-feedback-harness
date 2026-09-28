@@ -65,6 +65,7 @@ Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the G
 
 A reference image sequence or video can share a timeline with an animated GLB. Play, pause, seek, and stepping to the previous or next sampled frame update both the reference and the 3D animation. The existing static-image and static-GLB workflow remains available. GLB animation supports node translation, rotation, scale, skinning, and morph targets with fixed topology. Variable-topology mesh caches, fluids, and live physics simulation are not integrated yet.
 
+- Inspect static thumbnails while paused; playing, seeking, or stepping to the previous or next frame automatically returns to the dynamic reference sequence. A newly published sequence resumes synchronization; saved marks keep their original frames.
 - Starting a mark pauses playback and records its time, reference frame, camera, and scene revision. Keep up to 8 scene snapshots from different moments and return to a moment to review or annotate it.
 - One prompt can reference marks and objects from several moments. Use the timeline’s `选项` menu to choose the marked frames (`所标帧`), a time interval, or the whole clip as the feedback scope. The interval expresses the requested scope; drawn lines are not interpreted as motion paths or geometric constraints.
 - Marks appear on their own frame. A submission includes original and annotated references and scene snapshots for the selected moments, plus timestamps, cameras, object references, and scene revisions. The whole video is not sent frame by frame to the model.
