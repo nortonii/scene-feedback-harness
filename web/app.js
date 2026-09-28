@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
 import { createAnnotationHistory } from './annotation-history.js';
+import { createFrameImageCache } from './frame-image-cache.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -81,7 +82,9 @@ const state = {
 };
 Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
   animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
-  seekGeneration:0, seeking:false, frameImages:new Map()});
+  seekGeneration:0, seeking:false, timelineTarget:null, scrubRequest:null, timelineSaveTimer:null});
+
+const frameImages = createFrameImageCache();
 
 let minimalLayout = null;
 const annotationHistory = createAnnotationHistory();
@@ -92,6 +95,7 @@ const camera = new THREE.PerspectiveCamera(44, 1, 0.01, 2000);
 camera.up.set(0, 0, 1);
 camera.position.set(5.5, -8.5, 6.5);
 const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+const rendererSize = new THREE.Vector2();
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -167,6 +171,7 @@ async function api(path, options={}) {
 
 function storageKey() { return 'astra-visual-draft:' + state.sessionId; }
 function saveDraft() {
+  clearTimeout(state.timelineSaveTimer); state.timelineSaveTimer = null;
   if (!state.sessionId || state.sceneRevision === null || state.playing) return;
   try {
     localStorage.setItem(storageKey(), JSON.stringify({
@@ -1800,7 +1805,7 @@ function updateSnapshotGeometry() {
   ui.snapshotMedia.style.height = Math.max(1, height * scale) + 'px';
   drawOverlays();
 }
-function renderSceneView() {
+function renderSceneView({persist=true}={}) {
   const hasSnapshot = !!state.snapshot;
   if (!hasSnapshot) state.sceneView = 'live';
   const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
@@ -1819,7 +1824,7 @@ function renderSceneView() {
   updateSnapshotGeometry();
   updateMode();
   updateSceneHint();
-  saveDraft();
+  if (persist) saveDraft();
 }
 
 function setReferences(references) {
@@ -1925,11 +1930,38 @@ function showActiveReference() {
     drawOverlays();
     return;
   }
-  if (ui.referenceImage.getAttribute('src') !== ref.url) ui.referenceImage.src = ref.url;
+  if (!imageMatchesUrl(ui.referenceImage, ref.url)) {
+    delete ui.referenceImage.dataset.sourceUrl;
+    ui.referenceImage.src = ref.url;
+  }
   const compareUrl = alignmentOverlayUrl(ref);
-  if (ui.compareImage.getAttribute('src') !== compareUrl) ui.compareImage.src = compareUrl;
+  if (!imageMatchesUrl(ui.compareImage, compareUrl)) {
+    delete ui.compareImage.dataset.sourceUrl;
+    ui.compareImage.src = compareUrl;
+  }
   ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
   if (ui.referenceImage.complete) updateReferenceGeometry();
+}
+function imageMatchesUrl(image, url) {
+  const source = image.getAttribute('src');
+  return source === url || (source?.startsWith('blob:') && image.dataset.sourceUrl === url);
+}
+function imageReadyAtUrl(image, url) {
+  return image.complete && image.naturalWidth > 0 && imageMatchesUrl(image, url);
+}
+function installTimelineImages(image, overlay) {
+  if (image !== ui.referenceImage) {
+    image.id = 'reference-image'; image.alt = '当前参考帧';
+    image.onload = updateReferenceGeometry;
+    image.onerror = () => announce('这张参考图无法显示。', true);
+    ui.referenceImage.replaceWith(image); ui.referenceImage = image;
+  }
+  overlay.id = ui.compareImage.id;
+  overlay.alt = ui.compareImage.alt;
+  overlay.className = ui.compareImage.className;
+  overlay.style.cssText = ui.compareImage.style.cssText;
+  overlay.onload = resizeScene;
+  ui.compareImage.replaceWith(overlay); ui.compareImage = overlay;
 }
 function updateReferenceGeometry() {
   const image = ui.referenceImage;
@@ -2102,7 +2134,7 @@ function renderAnimationChoices() {
       entry.action = entry.mixer.clipAction(entry.clip);
       entry.action.setLoop(THREE.LoopOnce, 1); entry.action.clampWhenFinished = true;
       state.animationChoices[objectId] = {index:entry.clips.indexOf(entry.clip), name:entry.clip.name};
-      seekTimeline(state.time); saveDraft();
+      seekTimeline(state.time, {forcePose:true}); saveDraft();
     });
     label.append(select); ui.animationChoices.append(label);
   }
@@ -2113,7 +2145,7 @@ function setReferenceClip(clip, {restore=false}={}) {
   cacheMomentFrameIndices();
   annotationHistory.clear();
   updateAnnotationHistory();
-  state.frameImages.clear();
+  frameImages.clear();
   state.referenceClip = clip;
   cacheMomentFrameIndices();
   // A newly published clip follows the timeline by default. Restore deliberate
@@ -2123,6 +2155,7 @@ function setReferenceClip(clip, {restore=false}={}) {
   if (state.clipEnabled && clip?.frames.length) state.time = frameAtTime(clip.frames, state.time).time_sec;
   applyAnimationTime(state.time);
   syncTimelineReference(); renderReferenceStrip(); renderTimeline();
+  prefetchTimelineFrames(state.time);
 }
 function syncTimelineReference() {
   const ref = clipReference();
@@ -2131,11 +2164,13 @@ function syncTimelineReference() {
   const followCamera = state.alignmentExact || !state.alignedReferenceId;
   state.activeReferenceId = ref.id;
   if (changed) {
-    showActiveReference();
     if (referenceCamera(ref) && followCamera) alignActiveReference({showLive:false, persist:false});
-    else if (!referenceCamera(ref)) {
-      state.alignedReferenceId = null; state.alignmentExact = false;
-      resizeScene(); updateAlignmentStatus();
+    else {
+      if (!referenceCamera(ref)) {
+        state.alignedReferenceId = null; state.alignmentExact = false;
+        resizeScene();
+      }
+      showActiveReference();
     }
     drawOverlays();
   }
@@ -2143,17 +2178,44 @@ function syncTimelineReference() {
 function pauseTimeline() {
   state.playing = false; state.playbackStart = null;
   state.seekGeneration++; state.seeking = false;
+  if (state.scrubRequest !== null) cancelAnimationFrame(state.scrubRequest);
+  state.scrubRequest = null; state.timelineTarget = null;
   ui.play.textContent = '播放';
 }
-async function preparedFrame(ref) {
-  if (!state.frameImages.has(ref.id)) {
-    const pending = loadImage(ref.url).catch((error) => { state.frameImages.delete(ref.id); throw error; });
-    state.frameImages.set(ref.id, pending);
-    if (state.frameImages.size > 12) state.frameImages.delete(state.frameImages.keys().next().value);
-  }
-  return state.frameImages.get(ref.id);
+function timelineOverlayUrl(ref) {
+  const willAlign = referenceCamera(ref) && (state.alignmentExact || !state.alignedReferenceId);
+  return (willAlign || state.alignedReferenceId === ref.id) && ref.alignment_image_url || ref.url;
 }
-async function seekTimeline(time, {playback=false}={}) {
+function prefetchTimelineFrames(time, direction=1) {
+  const frames = state.referenceClip?.frames;
+  if (!frames?.length || !state.clipEnabled) { frameImages.prefetch([]); return; }
+  const center = frames.indexOf(frameAtTime(frames, time));
+  const urls = [];
+  // Read ahead in the direction of travel, while keeping a few reverse steps warm.
+  for (let offset = 1; offset <= 8; offset++) {
+    for (const index of [center + direction * offset, ...(offset <= 3 ? [center - direction * offset] : [])]) {
+      const ref = frames[index];
+      if (ref) urls.push(ref.url, timelineOverlayUrl(ref));
+    }
+  }
+  frameImages.prefetch(urls);
+}
+function scheduleTimelineDraft() {
+  clearTimeout(state.timelineSaveTimer);
+  state.timelineSaveTimer = setTimeout(() => saveDraft(), 180);
+}
+function scrubTimeline(time, {final=false}={}) {
+  if (!editable()) return;
+  pauseTimeline();
+  state.timelineTarget = clamp(time, 0, timelineDuration());
+  renderTimeline({moments:false});
+  if (final) { seekTimeline(state.timelineTarget); return; }
+  state.scrubRequest = requestAnimationFrame(() => {
+    state.scrubRequest = null;
+    seekTimeline(state.timelineTarget);
+  });
+}
+async function seekTimeline(time, {playback=false, forcePose=false}={}) {
   if (!playback && !editable()) return false;
   if (playback && state.seeking) return false;
   if (!playback) { pauseTimeline(); hideTextEditor(); state.drag = null; }
@@ -2162,35 +2224,58 @@ async function seekTimeline(time, {playback=false}={}) {
   // Timeline actions always follow GT, including after inspecting a static image.
   const ref = frameAtTime(state.referenceClip?.frames, wanted);
   const next = ref ? ref.time_sec : wanted;
+  const imagesReady = !ref || (imageReadyAtUrl(ui.referenceImage, ref.url) &&
+    imageReadyAtUrl(ui.compareImage, timelineOverlayUrl(ref)));
+  if (playback && Math.abs(state.time - next) < 1e-7 && imagesReady &&
+      state.sceneView === 'live' && (!ref || state.clipEnabled)) return true;
+  if (!playback) {
+    state.timelineTarget = next;
+    renderTimeline({moments:false});
+  }
   try {
-    if (ref && (state.activeReferenceId !== ref.id || ui.referenceImage.getAttribute('src') !== ref.url)) {
+    if (ref && (state.activeReferenceId !== ref.id || !imagesReady)) {
       state.seeking = true;
-      const image = await preparedFrame(ref);
+      const [sourceImage, sourceOverlay] = await frameImages.prepare([ref.url, timelineOverlayUrl(ref)]);
+      if (generation !== state.seekGeneration) return false;
+      // Keep cached images separate from DOM nodes, whose src may later change
+      // when the user opens a static reference.
+      const image = sourceImage.cloneNode();
+      const overlay = sourceOverlay.cloneNode();
+      await Promise.all([image, overlay].map((entry) => entry.decode ? entry.decode() : Promise.resolve()));
       if (generation !== state.seekGeneration) return false;
       // Commit decoded reference pixels and geometry together, so slow image
       // loading cannot leave a newer pose next to an older reference frame.
-      image.id = 'reference-image'; image.alt = '当前参考帧';
-      ui.referenceImage.replaceWith(image); ui.referenceImage = image;
-      image.addEventListener('load', updateReferenceGeometry);
+      installTimelineImages(image, overlay);
     }
     if (generation !== state.seekGeneration) return false;
     const resumedReference = !!ref && !state.clipEnabled;
     if (resumedReference) state.clipEnabled = true;
+    const previousTime = state.time;
     const changed = Math.abs(state.time - next) > 1e-7;
+    const leavingSnapshot = state.sceneView === 'snapshot';
     state.time = next;
-    if (changed || !playback) applyAnimationTime(next);
+    if (changed || forcePose) applyAnimationTime(next);
     syncTimelineReference();
     if (resumedReference) renderReferenceStrip();
-    if (changed || !playback) { state.sceneView = 'live'; renderSceneView(); }
-    updateReferenceGeometry();
-    renderTimeline({moments:!playback});
-    if (!playback) saveDraft();
+    if (leavingSnapshot) { state.sceneView = 'live'; renderSceneView({persist:false}); }
+    if (changed || !playback) updateReferenceGeometry();
+    state.timelineTarget = null;
+    renderTimeline({moments:leavingSnapshot});
+    if (!playback) scheduleTimelineDraft();
+    if (changed || !playback) prefetchTimelineFrames(next, next < previousTime ? -1 : 1);
     return true;
   } catch (error) {
     if (generation !== state.seekGeneration) return false;
-    pauseTimeline(); announce('参考帧无法加载：' + error.message, true);
+    pauseTimeline(); renderTimeline({moments:false});
+    announce('参考帧无法加载：' + error.message, true);
     return false;
-  } finally { if (generation === state.seekGeneration) state.seeking = false; }
+  } finally {
+    if (generation === state.seekGeneration) {
+      state.seeking = false;
+      state.timelineTarget = null;
+      renderTimeline({moments:false});
+    }
+  }
 }
 
 function advanceTimeline(timestamp) {
@@ -2204,8 +2289,9 @@ function renderTimeline({moments=true}={}) {
   const enabled = dynamicEnabled();
   ui.timeline.classList.toggle('hidden', !enabled);
   const duration = timelineDuration();
-  ui.seek.max = String(duration || 1); ui.seek.value = String(state.time);
-  ui.time.textContent = state.time.toFixed(3) + ' / ' + duration.toFixed(3) + ' s';
+  const displayedTime = state.timelineTarget ?? state.time;
+  ui.seek.max = String(duration || 1); ui.seek.value = String(displayedTime);
+  ui.time.textContent = displayedTime.toFixed(3) + ' / ' + duration.toFixed(3) + ' s' + (state.timelineTarget !== null ? ' · 更新中' : '');
   ui.play.textContent = state.playing ? '暂停' : '播放';
   ui.timelineSource.textContent = state.referenceClip
     ? state.referenceClip.name + ' · ' + state.referenceClip.frames.length + ' 帧 · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
@@ -2243,8 +2329,7 @@ function renderTimeline({moments=true}={}) {
 }
 function referencePixelsReady() {
   const ref = activeReference();
-  return !ref || (ui.referenceImage.complete && ui.referenceImage.naturalWidth > 0 &&
-    ui.referenceImage.getAttribute('src') === ref.url);
+  return !ref || imageReadyAtUrl(ui.referenceImage, ref.url);
 }
 function ensureDynamicMoment({showSnapshot=false}={}) {
   if (!editable()) return null;
@@ -2340,7 +2425,8 @@ function bindTimelineEvents() {
     }
     renderTimeline(); drawOverlays();
   });
-  ui.seek.addEventListener('input', () => seekTimeline(Number(ui.seek.value)));
+  ui.seek.addEventListener('input', () => scrubTimeline(Number(ui.seek.value)));
+  ui.seek.addEventListener('change', () => scrubTimeline(Number(ui.seek.value), {final:true}));
   id('timeline-prev').addEventListener('click', () => seekTimeline(stepTime(state.referenceClip?.frames, state.time, -1, timelineFps(), timelineDuration())));
   id('timeline-next').addEventListener('click', () => seekTimeline(stepTime(state.referenceClip?.frames, state.time, 1, timelineFps(), timelineDuration())));
   id('save-moment').addEventListener('click', () => ensureDynamicMoment({showSnapshot:true}));
@@ -3132,7 +3218,7 @@ function resizeScene() {
   const pose = state.alignedReferenceId === ref?.id && referenceCamera(ref);
   if (pose) {
     const overlay = ui.compareImage;
-    const sourceMatches = overlay.getAttribute('src') === alignmentOverlayUrl(ref);
+    const sourceMatches = imageMatchesUrl(overlay, alignmentOverlayUrl(ref));
     const imageWidth = sourceMatches && overlay.naturalWidth || pose.intrinsic.width;
     const imageHeight = sourceMatches && overlay.naturalHeight || pose.intrinsic.height;
     const scale = Math.min(width / imageWidth, height / imageHeight);
@@ -3157,7 +3243,7 @@ function resizeScene() {
       near, camera.far, renderer.coordinateSystem
     );
     camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-    renderer.setSize(viewWidth, viewHeight, false);
+    setRendererSize(viewWidth, viewHeight);
   } else {
     ui.viewport.style.left = '0';
     ui.viewport.style.top = '0';
@@ -3167,16 +3253,20 @@ function resizeScene() {
     ui.viewport.style.height = '100%';
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
-    renderer.setSize(width, height, false);
+    setRendererSize(width, height);
   }
   updateSnapshotGeometry();
   drawOverlays();
+}
+function setRendererSize(width, height) {
+  renderer.getSize(rendererSize);
+  if (rendererSize.x !== width || rendererSize.y !== height) renderer.setSize(width, height, false);
 }
 function animate(timestamp) {
   requestAnimationFrame(animate);
   advanceTimeline(timestamp);
   controls.update();
-  renderer.render(threeScene, camera);
+  if (state.sceneView === 'live') renderer.render(threeScene, camera);
 }
 async function poll() {
   if (!state.sessionId || state.submitting || state.uploading || poll.running) return;
