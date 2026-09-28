@@ -74,6 +74,7 @@ class DynamicSceneTests(unittest.TestCase):
         clip = self.import_clip()
         self.assertEqual(clip["duration_sec"], 1)
         self.assertEqual(clip["source_type"], "sequence")
+        self.assertEqual([frame["frame_index"] for frame in clip["frames"]], [0, 1])
         self.assertEqual(clip["frames"][0]["camera"], calibrated_camera())
         self.assertEqual(self.store.scene()["revision"], 1)
         self.assertEqual(self.gateway.state()["reference_clip"], clip)
@@ -125,21 +126,66 @@ class DynamicSceneTests(unittest.TestCase):
         evidence = feedback["dynamic_frames"][0]
         self.assertEqual(evidence["reference_original_url"], clip["frames"][0]["url"])
         self.assertEqual(evidence["reference_camera"], calibrated_camera())
+        self.assertEqual(evidence["frame_index"], 0)
+        self.assertEqual(feedback["annotations"][0]["frame_index"], 0)
         self.assertFalse(any(key.endswith("_data_url") for key in evidence))
         message, paths = self.gateway._turn_input(feedback)
         self.assertEqual(len(paths), 4)
         self.assertIn("0.000000 秒", message)
+        self.assertIn("片段第 1 帧", message)
         self.assertIn("start_sec", message)
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
             tool_result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
         self.assertEqual(sum(item.type == "image" for item in tool_result.content), 4)
         self.assertIn("camera", tool_result.structured_content["items"][0]["dynamic_frames"][0])
+        self.assertTrue(any("clip frame 1, time 0.000000s" in item.text for item in tool_result.content if item.type == "text"))
         # Replays are resolved before clip validation and remain exactly-once after replacement.
         self.store.set_reference_clip(self.session, {"clear": True})
         replay = self.store.submit_feedback(self.session, payload)
         self.assertEqual(replay["feedback_id"], feedback["feedback_id"])
         self.assertEqual(self.store.get_session(self.session)["feedback_count"], 1)
         self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(feedback["feedback_id"])["dynamic_frames"], feedback["dynamic_frames"])
+
+    def test_irregular_clip_indices_follow_sequence_and_override_client_indices(self) -> None:
+        clip = self.store.set_reference_clip(self.session, {"fps": 30, "frames": [
+            {"name": "source_9025.png", "time_sec": 0, "data_url": self.data_url, "frame_index": 9025},
+            {"name": "source_9140.png", "time_sec": 0.17, "data_url": self.data_url, "frame_index": 9140},
+            {"name": "source_10000.png", "time_sec": 4.9, "data_url": self.data_url, "frame_index": 10000},
+        ]})["reference_clip"]
+        self.assertEqual([frame["frame_index"] for frame in clip["frames"]], [0, 1, 2])
+        payload = self.payload(clip)
+        payload["timeline"]["time_sec"] = 4.8
+        payload["dynamic_frames"][0].update(time_sec=4.8, reference_frame_id=clip["frames"][2]["id"], frame_index=999)
+        payload["annotations"] = [{"id": "irregular-mark", "type": "point", "pane": "scene", "frame_id": "moment1",
+            "time_sec": 4.8, "clip_id": clip["clip_id"], "scene_revision": 1, "frame_index": 888,
+            "coordinates": {"x": 0.2, "y": 0.3}}]
+        payload["note"] = "Check [[annotation:irregular-mark]]."
+        original_payload = copy.deepcopy(payload)
+        saved = self.store.submit_feedback(self.session, payload)
+        self.assertEqual(saved["dynamic_frames"][0]["frame_index"], 2)
+        self.assertEqual(saved["annotations"][0]["frame_index"], 2)
+        self.assertEqual(saved["inline_references"][0]["annotation"]["frame_index"], 2)
+        self.assertEqual(payload, original_payload)
+        message, _ = self.gateway._turn_input(saved)
+        self.assertIn("片段第 3 帧，4.800000 秒", message)
+        with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
+            result = mcp_server._visual_tool_result({"items": [copy.deepcopy(saved)]})
+        self.assertTrue(any("clip frame 3, time 4.800000s" in item.text for item in result.content if item.type == "text"))
+        self.assertEqual(self.store.feedback_by_id(saved["feedback_id"]), saved)
+
+    def test_old_clips_without_stored_indices_derive_ordinals_when_submitting(self) -> None:
+        clip = self.import_clip()
+        for frame in self.store.state["sessions"][self.session]["reference_clip"]["frames"]:
+            frame.pop("frame_index")
+        self.store._save()
+        self.store = SceneStore(self.store.data_dir)
+        legacy_clip = self.store.get_session(self.session)["reference_clip"]
+        self.assertTrue(all("frame_index" not in frame for frame in legacy_clip["frames"]))
+        payload = self.payload(legacy_clip)
+        payload["dynamic_frames"][0].update(time_sec=0.5, reference_frame_id=legacy_clip["frames"][1]["id"], frame_index=-1)
+        saved = self.store.submit_feedback(self.session, payload)
+        self.assertEqual(saved["dynamic_frames"][0]["frame_index"], 1)
+        self.assertEqual(self.store.get_session(self.session)["reference_clip"], legacy_clip)
 
     def test_clip_scope_frame_timestamp_and_annotation_associations_validate(self) -> None:
         clip = self.import_clip()
@@ -185,9 +231,18 @@ class DynamicSceneTests(unittest.TestCase):
             self.store.submit_feedback(self.session, payload)
 
     def test_animation_only_and_stable_node_metadata(self) -> None:
-        packet = self.store.submit_feedback(self.session, self.payload())
+        payload = self.payload()
+        payload["dynamic_frames"][0]["frame_index"] = 20
+        payload["annotations"] = [{"id": "animation-mark", "type": "point", "pane": "scene", "frame_id": "moment1",
+            "time_sec": 0, "clip_id": None, "scene_revision": 1, "frame_index": 20,
+            "coordinates": {"x": 0.2, "y": 0.3}}]
+        packet = self.store.submit_feedback(self.session, payload)
         self.assertIsNone(packet["timeline"]["clip_id"])
         self.assertEqual(len(packet["dynamic_frames"]), 1)
+        self.assertNotIn("frame_index", packet["dynamic_frames"][0])
+        self.assertNotIn("frame_index", packet["annotations"][0])
+        message, _ = self.gateway._turn_input(packet)
+        self.assertNotIn("片段第", message)
         node = self.store._scene_node({"parent_object_id": "model", "node_path": [2], "stable_id": "chair/back", "semantic_id": "chair_back"}, {"model"})
         self.assertEqual(node["stable_id"], "chair/back")
         with self.assertRaisesRegex(APIError, "stable_id"):
@@ -206,15 +261,17 @@ class DynamicSceneTests(unittest.TestCase):
         payload["scene_revision"] = revision
         frame = payload["dynamic_frames"][0]
         frame.update(scene_revision=revision, reference_frame_id=None, static_reference_id=reference["id"],
-                     animation_clips=[{"object_id": "motion", "name": "Walk", "index": 0}])
+                     animation_clips=[{"object_id": "motion", "name": "Walk", "index": 0}], frame_index=30)
         payload["annotations"] = [{"id": "still-mark", "type": "point", "pane": "reference", "reference_image_id": reference["id"],
                                     "frame_id": frame["id"], "time_sec": 0, "clip_id": clip["clip_id"], "scene_revision": revision,
-                                    "coordinates": {"x": 0.2, "y": 0.3}}]
+                                    "coordinates": {"x": 0.2, "y": 0.3}, "frame_index": 30}]
         packet = self.store.submit_feedback(self.session, payload)
         saved = packet["dynamic_frames"][0]
         self.assertEqual(saved["reference_original_url"], reference["url"])
         self.assertEqual(saved["static_reference_id"], reference["id"])
         self.assertEqual(saved["animation_clips"], [{"object_id": "motion", "name": "Walk", "index": 0}])
+        self.assertNotIn("frame_index", saved)
+        self.assertNotIn("frame_index", packet["annotations"][0])
         frame["animation_clips"][0]["name"] = "x" * 161
         with self.assertRaisesRegex(APIError, "clip name"):
             self.store.submit_feedback(self.session, payload)

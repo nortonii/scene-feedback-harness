@@ -116,7 +116,8 @@ def prepare_clip(store: Any, payload: Any, *, local_frames: list[dict[str, Any]]
         total_bytes += len(data)
         if total_bytes > byte_limit:
             raise APIError(400, f"clip frames exceed {byte_limit // (1024 * 1024)} MB")
-        frame = {"id": uuid.uuid4().hex, "name": clip_name(item.get("name", f"Frame {index + 1}")), "time_sec": time_sec}
+        frame = {"id": uuid.uuid4().hex, "name": clip_name(item.get("name", f"Frame {index + 1}")),
+                 "time_sec": time_sec, "frame_index": index}
         if item.get("camera") is not None:
             camera = store._normalize_reference_camera(item["camera"])
             if store._image_dimensions(data) != (camera["intrinsics"]["width"], camera["intrinsics"]["height"]):
@@ -171,6 +172,9 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
     if not isinstance(frames, list) or not 1 <= len(frames) <= MAX_DYNAMIC_FRAMES:
         raise APIError(400, "dynamic_frames must contain 1 to 8 frozen evidence frames")
     references = {frame["id"]: frame for frame in clip["frames"]} if clip else {}
+    # The ordinal is defined by the imported sequence, including irregular sampling
+    # and older clips saved before frame_index existed. Never infer it from fps.
+    reference_indices = {frame["id"]: index for index, frame in enumerate(clip["frames"])} if clip else {}
     static_references = {reference["id"]: reference for reference in session.get("reference_images", [])}
     prepared = []
     seen = set()
@@ -221,6 +225,8 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
             raise APIError(400, "dynamic frame selected scene nodes must be unique")
         frame = {"id": frame_id, "time_sec": frame_time, "scene_revision": frame_revision, "reference_frame_id": reference_id,
                  "camera": copy.deepcopy(camera), "selected_object_ids": list(selected), "selected_scene_nodes": nodes}
+        if reference_id is not None:
+            frame["frame_index"] = reference_indices[reference_id]
         if static_reference_id is not None:
             frame["static_reference_id"] = static_reference_id
         animations = item.get("animation_clips", [])
@@ -274,6 +280,9 @@ def validate_timed_annotations(annotations: list[dict[str, Any]], timeline: dict
                                frames: list[dict[str, Any]]) -> None:
     evidence = {item["frame"]["id"]: item["frame"] for item in frames}
     for annotation in annotations:
+        # Client indices are display hints; only a validated clip evidence frame
+        # can supply the authoritative ordinal in submitted feedback.
+        annotation.pop("frame_index", None)
         timed = any(key in annotation for key in ("frame_id", "time_sec", "clip_id"))
         if not timed:
             continue
@@ -284,3 +293,5 @@ def validate_timed_annotations(annotations: list[dict[str, Any]], timeline: dict
             raise APIError(400, "annotation timestamp, clip and revision must match its evidence frame")
         if annotation.get("pane") == "reference" and annotation.get("reference_image_id") != (frame["reference_frame_id"] or frame.get("static_reference_id")):
             raise APIError(400, "timed annotation reference must match its evidence frame")
+        if "frame_index" in frame:
+            annotation["frame_index"] = frame["frame_index"]

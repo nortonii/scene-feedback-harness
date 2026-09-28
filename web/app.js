@@ -1991,6 +1991,41 @@ function timelineDuration() {
   return state.referenceClip?.duration_sec || Math.max(0, ...[...state.animations.values()].map((entry) => entry.clip.duration), ...state.dynamicSnapshots.map((entry) => entry.time_sec + 1 / timelineFps()));
 }
 function timelineFps() { return state.referenceClip?.fps || 30; }
+function momentFrameIndex(moment) {
+  if (!moment?.reference_frame_id) return null;
+  if (moment.clip_id === state.referenceClip?.clip_id) {
+    const index = state.referenceClip.frames.findIndex((frame) => frame.id === moment.reference_frame_id);
+    if (index >= 0) return index;
+  }
+  return Number.isInteger(moment.frame_index) && moment.frame_index >= 0 ? moment.frame_index : null;
+}
+function annotationFrameIndex(annotation) {
+  const moment = state.dynamicSnapshots.find((entry) => entry.id === annotation.frame_id);
+  if (moment) return momentFrameIndex(moment);
+  return Number.isInteger(annotation.frame_index) && annotation.frame_index >= 0 ? annotation.frame_index : null;
+}
+function frameTimeLabel(time, index) {
+  if (!Number.isFinite(time)) return '';
+  return (index !== null ? '片段第 ' + (index + 1) + ' 帧 · ' : '') + time.toFixed(3) + ' s';
+}
+function annotationTimeLabel(annotation) {
+  return frameTimeLabel(annotation.time_sec, annotationFrameIndex(annotation));
+}
+function cacheMomentFrameIndices() {
+  let changed = false;
+  state.dynamicSnapshots = state.dynamicSnapshots.map((moment) => {
+    const index = momentFrameIndex(moment);
+    if (index === null || moment.frame_index === index) return moment;
+    changed = true;
+    return {...moment, frame_index:index};
+  });
+  if (changed) {
+    state.snapshot = state.dynamicSnapshots.find((moment) => moment.id === state.snapshot?.id) || state.snapshot;
+    // Moment IDs stay the same, but their newly recovered metadata must reach IDB.
+    state.draftMomentSignature = null;
+    saveMomentDraft();
+  }
+}
 function clipReference() {
   return state.clipEnabled ? frameAtTime(state.referenceClip?.frames, state.time) : null;
 }
@@ -2050,10 +2085,12 @@ function renderAnimationChoices() {
 function setReferenceClip(clip, {restore=false}={}) {
   if ((state.referenceClip?.clip_id || null) === (clip?.clip_id || null)) return;
   pauseTimeline();
+  cacheMomentFrameIndices();
   annotationHistory.clear();
   updateAnnotationHistory();
   state.frameImages.clear();
   state.referenceClip = clip;
+  cacheMomentFrameIndices();
   // A newly published clip follows the timeline by default. Restore deliberate
   // static inspection on reload until the user next operates the timeline.
   if (clip?.frames?.length && !restore) state.clipEnabled = true;
@@ -2163,7 +2200,7 @@ function renderTimeline({moments=true}={}) {
     card.className = 'moment-card' + (state.snapshot?.id === moment.id && state.sceneView === 'snapshot' ? ' active' : '');
     const button = document.createElement('button'); button.type = 'button';
     const count = state.annotations.filter((mark) => markMatchesMoment(mark, moment)).length;
-    button.textContent = moment.time_sec.toFixed(3) + ' s · v' + moment.scene_revision + ' · ' + count + ' 标记';
+    button.textContent = frameTimeLabel(moment.time_sec, momentFrameIndex(moment)) + ' · v' + moment.scene_revision + ' · ' + count + ' 标记';
     button.addEventListener('click', () => openMoment(moment.id));
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×';
     remove.title = '移除此刻和它的标记'; remove.disabled = !editable();
@@ -2215,6 +2252,8 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
     selected_object_ids:state.selectedId ? [state.selectedId] : [],
     selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : [],
     animation_clips:[...state.animations].map(([object_id, entry]) => ({object_id, name:entry.clip.name.slice(0,160), index:entry.clips.indexOf(entry.clip)}))};
+  const frameIndex = momentFrameIndex(moment);
+  if (frameIndex !== null) moment.frame_index = frameIndex;
   state.dynamicSnapshots.push(moment); state.snapshot = moment;
   if (showSnapshot) state.sceneView = 'snapshot';
   renderSceneView(); renderTimeline(); saveDraft();
@@ -2326,6 +2365,8 @@ async function captureDynamicFrames() {
       reference_frame_id:moment.reference_frame_id, static_reference_id:moment.reference_frame_id ? null : moment.reference_id, camera:moment.camera,
       selected_object_ids:moment.selected_object_ids, selected_scene_nodes:moment.selected_scene_nodes,
       animation_clips:moment.animation_clips, ...sceneBundle};
+    const frameIndex = momentFrameIndex(moment);
+    if (frameIndex !== null) entry.frame_index = frameIndex;
     if (moment.reference_url) {
       const image = await loadImage(moment.reference_url);
       const canvas = scaledCanvas(image.naturalWidth, image.naturalHeight);
@@ -2450,6 +2491,8 @@ function addAnnotation(annotation) {
     item.time_sec = state.snapshot.time_sec;
     item.clip_id = state.snapshot.clip_id;
     item.scene_revision = state.snapshot.scene_revision;
+    const frameIndex = momentFrameIndex(state.snapshot);
+    if (frameIndex !== null) item.frame_index = frameIndex;
   }
   state.annotations.push(item);
   recordAnnotationEdit(before);
@@ -2658,7 +2701,7 @@ function renderAnnotations() {
     const ref = [...state.references, ...(state.referenceClip?.frames || [])].find((item) => item.id === annotation.reference_image_id);
     title.textContent = (annotation.group_id ? circled[Number(annotation.group_id)] + ' ' : '') +
       (annotation.pane === 'reference' ? '参考图 · ' + (ref?.name || '图片') : '当前场景') +
-      ' · ' + (labels[annotation.type] || annotation.type) + (Number.isFinite(annotation.time_sec) ? ' · ' + annotation.time_sec.toFixed(3) + ' s' : '');
+      ' · ' + (labels[annotation.type] || annotation.type) + (Number.isFinite(annotation.time_sec) ? ' · ' + annotationTimeLabel(annotation) : '');
     const subtitle = document.createElement('small');
     const stale = annotation.pane === 'scene' && annotation.scene_revision !== state.sceneRevision;
     subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
@@ -2677,7 +2720,8 @@ function renderAnnotations() {
     cite.disabled = !editable();
     cite.addEventListener('mousedown', (event) => event.preventDefault());
     cite.addEventListener('click', () => insertNoteReference(
-      annotation.group_id ? '标记' + circled[Number(annotation.group_id)] : '这条' + (labels[annotation.type] || '标记'),
+      (annotation.group_id ? '标记' + circled[Number(annotation.group_id)] : '这条' + (labels[annotation.type] || '标记')) +
+        (Number.isFinite(annotation.time_sec) ? '（' + annotationTimeLabel(annotation) + '）' : ''),
       `[[annotation:${annotation.id}]]`
     ));
     const remove = document.createElement('button');
@@ -2809,7 +2853,8 @@ function insertAllAnnotationReferences() {
     const number = circled[Number(annotation.group_id)] || String(index + 1);
     const pane = annotation.pane === 'reference' ? '参考图' : '场景';
     const kind = labels[annotation.type] || '标记';
-    return [`标记${number}（${pane}·${kind}） [[annotation:${annotation.id}]]`];
+    const timeLabel = annotationTimeLabel(annotation);
+    return [`标记${number}（${pane}·${kind}${timeLabel ? ' · ' + timeLabel : ''}） [[annotation:${annotation.id}]]`];
   });
   if (!references.length) {
     minimalLayout?.closeReferences(); ui.note.focus();

@@ -1374,9 +1374,10 @@ class WorkspaceGateway:
             add(f"{crop['source']} 局部放大图", crop["url"])
         for frame in feedback.get("dynamic_frames", []):
             lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
+            frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""
             for field, label in (("reference_original", "参考原帧"), ("reference_annotated", "带用户标记的参考帧"), ("scene_original", "干净场景帧"), ("scene_annotated", "带标记和高亮的场景帧")):
                 if frame.get(field + "_url"):
-                    add(f"{label}：{frame['time_sec']:.6f} 秒，证据 {frame['id']}，场景版本 {frame['scene_revision']}", frame[field + "_url"])
+                    add(f"{label}：{frame_label}{frame['time_sec']:.6f} 秒，证据 {frame['id']}，场景版本 {frame['scene_revision']}", frame[field + "_url"])
         lines += ["", "红线、箭头、编号、框和画笔痕迹是用户后画的提示，不是参考图中的真实几何。请结合图像和原话继续当前重建任务；修改完成后调用 workspace_publish_scene 发布新的 GLB。"]
         return "\n".join(lines), image_paths
 

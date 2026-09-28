@@ -132,10 +132,11 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
             content.append(TextContent(type="text", text=f"{crop['source'].title()} detail crop: {crop['path']}"))
             content.append(_preview_image(Path(crop["path"])))
         for frame in item.get("dynamic_frames", []):
-            content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, time {frame['time_sec']:.6f}s, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
+            frame_label = f"clip frame {frame['frame_index'] + 1}, " if "frame_index" in frame else ""
+            content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, {frame_label}time {frame['time_sec']:.6f}s, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
             for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
                 if frame.get(name + "_path"):
-                    content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()}: {frame[name + '_path']}"))
+                    content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()} ({frame_label}time {frame['time_sec']:.6f}s, evidence {frame['id']}): {frame[name + '_path']}"))
                     content.append(_preview_image(Path(frame[name + "_path"])))
     return CallToolResult(content=content, structured_content=enriched)
 
