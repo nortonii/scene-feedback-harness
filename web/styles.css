@@ -44,6 +44,9 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 1px
 .attention-count { display: inline-grid; place-items: center; min-width: 16px; height: 16px; background: var(--ink); color: var(--paper); font-size: 10px; }
 .tool-panel { display: flex; gap: 28px; align-items: center; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); min-width: 0; }
 .tool-list { display: flex; align-items: center; gap: 5px; flex: none; }
+.annotation-history-tools { display: flex; align-items: center; gap: 4px; flex: none; }
+.annotation-history-tools .compact-button { gap: 5px; }
+.annotation-history-tools [aria-hidden] { font-size: 17px; }
 .tool-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 5px 10px; border: 1px solid transparent; font-size: 12px; white-space: nowrap; }
 .tool-button:hover { border-color: var(--line); }
 .tool-button.active { border-color: var(--ink); }
@@ -249,6 +252,10 @@ dialog::backdrop { background: #17171522; }
   .top-actions { gap: 10px; }
   .task-nav { max-width: 120px; }
   .workspace { column-gap: 16px; }
+  .tool-panel { gap: 14px; }
+  .tool-list { gap: 0; }
+  .tool-button { padding-left: 7px; padding-right: 7px; }
+  .annotation-history-tools .compact-button > span:last-child { display: none; }
   .pane-heading h2 { max-width: 95px; }
   .pane-actions { gap: 0; }
   .zoom-button { display: none; }
@@ -265,6 +272,7 @@ dialog::backdrop { background: #17171522; }
   .session-pill { margin-left: auto; max-width: 105px; overflow: hidden; text-overflow: ellipsis; }
   .task-nav { max-width: 118px; }
   .tool-panel { padding: 10px 0; flex-wrap: wrap; gap: 12px; }
+  .annotation-history-tools .compact-button > span:last-child { display: inline; }
   .tool-list { gap: 0; }
   .tool-button { padding: 4px 7px; min-height: 30px; gap: 4px; }
   .tool-icon { font-size: 14px; }

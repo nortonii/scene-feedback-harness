@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
+import { createAnnotationHistory } from './annotation-history.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -43,6 +44,7 @@ const ui = {
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
+  undoAnnotation:id('undo-annotation'), redoAnnotation:id('redo-annotation'),
   note:id('feedback-note'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
@@ -80,6 +82,7 @@ Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:fals
   seekGeneration:0, seeking:false, frameImages:new Map()});
 
 let minimalLayout = null;
+const annotationHistory = createAnnotationHistory();
 const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#eae9e3');
 threeScene.fog = new THREE.Fog('#eae9e3', 14, 36);
@@ -242,7 +245,62 @@ function restoreDraft() {
 }
 
 function editable() { return state.workspaceReady && state.sessionStatus === 'open' && !state.submitting && !state.uploading && !state.pendingSubmission; }
+function updateAnnotationHistory() {
+  ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
+  ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
+}
+function annotationEditState() {
+  return {annotations:[...state.annotations], dynamicSnapshots:[...state.dynamicSnapshots],
+    snapshot:state.snapshot, sceneView:state.sceneView};
+}
+function recordAnnotationEdit(before) {
+  annotationHistory.record(before, annotationEditState());
+  updateAnnotationHistory();
+}
+function applyAnnotationEdit(from, to) {
+  // Preserve moments saved by navigation since this edit. Only replay its own changes.
+  const removed = new Set(from.dynamicSnapshots.filter((moment) =>
+    !to.dynamicSnapshots.some((entry) => entry.id === moment.id)).map((moment) => moment.id));
+  const restored = to.dynamicSnapshots.filter((moment) =>
+    !from.dynamicSnapshots.some((entry) => entry.id === moment.id));
+  const moments = state.dynamicSnapshots.filter((moment) => !removed.has(moment.id));
+  for (const moment of restored) if (!moments.some((entry) => entry.id === moment.id)) moments.push(moment);
+  if (moments.length > 8) {
+    announce('恢复标记需要原截图，请先移除多余时刻（最多保留 8 个）。', true);
+    return false;
+  }
+  pauseTimeline(); hideTextEditor(); state.drag = null;
+  state.annotations = [...to.annotations];
+  state.dynamicSnapshots = moments;
+  if (from.snapshot !== to.snapshot) {
+    state.snapshot = to.snapshot;
+    state.sceneView = to.sceneView;
+    if (state.snapshot?.time_sec !== undefined) openMoment(state.snapshot.id);
+  } else if (state.snapshot?.time_sec !== undefined && !moments.some((moment) => moment.id === state.snapshot.id)) {
+    state.snapshot = null; state.sceneView = 'live';
+  }
+  renderSceneView(); renderAnnotations(); renderTimeline(); drawOverlays(); saveDraft();
+  return true;
+}
+function undoAnnotationEdit() {
+  if (!editable()) return;
+  if (annotationHistory.undo(applyAnnotationEdit)) announce('已撤销标注操作。');
+  updateAnnotationHistory();
+}
+function redoAnnotationEdit() {
+  if (!editable()) return;
+  if (annotationHistory.redo(applyAnnotationEdit)) announce('已重做标注操作。');
+  updateAnnotationHistory();
+}
+function removeAnnotation(annotationId) {
+  if (!editable() || !state.annotations.some((mark) => mark.id === annotationId)) return;
+  const before = annotationEditState();
+  state.annotations = state.annotations.filter((mark) => mark.id !== annotationId);
+  recordAnnotationEdit(before);
+  renderAnnotations(); drawOverlays(); saveDraft();
+}
 function setSession(session) {
+  if (state.sessionId !== session.session_id) annotationHistory.clear();
   state.sessionId = session.session_id;
   state.sessionStatus = session.status || 'open';
   state.feedbackCount = Number(session.feedback_count) || 0;
@@ -260,6 +318,7 @@ function setSession(session) {
     updateSubmitLabel();
   }
   renderTimeline();
+  updateAnnotationHistory();
 }
 
 async function ensureSession() {
@@ -349,6 +408,7 @@ async function clearOutbox() {
 }
 
 function updateSubmitLabel() {
+  updateAnnotationHistory();
   const status = state.agent?.status || 'disconnected';
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
@@ -1688,6 +1748,7 @@ function freezeScene() {
   if (dynamicEnabled()) { ensureDynamicMoment({showSnapshot:true}); return; }
   const oldMarks = state.annotations.filter((annotation) => annotation.pane === 'scene');
   if (oldMarks.length && !window.confirm('拍新截图会清除旧截图上的 ' + oldMarks.length + ' 条场景标记。继续？')) return;
+  const before = annotationEditState();
   settleOrbit();
   const shot = captureLiveScene();
   state.snapshot = {
@@ -1697,6 +1758,7 @@ function freezeScene() {
   };
   if (oldMarks.length) state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
   state.sceneView = 'snapshot';
+  recordAnnotationEdit(before);
   renderSceneView();
   renderAnnotations();
   saveDraft();
@@ -1888,6 +1950,7 @@ async function uploadReferences(files) {
   if (!images.length) return;
   state.uploading = true;
   ui.submit.disabled = true;
+  updateAnnotationHistory();
   try {
     for (const file of images) {
       if (!['image/jpeg','image/png'].includes(file.type)) throw new Error('请使用 PNG 或 JPEG 图片');
@@ -1917,6 +1980,7 @@ async function uploadReferences(files) {
   } finally {
     state.uploading = false;
     ui.submit.disabled = !editable();
+    updateAnnotationHistory();
     ui.referenceInput.value = '';
   }
 }
@@ -1984,6 +2048,8 @@ function renderAnimationChoices() {
 }
 function setReferenceClip(clip) {
   if ((state.referenceClip?.clip_id || null) === (clip?.clip_id || null)) return;
+  annotationHistory.clear();
+  updateAnnotationHistory();
   const previous = state.referenceClip;
   state.referenceClip = clip;
   if (previous && previous.clip_id !== clip?.clip_id) {
@@ -2095,9 +2161,11 @@ function renderTimeline({moments=true}={}) {
     remove.title = '移除此刻和它的标记'; remove.disabled = !editable();
     remove.addEventListener('click', () => {
       if (!editable()) return;
+      const before = annotationEditState();
       state.annotations = state.annotations.filter((mark) => !markMatchesMoment(mark, moment));
       state.dynamicSnapshots = state.dynamicSnapshots.filter((entry) => entry.id !== moment.id);
       if (state.snapshot?.id === moment.id) { state.snapshot = null; state.sceneView = 'live'; }
+      recordAnnotationEdit(before);
       renderSceneView(); renderAnnotations(); renderTimeline(); saveDraft();
     });
     card.append(button, remove); ui.moments.append(card);
@@ -2294,6 +2362,7 @@ function updateSceneHint() {
   }
 }
 function updateMode() {
+  updateAnnotationHistory();
   document.body.dataset.tool = state.mode;
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
@@ -2351,6 +2420,7 @@ function pointFromPointer(event, canvas) {
   };
 }
 function addAnnotation(annotation) {
+  const before = annotationEditState();
   const item = {
     id:newId(), pane:annotation.pane, type:annotation.type,
     coordinates:annotation.coordinates
@@ -2373,6 +2443,7 @@ function addAnnotation(annotation) {
     item.scene_revision = state.snapshot.scene_revision;
   }
   state.annotations.push(item);
+  recordAnnotationEdit(before);
   renderAnnotations();
   drawOverlays();
   saveDraft();
@@ -2554,6 +2625,7 @@ function drawOverlays() {
   }
 }
 function renderAnnotations() {
+  updateAnnotationHistory();
   ui.annotationList.replaceChildren();
   ui.annotationCount.textContent = String(state.annotations.length);
   renderReferenceStrip();
@@ -2605,13 +2677,7 @@ function renderAnnotations() {
     remove.textContent = '×';
     remove.title = '删除这条标记';
     remove.disabled = !editable();
-    remove.addEventListener('click', () => {
-      if (!editable()) return;
-      state.annotations = state.annotations.filter((item) => item.id !== annotation.id);
-      renderAnnotations();
-      drawOverlays();
-      saveDraft();
-    });
+    remove.addEventListener('click', () => removeAnnotation(annotation.id));
     row.append(glyph, copy, cite, remove);
     ui.annotationList.append(row);
   }
@@ -3113,14 +3179,18 @@ function bindEvents() {
   });
   id('clear-annotations').addEventListener('click', () => {
     if (!editable()) return;
+    const before = annotationEditState();
     state.annotations = [];
     state.dynamicSnapshots = [];
     if (state.snapshot?.time_sec !== undefined) { state.snapshot = null; state.sceneView = 'live'; renderSceneView(); }
+    recordAnnotationEdit(before);
     renderTimeline();
     renderAnnotations();
     drawOverlays();
     saveDraft();
   });
+  ui.undoAnnotation.addEventListener('click', undoAnnotationEdit);
+  ui.redoAnnotation.addEventListener('click', redoAnnotationEdit);
   ui.clearSelection.addEventListener('click', () => {
     if (!editable()) return;
     state.selectedId = null;
@@ -3171,6 +3241,17 @@ function bindEvents() {
     saveDraft();
   });
   document.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.isComposing &&
+        !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false])')) {
+      const key = event.key.toLowerCase();
+      if (key === 'z' || (event.ctrlKey && key === 'y')) {
+        if (!editable()) return;
+        event.preventDefault();
+        if (event.shiftKey || key === 'y') redoAnnotationEdit();
+        else undoAnnotationEdit();
+        return;
+      }
+    }
     if (event.target.closest('input, textarea, select, button, summary, a, [contenteditable=true], dialog[open]')) return;
     if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; }
     if (event.key >= '1' && event.key <= '7') {
@@ -3183,10 +3264,7 @@ function bindEvents() {
     }
     if (event.key === 'Backspace' && state.annotations.length && editable()) {
       event.preventDefault();
-      state.annotations.pop();
-      renderAnnotations();
-      drawOverlays();
-      saveDraft();
+      removeAnnotation(state.annotations.at(-1).id);
     }
   });
   document.addEventListener('keyup', (event) => { if (event.code === 'Space') state.spacePan = false; });
