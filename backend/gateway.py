@@ -1286,7 +1286,6 @@ class WorkspaceGateway:
                 feedback["delivery_scene_revision"] = revision
                 if item["scene_revision"] != revision:
                     feedback["submitted_from_stale_snapshot"] = True
-                    feedback["stale_snapshot_confirmed"] = item.get("confirmed_against_revision") is not None
             text, image_paths = self._turn_input(feedback)
             send_attempted = True
             response = self.adapter.start_turn(text, image_paths, message_id=feedback["feedback_id"])
@@ -1342,8 +1341,6 @@ class WorkspaceGateway:
         if feedback.get("submitted_from_stale_snapshot"):
             current_revision = feedback.get("delivery_scene_revision", self.store.scene()["revision"])
             lines.append(f"这份反馈采集于较早的场景版本 {feedback['scene_revision']}，发送时当前版本为 {current_revision}。附带的截图和标记仍属于采集时的版本；请结合当前场景判断修改，不要把旧标记当成当前视角坐标。")
-            if feedback.get("stale_snapshot_confirmed"):
-                lines.append("用户已确认按保存的旧截图发送。")
         if feedback.get("selected_object_ids"):
             lines.append("选中对象 ID：" + ", ".join(feedback["selected_object_ids"]))
         if feedback.get("selected_scene_nodes"):

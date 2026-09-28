@@ -2997,12 +2997,6 @@ async function submitFeedback() {
     if (mismatched) { announce('动态参考已替换，请移除旧片段的时刻和标记后再提交。', true); return; }
     if (!state.dynamicSnapshots.length && !ensureDynamicMoment()) return;
   }
-  const chosenSnapshot = snapshotForFeedback();
-  const oldMoments = dynamicEnabled() ? state.dynamicSnapshots.filter((entry) => entry.scene_revision !== state.sceneRevision) : [];
-  const staleSnapshot = (chosenSnapshot && chosenSnapshot.scene_revision !== state.sceneRevision) || oldMoments.length;
-  const oldestRevision = Math.min(chosenSnapshot?.scene_revision || state.sceneRevision, ...oldMoments.map((entry) => entry.scene_revision));
-  if (!state.pendingSubmission && staleSnapshot &&
-      !window.confirm('这条反馈针对场景版本 ' + oldestRevision + ' 的固定截图，当前已是版本 ' + state.sceneRevision + '。仍按旧截图发送给 Codex？')) return;
   pauseTimeline();
   hideTextEditor(); state.drag = null; settleOrbit();
   state.submitting = true;
@@ -3015,8 +3009,10 @@ async function submitFeedback() {
     if (!state.pendingSubmission) {
       const payload = await feedbackPayload(referencedSceneNodes, promptText);
       const key = newId();
+      // Clicking Send authorizes using the attached evidence at its original
+      // revision, including if a newer scene is published before this POST.
       state.pendingSubmission = {key, payload:{...payload, idempotency_key:key,
-        confirm_stale:!!staleSnapshot}, draftNote:promptText};
+        confirm_stale:true}, draftNote:promptText};
       try { await writeOutbox(state.pendingSubmission); }
       catch (error) { state.pendingSubmission = null; throw error; }
     }
