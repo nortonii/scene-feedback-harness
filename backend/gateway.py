@@ -62,6 +62,8 @@ class WorkspaceGateway:
         result["events_cursor"] = result.pop("event_seq")
         result["object_prompts_supported"] = True
         result["inline_references_supported"] = True
+        result["dynamic_scenes_supported"] = True
+        result["reference_clip"] = self.store.get_session(result["session_id"]).get("reference_clip")
         for approval in result.get("approvals", []):
             approval.pop("request_id", None)
         if include_capability:
@@ -914,6 +916,89 @@ class WorkspaceGateway:
                 self.store.set_reference_cameras(session_id, camera_updates)
             return {"session_id": session_id, "reference_images": copy.deepcopy(self.store.state["sessions"][session_id]["reference_images"])}
 
+    def set_reference_clip_paths(self, payload: Any) -> dict[str, Any]:
+        """Import a project-scoped sequence manifest or sample a complete video."""
+        from dynamic import MAX_LOCAL_CLIP_BYTES, clip_name, fps_value, number, sample_video
+
+        workspace = self.ensure()
+        if not isinstance(payload, dict):
+            raise APIError(400, "clip import must be an object")
+        if payload.get("clear") is True:
+            return self.store.set_reference_clip(workspace["session_id"], payload)
+        if ("manifest_path" in payload) == ("video_path" in payload):
+            raise APIError(400, "provide manifest_path or video_path")
+
+        def read_document(path: Path) -> dict[str, Any]:
+            if path.stat().st_size > 2 * 1024 * 1024:
+                raise APIError(400, "clip manifest exceeds 2 MB")
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise APIError(400, "clip manifest cannot be read") from exc
+            if not isinstance(document, dict):
+                raise APIError(400, "clip manifest must be an object")
+            return document
+
+        if "manifest_path" in payload:
+            manifest_path = self._project_file(payload["manifest_path"])
+            manifest = read_document(manifest_path)
+            entries = manifest.get("frames")
+            if not isinstance(entries, list) or not 1 <= len(entries) <= 600:
+                raise APIError(400, "clip manifest must contain 1 to 600 frames")
+            frames = []
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                    raise APIError(400, "each clip frame needs a path")
+                source_path = Path(entry["path"]).expanduser()
+                source = self._project_file(str(source_path if source_path.is_absolute() else manifest_path.parent / source_path))
+                name, data = self.store._read_reference_path(str(source))
+                frame = {"name": entry.get("name", name), "data": data}
+                for key in ("time_sec", "camera"):
+                    if key in entry:
+                        frame[key] = entry[key]
+                frames.append(frame)
+            metadata = {key: manifest[key] for key in ("name", "fps", "duration_sec") if key in manifest}
+            metadata.setdefault("name", manifest_path.stem)
+            return self.store.set_reference_clip(workspace["session_id"], metadata, local_frames=frames, byte_limit=MAX_LOCAL_CLIP_BYTES)
+        source = self._project_file(payload["video_path"])
+        fps = fps_value(payload.get("fps", 10))
+        frames, duration = sample_video(source, fps)
+        if payload.get("camera_manifest_path") is not None:
+            cameras = read_document(self._project_file(payload["camera_manifest_path"]))
+            fixed_camera = cameras.get("camera")
+            entries = cameras.get("frames", [])
+            if fixed_camera is None and (not isinstance(entries, list) or not 1 <= len(entries) <= 600):
+                raise APIError(400, "video camera manifest needs camera or timed frames")
+            timed = []
+            if fixed_camera is None:
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        raise APIError(400, "camera frame must be an object")
+                    timed.append((number(entry.get("time_sec"), "camera time_sec"), self.store._normalize_reference_camera(entry.get("camera"))))
+                if len({time for time, _ in timed}) != len(timed):
+                    raise APIError(400, "camera frame timestamps must be unique")
+            for frame in frames:
+                if fixed_camera is not None:
+                    camera = self.store._normalize_reference_camera(fixed_camera)
+                else:
+                    time, camera = min(timed, key=lambda item: abs(item[0] - frame["time_sec"]))
+                    if abs(time - frame["time_sec"]) > 0.5 / fps + 1e-5:
+                        raise APIError(400, "camera manifest must cover each sampled video timestamp")
+                    camera = copy.deepcopy(camera)
+                width, height = self.store._image_dimensions(frame["data"])
+                intrinsics = camera["intrinsics"]
+                scale_x, scale_y = width / intrinsics["width"], height / intrinsics["height"]
+                if abs(scale_x - scale_y) > 0.01:
+                    raise APIError(400, "video camera aspect ratio must match sampled frames")
+                for key in ("fx", "cx"):
+                    intrinsics[key] *= scale_x
+                for key in ("fy", "cy"):
+                    intrinsics[key] *= scale_y
+                intrinsics.update(width=width, height=height)
+                frame["camera"] = camera
+        return self.store.set_reference_clip(workspace["session_id"], {"name": clip_name(payload.get("name", source.name)), "fps": fps, "duration_sec": duration},
+                                             local_frames=frames, source_type="video", byte_limit=MAX_LOCAL_CLIP_BYTES)
+
     def _reference_camera_manifest(self) -> list[tuple[str, dict[str, Any]]]:
         """Load optional filename-prefix camera mapping from the private data dir.
 
@@ -1250,6 +1335,9 @@ class WorkspaceGateway:
                 lines.append(f"{index}. " + json.dumps(item, ensure_ascii=False))
         if feedback.get("camera"):
             lines.append("冻结视角：" + json.dumps(feedback["camera"], ensure_ascii=False))
+        if feedback.get("timeline"):
+            lines.append("动态反馈时间轴与适用范围：" + json.dumps(feedback["timeline"], ensure_ascii=False))
+            lines.append("以下每个冻结帧都保留自己的时间、相机、选择和场景版本；区间范围表示用户提示的适用时间，不是自动生成的运动约束。")
         reference_names = {item["id"]: item["name"] for item in feedback.get("reference_images", [])}
         active_id = feedback.get("active_reference_id")
         aligned_id = feedback.get("aligned_reference_id")
@@ -1284,6 +1372,11 @@ class WorkspaceGateway:
                 add(label, feedback[key])
         for crop in feedback.get("crops", []):
             add(f"{crop['source']} 局部放大图", crop["url"])
+        for frame in feedback.get("dynamic_frames", []):
+            lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
+            for field, label in (("reference_original", "参考原帧"), ("reference_annotated", "带用户标记的参考帧"), ("scene_original", "干净场景帧"), ("scene_annotated", "带标记和高亮的场景帧")):
+                if frame.get(field + "_url"):
+                    add(f"{label}：{frame['time_sec']:.6f} 秒，证据 {frame['id']}，场景版本 {frame['scene_revision']}", frame[field + "_url"])
         lines += ["", "红线、箭头、编号、框和画笔痕迹是用户后画的提示，不是参考图中的真实几何。请结合图像和原话继续当前重建任务；修改完成后调用 workspace_publish_scene 发布新的 GLB。"]
         return "\n".join(lines), image_paths
 

@@ -45,6 +45,53 @@ Selecting a reference with camera metadata automatically moves the 3D view to it
 
 Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the GLB world) and pixel-based `intrinsics` (`width`, `height`, `fx`, `fy`, `cx`, `cy`). Attach `camera` and optional `alignment_image_data_url` to an existing image by its `reference_id` through the protected `POST /api/workspace/reference-cameras` endpoint. A `reference_cameras.json` manifest in the private workbench data directory matches camera metadata by filename prefix on future imports ([example](examples/reference_cameras.example.json)); send `{"apply_manifest":true}` to the same endpoint to apply it to existing images. Camera poses and the published GLB must use the same world coordinates.
 
+## Dynamic scenes: shared timeline and feedback across frames
+
+A reference image sequence or video can share a timeline with an animated GLB. Play, pause, seek, and stepping to the previous or next sampled frame update both the reference and the 3D animation. The existing static-image and static-GLB workflow remains available. GLB animation supports node translation, rotation, scale, skinning, and morph targets with fixed topology. Variable-topology mesh caches, fluids, and live physics simulation are not integrated yet.
+
+- Starting a mark pauses playback and records its time, reference frame, camera, and scene revision. Keep up to 8 scene snapshots from different moments and return to a moment to review or annotate it.
+- One prompt can reference marks and objects from several moments. Choose whether the feedback applies to the current frame, a time interval, or the whole clip. The interval expresses the requested scope; drawn lines are not interpreted as motion paths or geometric constraints.
+- Marks appear on their own frame. A submission includes original and annotated references and scene snapshots for the selected moments, plus timestamps, cameras, object references, and scene revisions. The whole video is not sent frame by frame to the model.
+- Each reference frame can carry its own camera pose, used for alignment when that frame is selected. Publishing a new GLB preserves the playback position; seeking does not increase `scene_revision`.
+- Preserve `semantic_id` or `stable_id` in node `extras` when exporting a GLB to help identify the same object across frames and exports. A node path locates a node only within its scene revision. Names and paths are not guaranteed to survive a new export; this does not automatically track objects.
+
+Import an ordered image sequence at a chosen FPS in the browser, or import a video for server-side sampling. Video import requires executable `ffmpeg` and `ffprobe` on the service host; image sequences do not. Video is sampled on a common time grid at 10 FPS by default, with a maximum of 600 frames per clip. Imports exceeding the limit fail; lower the sampling rate or trim the clip first.
+
+Codex can also import project-local material with `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)`. Supply either `manifest_path` or `video_path`. Image sequences use the manifest’s own `fps` (30 when omitted); the tool’s `fps` parameter applies only to video (default 10). A frame can supply `time_sec`; otherwise its zero-based index divided by the manifest FPS is used. Frame rate is not inferred from filenames. Frame paths may be relative to the manifest, but every input must remain inside the project. FPS must be between 0.1 and 120. The video size limit is 40 MiB for browser uploads and 250 MiB for project-local files. `clear=True` removes the reference clip without changing the scene revision.
+
+Example image-sequence manifest (all input files must be inside the current project):
+
+```json
+{
+  "name": "assembly-review",
+  "fps": 10,
+  "frames": [
+    {"path": "/absolute/path/to/project/frames/0000.png", "time_sec": 0.0},
+    {"path": "/absolute/path/to/project/frames/0001.png", "time_sec": 0.1}
+  ]
+}
+```
+
+To preserve camera alignment, import through a manifest / MCP: add the `camera` schema defined above to each sequence frame. Importing image or video files in the browser alone does not obtain camera poses. A video can supply a separate `camera_manifest_path`. Example fixed-camera manifest (replace these example values with actual calibration):
+
+```json
+{
+  "camera": {
+    "camera_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,2],[0,0,0,1]],
+    "intrinsics": {"width":1920,"height":1080,"fx":1200,"fy":1200,"cx":960,"cy":540}
+  }
+}
+```
+
+For a moving camera, use `{"frames":[{"time_sec":0.0,"camera":…},…]}` covering the sampled video times. This version matches nearby samples; it does not interpolate or estimate cameras. Video camera intrinsics are rescaled to the sampled images. Image-sequence intrinsics must already match each image’s dimensions.
+
+Import the manifest, or sample a video at the chosen FPS:
+
+```text
+workspace_set_reference_clip(manifest_path="/absolute/path/to/project/clip.json")
+workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json")
+```
+
 ## Quick start: room and cabinet
 
 The browser UI currently uses Chinese labels: `标注当前视角` means “Annotate current view,” and `发送到 Codex` means “Send to Codex.”
@@ -61,7 +108,7 @@ codex --version
 .venv/bin/python backend/server.py --project-dir "$PWD" --data-dir "$PWD/examples/room_demo/output/data"
 ```
 
-The Gateway automatically configures these five `scene_feedback` MCP tools in the project's Codex thread; you do not need to run `codex mcp add` manually. The Gateway passes its port, data directory, and project directory to that thread, preventing another project or global MCP setting from pointing it at the wrong workbench.
+The Gateway automatically configures the workbench’s `scene_feedback` MCP tools in the project's Codex thread; you do not need to run `codex mcp add` manually. The Gateway passes its port, data directory, and project directory to that thread, preventing another project or global MCP setting from pointing it at the wrong workbench.
 
 Open <http://127.0.0.1:18765/>. The target illustration is on the left, and the initial room GLB is on the right. Select the cabinet, point out its target position in the image, enter “The cabinet should be closer to the left wall; please adjust it according to the image on the left,” and click “Send.” The demo source parameters are in [`examples/room_demo/scene.json`](examples/room_demo/scene.json). [`build_scene.py`](examples/room_demo/build_scene.py) generates a GLB from those parameters; the result appears on the page after Codex calls `workspace_publish_scene`. `seed_demo.py` uses the separate `examples/room_demo/output/data` directory, so it does not overwrite regular workspace data.
 
@@ -138,6 +185,7 @@ For the desktop task binding option, also keep `--shared-thread-id "$THREAD_ID"`
 | `workspace_get_context` | Read current reference images, scene revision, and project context |
 | `workspace_get_feedback` | Read submitted feedback and its actual images |
 | `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
+| `workspace_set_reference_clip` | Import timestamped reference frames with optional per-frame cameras, or sample a project-local video with FFmpeg |
 | `workspace_request_feedback` | Default mode: ask the user to inspect something on the page and return immediately; their reply becomes the next user message |
 | `request_visual_feedback` / `wait_visual_feedback` | Unbound external MCP mode: wait and return text and images as a tool result; bound desktop mode: the former returns the page URL and submission starts a new turn |
 | `get_visual_feedback` | External MCP mode: reread submitted visual feedback |

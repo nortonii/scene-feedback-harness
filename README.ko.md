@@ -45,6 +45,53 @@
 
 각 이미지의 카메라 정보에는 GLB 월드 좌표계의 행 우선 4×4 `camera_to_world` 행렬과 이미지 픽셀 단위의 `intrinsics`(`width`, `height`, `fx`, `fy`, `cx`, `cy`)가 들어갑니다. 기존 이미지는 보호된 `POST /api/workspace/reference-cameras` API에 `reference_id`, `camera`, 선택 사항인 왜곡 보정 이미지 `alignment_image_data_url`을 보냅니다. 비공개 작업대 데이터 디렉터리의 `reference_cameras.json`은 이후 가져오는 이미지의 파일 이름 접두사로 카메라를 찾습니다([예시](examples/reference_cameras.example.json)). 기존 이미지에 적용하려면 같은 API에 `{"apply_manifest":true}`를 보냅니다. 카메라와 게시한 GLB는 같은 월드 좌표계를 사용해야 합니다.
 
+## 동적 장면: 공통 타임라인과 여러 프레임의 피드백
+
+참고 이미지 시퀀스나 동영상을 애니메이션 GLB와 같은 타임라인에서 볼 수 있습니다. 재생, 일시 정지, 탐색, 앞뒤 샘플 프레임 이동이 참고 이미지와 3D 애니메이션을 함께 갱신합니다. 기존 정적 이미지 및 정적 GLB 방식도 계속 사용할 수 있습니다. GLB는 노드 위치·회전·크기, 스키닝, 고정 토폴로지의 morph 애니메이션을 지원합니다. 토폴로지가 변하는 메시 캐시, 유체, 실시간 물리 시뮬레이션은 아직 연결되지 않았습니다.
+
+- 표시를 그리기 시작하면 재생이 멈추고 당시 시간, 참고 프레임, 카메라, 장면 버전을 기록합니다. 서로 다른 시점의 장면 스냅샷을 최대 8개 보관하고 해당 시점으로 돌아가 확인하거나 표시를 추가할 수 있습니다.
+- 하나의 지시문에서 여러 시점의 표시와 물체를 참조할 수 있습니다. 피드백 범위는 「현재 프레임」, 「시간 구간」, 「클립 전체」 중에서 선택합니다. 구간은 수정 범위를 표현하며, 그린 선을 이동 경로나 기하학적 제약으로 해석하지 않습니다.
+- 표시는 해당 프레임에서 나타납니다. 제출 시 선택한 시점의 원본 및 표시된 참고 이미지, 장면 스냅샷과 함께 시간, 카메라, 객체 참조, 장면 버전을 보냅니다. 전체 동영상을 프레임마다 모델에 보내지 않습니다.
+- 참고 프레임마다 카메라 자세를 넣을 수 있고, 프레임을 선택하면 해당 카메라에 정렬됩니다. 새 GLB를 게시해도 재생 위치가 유지되며, 타임라인 탐색으로 `scene_revision`이 증가하지 않습니다.
+- GLB 내보내기에서 노드 `extras`의 `semantic_id` 또는 `stable_id`를 유지하면 프레임이나 재내보내기 후에도 같은 물체를 식별하는 데 도움이 됩니다. 노드 경로는 해당 장면 버전 안에서만 위치를 지정합니다. 이름과 경로는 재내보내기 시 달라질 수 있으며 자동 객체 추적 기능은 아닙니다.
+
+브라우저에서 지정 FPS의 순서 있는 이미지 시퀀스를 가져오거나, 동영상을 가져와 서버에서 프레임을 추출할 수 있습니다. 동영상 가져오기에는 서비스 호스트에서 실행 가능한 `ffmpeg`와 `ffprobe`가 필요합니다. 이미지 시퀀스에는 필요하지 않습니다. 동영상은 공통 시간 간격으로 샘플링하며 기본 10 FPS, 클립당 최대 600프레임입니다. 상한을 넘으면 오류가 발생하므로 FPS를 낮추거나 필요한 구간을 먼저 잘라 주세요.
+
+Codex도 `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)`로 프로젝트 내 자료를 가져올 수 있습니다. `manifest_path` 또는 `video_path` 중 하나를 지정하세요. 이미지 시퀀스는 매니페스트의 `fps`를 사용하며 생략하면 30입니다. 도구의 `fps` 인수는 동영상에만 적용되고 기본값은 10입니다. 프레임의 `time_sec`를 생략하면 0부터 시작하는 프레임 번호를 매니페스트 FPS로 나눈 시간을 사용합니다. 파일 이름으로 FPS를 추측하지 않습니다. 프레임 경로는 매니페스트 기준 상대 경로도 가능하지만 모든 자료가 프로젝트 안에 있어야 합니다. FPS 범위는 0.1–120, 동영상 크기 상한은 브라우저 40 MiB, 프로젝트 로컬 파일 250 MiB입니다. `clear=True`는 장면 버전을 바꾸지 않고 참고 클립을 제거합니다.
+
+이미지 시퀀스 매니페스트 예시(모든 입력 파일은 현재 프로젝트 안에 있어야 합니다):
+
+```json
+{
+  "name": "assembly-review",
+  "fps": 10,
+  "frames": [
+    {"path": "/absolute/path/to/project/frames/0000.png", "time_sec": 0.0},
+    {"path": "/absolute/path/to/project/frames/0001.png", "time_sec": 0.1}
+  ]
+}
+```
+
+카메라 정렬을 유지하려면 매니페스트 / MCP로 가져오고 시퀀스의 각 프레임에 앞서 정의한 `camera`를 넣으세요. 브라우저에서 이미지나 동영상 파일만 가져오면 카메라 자세를 자동으로 얻지 못합니다. 동영상에는 별도의 `camera_manifest_path`를 지정할 수 있습니다. 고정 카메라 매니페스트 예시입니다(예시 값을 실제 보정 값으로 바꿔 주세요):
+
+```json
+{
+  "camera": {
+    "camera_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,2],[0,0,0,1]],
+    "intrinsics": {"width":1920,"height":1080,"fx":1200,"fy":1200,"cx":960,"cy":540}
+  }
+}
+```
+
+이동 카메라는 `{"frames":[{"time_sec":0.0,"camera":…},…]}`로 동영상의 샘플 시간을 모두 포함해야 합니다. 현재 버전은 가까운 샘플을 대응시키며 카메라를 보간하거나 추정하지 않습니다. 동영상 카메라 내부 파라미터는 추출 이미지 크기에 맞게 조정됩니다. 이미지 시퀀스의 내부 파라미터는 해당 이미지 크기와 일치해야 합니다.
+
+매니페스트를 가져오거나 지정 FPS로 동영상을 샘플링하세요:
+
+```text
+workspace_set_reference_clip(manifest_path="/absolute/path/to/project/clip.json")
+workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json")
+```
+
 ## 빠른 체험: 방과 캐비닛
 
 현재 브라우저 UI의 버튼 표시는 중국어입니다. `标注当前视角`는 「현재 시점에 주석 달기」, `发送到 Codex`는 「Codex에 보내기」에 해당합니다.
@@ -61,7 +108,7 @@ codex --version
 .venv/bin/python backend/server.py --project-dir "$PWD" --data-dir "$PWD/examples/room_demo/output/data"
 ```
 
-Gateway가 프로젝트의 Codex 대화에 이 다섯 가지 `scene_feedback` MCP 도구를 자동으로 구성하므로 `codex mcp add`를 수동으로 실행할 필요가 없습니다. Gateway는 포트, 데이터 디렉터리, 프로젝트 디렉터리를 해당 대화에 전달하여 다른 프로젝트나 전역 MCP 설정이 잘못된 작업대를 가리키지 않도록 합니다.
+Gateway가 프로젝트의 Codex 대화에 작업대의 `scene_feedback` MCP 도구를 자동으로 구성하므로 `codex mcp add`를 수동으로 실행할 필요가 없습니다. Gateway는 포트, 데이터 디렉터리, 프로젝트 디렉터리를 해당 대화에 전달하여 다른 프로젝트나 전역 MCP 설정이 잘못된 작업대를 가리키지 않도록 합니다.
 
 <http://127.0.0.1:18765/>을 여세요. 왼쪽에는 목표를 보여 주는 이미지가, 오른쪽에는 초기 방 GLB가 있습니다. 캐비닛을 선택하고 이미지에서 원하는 위치를 가리킨 뒤 「캐비닛을 왼쪽 벽에 더 가깝게 옮기고 왼쪽 이미지를 기준으로 맞춰 주세요」라고 입력하고 「보내기」를 누르세요. 데모의 원본 매개변수는 [`examples/room_demo/scene.json`](examples/room_demo/scene.json)에 있으며, [`build_scene.py`](examples/room_demo/build_scene.py)는 매개변수로부터 GLB를 생성합니다. Codex가 `workspace_publish_scene`을 호출하면 결과가 페이지에 나타납니다. `seed_demo.py`는 별도의 `examples/room_demo/output/data`를 사용하므로 일반 작업 공간의 데이터를 덮어쓰지 않습니다.
 
@@ -138,6 +185,7 @@ LAN_IP=192.168.1.10
 | `workspace_get_context` | 현재 참고 이미지, 장면 버전 및 프로젝트 문맥을 읽습니다 |
 | `workspace_get_feedback` | 제출된 피드백과 실제 이미지를 읽습니다 |
 | `workspace_publish_scene` | 새 GLB를 검증하고 게시하며, 예상 버전을 확인하고 페이지에 새로고침을 알립니다 |
+| `workspace_set_reference_clip` | 시간 및 선택적 프레임별 카메라가 있는 참고 이미지 시퀀스를 가져오거나 프로젝트 내 동영상을 FFmpeg로 샘플링 |
 | `workspace_request_feedback` | 기본 모드: 페이지에서 검토를 요청하고 즉시 반환합니다. 답변은 다음 사용자 메시지가 됩니다 |
 | `request_visual_feedback` / `wait_visual_feedback` | 연결하지 않은 외부 MCP 모드: 제출을 기다려 글과 이미지를 도구 결과로 반환합니다. 데스크톱 작업 연결 모드: 앞의 도구는 페이지 URL을 반환하고 제출 시 새 턴이 시작됩니다 |
 | `get_visual_feedback` | 외부 MCP 모드: 제출된 시각 피드백을 다시 읽습니다 |

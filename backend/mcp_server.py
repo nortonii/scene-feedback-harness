@@ -86,6 +86,10 @@ def _feedback_with_local_paths(result: dict[str, Any]) -> dict[str, Any]:
             url = item.get(f"{name}_url")
             if url:
                 item[f"{name}_path"] = str(_image_path(url))
+        for frame in item.get("dynamic_frames", []):
+            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
+                if frame.get(name + "_url"):
+                    frame[name + "_path"] = str(_image_path(frame[name + "_url"]))
     return result
 
 
@@ -127,6 +131,12 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
         for crop in item.get("crops", []):
             content.append(TextContent(type="text", text=f"{crop['source'].title()} detail crop: {crop['path']}"))
             content.append(_preview_image(Path(crop["path"])))
+        for frame in item.get("dynamic_frames", []):
+            content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, time {frame['time_sec']:.6f}s, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
+            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
+                if frame.get(name + "_path"):
+                    content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()}: {frame[name + '_path']}"))
+                    content.append(_preview_image(Path(frame[name + "_path"])))
     return CallToolResult(content=content, structured_content=enriched)
 
 
@@ -201,6 +211,9 @@ def workspace_get_context() -> CallToolResult:
     blocks: list[TextContent | ImageContent] = []
     for reference in context["reference_images"]:
         reference["path"] = str(_image_path(reference["url"]))
+    if context.get("reference_clip"):
+        for frame in context["reference_clip"]["frames"]:
+            frame["path"] = str(_image_path(frame["url"]))
     for obj in context["scene"]["objects"]:
         if obj.get("type") == "model" and obj.get("url", "").startswith("/assets/"):
             obj["local_path"] = str(DATA_DIR / "assets" / obj["url"].rsplit("/", 1)[-1])
@@ -224,6 +237,23 @@ def workspace_publish_scene(local_path: str, expected_revision: int) -> dict[str
     """Publish a self-contained GLB after editing its source; refresh the same workbench."""
     ensure_http_server()
     return _http("POST", "/api/workspace/publish", {"local_path": local_path, "expected_revision": expected_revision}, private=True)
+
+
+@mcp.tool()
+def workspace_set_reference_clip(manifest_path: str | None = None, video_path: str | None = None,
+                                 fps: float | None = None, camera_manifest_path: str | None = None,
+                                 clear: bool = False) -> dict[str, Any]:
+    """Load a project-local image-sequence manifest or video for synchronized dynamic review.
+
+    Sequence JSON: {name?,fps?,duration_sec?,frames:[{path,time_sec?,camera?}]}.
+    Paths are relative to the manifest and must remain within the project.
+    Videos are fully sampled into at most 600 frames (ffmpeg required); fps defaults to 10.
+    An optional video camera manifest has one camera or timed frames[{time_sec,camera}].
+    clear=True removes the current clip. This does not change scene revision.
+    """
+    ensure_http_server()
+    payload = {"clear": True} if clear else {key: value for key, value in {"manifest_path": manifest_path, "video_path": video_path, "fps": fps, "camera_manifest_path": camera_manifest_path}.items() if value is not None}
+    return _http("POST", "/api/workspace/clip", payload, private=True, timeout=120)
 
 
 @mcp.tool()

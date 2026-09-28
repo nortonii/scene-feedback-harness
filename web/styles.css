@@ -272,3 +272,22 @@ dialog p { color: #aebfc5; font-size: 12px; line-height: 1.7; }
   .visual-pane + .visual-pane { border-left: 0; border-top: 1px solid #3b4b55; }
   .stage { min-height: 290px; }
 }
+
+/* Shared reference/animation timeline. */
+.timeline-panel { grid-column: 1 / -1; padding: 10px 12px; background: #1c2932; border-bottom: 1px solid #354550; font-size: 11px; }
+.timeline-controls, .timeline-details { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.timeline-controls input[type=range] { flex: 1; min-width: 100px; accent-color: #9fe1e8; }
+.timeline-controls output { min-width: 125px; font-variant-numeric: tabular-nums; }
+.timeline-details { margin-top: 8px; color: #b9c8ce; }
+.timeline-details select, .timeline-details input, .clip-import input[type=number] { background: #111b23; color: #dbe7ed; border: 1px solid #43545f; border-radius: 4px; padding: 4px; }
+.timeline-details input { width: 76px; }
+#animation-choices { display: flex; gap: 8px; flex-wrap: wrap; }
+.moment-strip { display: flex; gap: 6px; overflow-x: auto; padding-top: 8px; }
+.moment-card { display: flex; align-items: center; border: 1px solid #43545f; border-radius: 5px; flex: none; }
+.moment-card.active { border-color: #9fe1e8; }
+.moment-card button { color: #dbe7ed; background: transparent; border: 0; padding: 5px 8px; cursor: pointer; }
+.moment-card small { color: #a9beca; }
+.clip-import { padding: 7px 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; background: #1c2932; font-size: 10px; }
+.clip-import input[type=number] { width: 52px; }
+.workspace:has(.timeline-panel:not(.hidden)) { grid-template-rows: auto minmax(0,1fr); }
+@media (max-width: 560px) { .timeline-panel { order: -1; } .timeline-controls output { min-width: 95px; } }

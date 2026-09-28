@@ -45,6 +45,53 @@
 
 各画像のカメラ情報には、GLB のワールド座標における行優先の 4×4 行列 `camera_to_world` と、画像のピクセル単位の `intrinsics`（`width`、`height`、`fx`、`fy`、`cx`、`cy`）を含めます。既存画像には、保護された `POST /api/workspace/reference-cameras` API で `reference_id`、`camera`、必要に応じて歪み補正画像の `alignment_image_data_url` を送ります。非公開のデータディレクトリに置く `reference_cameras.json` は、今後取り込む画像の名前の先頭部分でカメラを照合します（[例](examples/reference_cameras.example.json)）。既存画像にも適用するには、同じ API に `{"apply_manifest":true}` を送ります。カメラと公開する GLB は同じワールド座標系にしてください。
 
+## 動的シーン：共通タイムラインと複数フレームのフィードバック
+
+参照画像の連番や動画を、アニメーション付き GLB と同じタイムラインで確認できます。再生・一時停止・シーク・前後のサンプルフレームへの移動で、参照画像と 3D アニメーションが同時に更新されます。従来の静止画像と静的 GLB も引き続き使えます。GLB はノードの移動・回転・スケール、スキニング、固定トポロジーの morph アニメーションに対応します。トポロジーが変わるメッシュキャッシュ、流体、リアルタイム物理シミュレーションにはまだ対応していません。
+
+- 注釈を描き始めると再生を一時停止し、その時刻、参照フレーム、カメラ、シーンのリビジョンを記録します。異なる時刻のシーンスナップショットを最大 8 件保持し、その時刻に戻って確認や注釈を続けられます。
+- 1 つのプロンプトで複数の時刻の注釈や物体を参照できます。フィードバックの対象を「現在のフレーム」「時間区間」「クリップ全体」から選びます。区間は修正してほしい範囲を表し、描いた線を軌跡や幾何制約として扱うものではありません。
+- 注釈は対応するフレームで表示されます。送信内容には、選んだ時刻の元画像・注釈付き画像・シーンスナップショットと、時刻、カメラ、物体参照、シーンのリビジョンが含まれます。動画全体を全フレーム送信することはありません。
+- 各参照フレームにカメラ姿勢を付けられ、フレームを選ぶとそのカメラに合わせます。GLB を更新しても再生位置は保持され、シークで `scene_revision` が増えることはありません。
+- GLB の書き出し時に、ノードの `extras` に `semantic_id` または `stable_id` を保持すると、フレームや再書き出しをまたいだ物体の識別に役立ちます。ノードパスは同じリビジョン内での位置指定に限られます。名前やパスは再書き出しで変わる場合があり、自動追跡を行うものではありません。
+
+ブラウザーでは、指定 FPS の画像連番、またはサーバーでフレームを抽出する動画を読み込めます。動画の読み込みにはサービスを実行するホストで `ffmpeg` と `ffprobe` が必要です。画像連番には不要です。動画は共通の時間グリッドで抽出し、既定値は 10 FPS、上限は 1 クリップ 600 フレームです。上限を超える場合はエラーになるため、FPS を下げるか、必要な区間を先に切り出してください。
+
+Codex からも `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)` でプロジェクト内の素材を読み込めます。`manifest_path` と `video_path` はどちらか一方を指定します。画像連番はマニフェストの `fps` を使い、省略時は 30 です。ツール引数の `fps` は動画だけに適用され、既定値は 10 です。各フレームの `time_sec` を省略すると、0 から始まるフレーム番号をマニフェストの FPS で割った時刻を使います。ファイル名から FPS を推測することはありません。フレームのパスはマニフェストからの相対パスでも指定できますが、すべての素材はプロジェクト内に置きます。FPS の範囲は 0.1–120、動画の容量上限はブラウザーで 40 MiB、プロジェクト内のファイルで 250 MiB です。`clear=True` はシーンのリビジョンを変えずに参照クリップを削除します。
+
+画像連番のマニフェスト例（入力ファイルはすべて現在のプロジェクト内に置きます）：
+
+```json
+{
+  "name": "assembly-review",
+  "fps": 10,
+  "frames": [
+    {"path": "/absolute/path/to/project/frames/0000.png", "time_sec": 0.0},
+    {"path": "/absolute/path/to/project/frames/0001.png", "time_sec": 0.1}
+  ]
+}
+```
+
+カメラの整合を保つには、マニフェスト / MCP で読み込み、画像連番の各フレームに前述の `camera` を付けてください。ブラウザーで画像や動画のファイルだけを読み込んでも、カメラ姿勢は自動取得されません。動画には別の `camera_manifest_path` を指定できます。固定カメラのマニフェスト例です（値は実際のキャリブレーションに置き換えてください）：
+
+```json
+{
+  "camera": {
+    "camera_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,2],[0,0,0,1]],
+    "intrinsics": {"width":1920,"height":1080,"fx":1200,"fy":1200,"cx":960,"cy":540}
+  }
+}
+```
+
+移動カメラでは `{"frames":[{"time_sec":0.0,"camera":…},…]}` で動画のサンプル時刻をカバーします。この版では近いサンプルを対応させ、カメラの補間や推定は行いません。動画の内部パラメーターは抽出画像のサイズに合わせて縮尺を調整します。画像連番の内部パラメーターは対応する画像のサイズと一致させてください。
+
+マニフェストを読み込むか、指定 FPS で動画を抽出します：
+
+```text
+workspace_set_reference_clip(manifest_path="/absolute/path/to/project/clip.json")
+workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json")
+```
+
 ## クイックスタート：部屋とキャビネット
 
 現在のブラウザー画面のボタン表示は中国語です。`标注当前视角` が「現在の視点に注釈」、`发送到 Codex` が「Codex に送信」に当たります。
@@ -61,7 +108,7 @@ codex --version
 .venv/bin/python backend/server.py --project-dir "$PWD" --data-dir "$PWD/examples/room_demo/output/data"
 ```
 
-Gateway は、このプロジェクトの Codex スレッドに 5 つの `scene_feedback` MCP ツールを自動設定します。`codex mcp add` を手動で実行する必要はありません。Gateway はポート、データディレクトリ、プロジェクトディレクトリをそのスレッドに渡し、別のプロジェクトやグローバル MCP 設定が誤ったワークベンチを参照することを防ぎます。
+Gateway は、このプロジェクトの Codex スレッドにワークベンチの `scene_feedback` MCP ツールを自動設定します。`codex mcp add` を手動で実行する必要はありません。Gateway はポート、データディレクトリ、プロジェクトディレクトリをそのスレッドに渡し、別のプロジェクトやグローバル MCP 設定が誤ったワークベンチを参照することを防ぎます。
 
 <http://127.0.0.1:18765/> を開きます。左側に目標のイメージ図、右側に初期状態の部屋の GLB が表示されます。キャビネットを選び、画像上で目標位置を示し、「キャビネットを左の壁にもっと近づけ、左の画像に合わせてください」と入力して「送信」をクリックします。デモの元パラメーターは [`examples/room_demo/scene.json`](examples/room_demo/scene.json) にあります。[`build_scene.py`](examples/room_demo/build_scene.py) はそのパラメーターから GLB を生成します。Codex が `workspace_publish_scene` を呼び出すと、結果がページに表示されます。`seed_demo.py` は独立した `examples/room_demo/output/data` を使用するため、通常のワークスペースのデータを上書きしません。
 
@@ -138,6 +185,7 @@ LAN_IP=192.168.1.10
 | `workspace_get_context` | 現在の参照画像、シーンのリビジョン、プロジェクトのコンテキストを読み取る |
 | `workspace_get_feedback` | 送信済みフィードバックと実際の画像を読み取る |
 | `workspace_publish_scene` | 新しい GLB を検証して公開し、想定リビジョンを確認してページの更新を通知する |
+| `workspace_set_reference_clip` | 時刻と任意のフレーム別カメラを持つ画像連番を読み込む、またはプロジェクト内の動画を FFmpeg で抽出する |
 | `workspace_request_feedback` | 標準モード：ページで確認を依頼してすぐに返る。返信は次のユーザーメッセージになる |
 | `request_visual_feedback` / `wait_visual_feedback` | 紐付けない外部 MCP モード：送信を待ち、文章と画像をツールの結果として返す。デスクトップタスク紐付け時：前者は URL を返し、送信が新しいターンを開始する |
 | `get_visual_feedback` | 外部 MCP モード：送信済みの視覚フィードバックを再取得する |

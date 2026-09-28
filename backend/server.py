@@ -30,7 +30,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = HERE / "data"
 DEFAULT_WEB_DIR = HERE.parent / "web"
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
-SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel|references))?$")
+SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel|references|clip))?$")
 MEDIA_ROUTE = re.compile(r"^/(assets|screenshots|media)/([0-9a-f]{32}\.(?:glb|png|jpg))$")
 WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confirm$")
 WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
@@ -266,7 +266,7 @@ def _make_server_unlocked(
                 return self._send_json(200, store.workspace_events(self._event_cursor(query)))
             if self.command == "GET" and path == "/api/workspace/context":
                 workspace = gateway.state()
-                return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "delivery_mode": workspace["delivery_mode"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "request_feedback": workspace["request_feedback"]})
+                return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "delivery_mode": workspace["delivery_mode"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "reference_clip": workspace["reference_clip"], "request_feedback": workspace["request_feedback"]})
             if self.command == "GET" and path == "/api/workspace/targets":
                 return self._send_json(200, gateway.list_targets())
             if self.command == "GET" and path == "/api/workspace/models":
@@ -288,6 +288,9 @@ def _make_server_unlocked(
                 self._require_control_key()
                 payload = self._read_json()
                 return self._send_json(200, gateway.add_reference_paths(payload.get("reference_images")))
+            if self.command == "POST" and path == "/api/workspace/clip":
+                self._require_control_key()
+                return self._send_json(200, gateway.set_reference_clip_paths(self._read_json()))
             if self.command == "POST" and path == "/api/workspace/reference-cameras":
                 self._require_control_key()
                 payload = self._read_json()
@@ -381,6 +384,9 @@ def _make_server_unlocked(
                     self._require_browser_capability()
                     payload = self._read_json()
                     return self._send_json(201, gateway.add_reference_data_url(session_id, payload.get("name"), payload.get("data_url")))
+                if self.command == "POST" and suffix == "clip":
+                    self._require_browser_capability()
+                    return self._send_json(201, store.set_reference_clip(session_id, self._read_json()))
                 if self.command == "POST" and suffix == "cancel":
                     self._require_browser_capability()
                     self._read_json()

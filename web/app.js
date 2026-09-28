@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { frameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -23,6 +24,10 @@ const ui = {
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
+  clipInput:id('clip-input'), clipFps:id('clip-fps'), clipStatus:id('clip-import-status'),
+  timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
+  timelineSource:id('timeline-source'), moments:id('moment-strip'), animationChoices:id('animation-choices'),
+  scope:id('feedback-scope'), range:id('feedback-range'), rangeStart:id('range-start'), rangeEnd:id('range-end'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
   compareImage:id('compare-image'),
@@ -69,6 +74,9 @@ const state = {
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
   restoredSceneRevision:null, restoredModelUrl:null
 };
+Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
+  animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
+  seekGeneration:0, seeking:false, frameImages:new Map()});
 
 const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#1b2731');
@@ -152,7 +160,7 @@ async function api(path, options={}) {
 
 function storageKey() { return 'astra-visual-draft:' + state.sessionId; }
 function saveDraft() {
-  if (!state.sessionId || state.sceneRevision === null) return;
+  if (!state.sessionId || state.sceneRevision === null || state.playing) return;
   try {
     localStorage.setItem(storageKey(), JSON.stringify({
       annotations:state.annotations, selectedId:state.selectedId,
@@ -168,10 +176,13 @@ function saveDraft() {
         alignmentExact:state.alignmentExact,
         referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
       snapshot:state.snapshot, sceneView:state.sceneView,
+      dynamicTime:state.time, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
+      feedbackScope:ui.scope.value, rangeStart:ui.rangeStart.value, rangeEnd:ui.rangeEnd.value,
       referenceZoom:state.referenceZoom, referencePan:state.referencePan,
       eventCursor:state.eventCursor
     }));
   } catch { /* A full or disabled local store should not block feedback. */ }
+  saveMomentDraft();
 }
 function restoreDraft() {
   try {
@@ -199,6 +210,12 @@ function restoreDraft() {
       // Old drafts had scene marks without a fixed image; they cannot be mapped reliably.
       state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
     }
+    state.time = Number.isFinite(draft.dynamicTime) ? Math.max(0, draft.dynamicTime) : 0;
+    state.clipEnabled = draft.clipEnabled !== false;
+    state.animationChoices = draft.animationChoices && typeof draft.animationChoices === 'object' ? draft.animationChoices : {};
+    if (['frame','range','clip'].includes(draft.feedbackScope)) ui.scope.value = draft.feedbackScope;
+    if (Number.isFinite(Number(draft.rangeStart))) ui.rangeStart.value = draft.rangeStart;
+    if (Number.isFinite(Number(draft.rangeEnd))) ui.rangeEnd.value = draft.rangeEnd;
     state.referenceZoom = Number.isFinite(draft.referenceZoom) ? clamp(draft.referenceZoom, 1, 8) : 1;
     state.referencePan = Number.isFinite(draft.referencePan?.x) && Number.isFinite(draft.referencePan?.y)
       ? draft.referencePan : {x:0,y:0};
@@ -233,12 +250,14 @@ function setSession(session) {
   ui.submit.disabled = !editable();
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
+  ui.clipInput.disabled = !editable();
   id('clear-annotations').disabled = state.sessionStatus !== 'open';
   if (state.sessionStatus !== 'open') {
     ui.caption.textContent = '这个会话已结束。已保存的标记仍可查看。';
   } else {
     updateSubmitLabel();
   }
+  renderTimeline();
 }
 
 async function ensureSession() {
@@ -258,9 +277,12 @@ async function ensureSession() {
   }
   setSession(session);
   restoreDraft();
+  await restoreMomentDraft();
+  setReferenceClip(session.reference_clip || null);
   setReferences(session.reference_images || []);
   renderSceneView();
   state.pendingSubmission = await readOutbox();
+  renderTimeline(); updateMode();
   renderWorkspace(workspace);
   await fetchEvents(true);
   if (state.deliveryMode === 'external' && state.boundThreadId) loadTargets().catch((error) => {
@@ -1298,10 +1320,11 @@ async function addObject(item) {
     const gltf = await gltfLoader.loadAsync(item.url);
     if (state.objectNodes.get(item.id) !== root) return;
     root.remove(placeholder);
-    gltf.scene.scale.set(...(item.size || [1,1,1]));
+    root.scale.set(...(item.size || [1,1,1]));
     root.add(gltf.scene);
     root.userData.gltfRoot = gltf.scene;
     root.userData.loaded = true;
+    registerAnimations(item, gltf);
     if (state.selectedId === item.id) renderSelection();
     if (state.firstFrame) frameAllIfReady();
   } catch (error) {
@@ -1359,6 +1382,9 @@ function nodeReference(objectId, hitObject, level='part') {
   if (child !== modelRoot || path.some((index) => index < 0)) return null;
   if (path.length > 32) return null;
   const reference = {parent_object_id:objectId, node_path:path};
+  for (const key of ['stable_id','semantic_id']) {
+    if (typeof chosen.userData[key] === 'string' && chosen.userData[key].length >= 1 && chosen.userData[key].length <= 160 && !/[\x00-\x1f]/.test(chosen.userData[key])) reference[key] = chosen.userData[key];
+  }
   if (chosen.name?.trim()) reference.node_name = chosen.name.trim().slice(0, 160);
   return reference;
 }
@@ -1423,7 +1449,7 @@ function leaveReferenceCamera() {
   showActiveReference();
   saveDraft();
 }
-function alignActiveReference({showLive=true, notify=false}={}) {
+function alignActiveReference({showLive=true, notify=false, persist=true}={}) {
   const ref = activeReference();
   const pose = referenceCamera(ref);
   if (!pose) {
@@ -1458,7 +1484,7 @@ function alignActiveReference({showLive=true, notify=false}={}) {
   }
   showActiveReference();
   resizeScene();
-  saveDraft();
+  if (persist) saveDraft();
   if (notify) announce('已切换到「' + (ref.name || '参考图') + '」的拍摄机位。');
   return true;
 }
@@ -1578,6 +1604,7 @@ function renderObjectList() {
   }
 }
 function selectObject(objectId, sceneNode=null, detailNode=null) {
+  if (state.submitting || state.pendingSubmission) return;
   if (!sceneObject(objectId)) return;
   state.selectedId = objectId;
   state.selectedSceneNode = sceneNode;
@@ -1602,9 +1629,25 @@ async function loadScene(sceneData) {
     state.selectedSceneNode = null;
     state.lastPickedDetailNode = null;
   }
+  pauseTimeline();
+  for (const entry of state.animations.values()) {
+    entry.mixer.stopAllAction();
+    entry.mixer.uncacheRoot(entry.root);
+  }
+  state.animations.clear();
+  objectLayer.traverse((node) => {
+    node.geometry?.dispose();
+    for (const material of (Array.isArray(node.material) ? node.material : node.material ? [node.material] : [])) {
+      for (const value of Object.values(material)) if (value?.isTexture) value.dispose();
+      material.dispose();
+    }
+  });
   objectLayer.clear();
   state.objectNodes.clear();
   await Promise.allSettled(state.sceneObjects.map(addObject));
+  applyAnimationTime(state.time);
+  renderTimeline();
+  renderAnimationChoices();
   frameAllIfReady();
   if (state.selectedId && !sceneObject(state.selectedId)) state.selectedId = null;
   if (state.selectedSceneNode && !resolveSceneNode(state.selectedSceneNode)) state.selectedSceneNode = null;
@@ -1622,6 +1665,10 @@ async function loadScene(sceneData) {
   saveDraft();
 }
 
+function settleOrbit() {
+  const damping = controls.enableDamping;
+  controls.enableDamping = false; controls.update(); controls.enableDamping = damping;
+}
 function captureLiveScene() {
   controls.update();
   renderer.render(threeScene, camera);
@@ -1632,8 +1679,10 @@ function captureLiveScene() {
 }
 function freezeScene() {
   if (!editable() || state.sceneView !== 'live') return;
+  if (dynamicEnabled()) { ensureDynamicMoment({showSnapshot:true}); return; }
   const oldMarks = state.annotations.filter((annotation) => annotation.pane === 'scene');
   if (oldMarks.length && !window.confirm('拍新截图会清除旧截图上的 ' + oldMarks.length + ' 条场景标记。继续？')) return;
+  settleOrbit();
   const shot = captureLiveScene();
   state.snapshot = {
     id:newId(), data_url:shot, scene_revision:state.sceneRevision,
@@ -1671,7 +1720,7 @@ function renderSceneView() {
     ui.newSceneBadge.textContent = '新结果：版本 ' + state.sceneRevision + '；当前标注仍对应截图版本 ' + state.snapshot.scene_revision;
   }
   ui.compareImage.classList.toggle('hidden', showingSnapshot || !activeReference());
-  controls.enabled = state.mode === 'select' && !showingSnapshot;
+  controls.enabled = editable() && state.mode === 'select' && !showingSnapshot;
   updateSnapshotGeometry();
   updateMode();
   updateSceneHint();
@@ -1683,7 +1732,7 @@ function setReferences(references) {
   const previousActive = activeReference();
   const previousCamera = JSON.stringify(previousActive?.camera || null);
   state.references = references;
-  if (!references.some((ref) => ref.id === state.activeReferenceId)) {
+  if (!clipReference() && !references.some((ref) => ref.id === state.activeReferenceId)) {
     state.activeReferenceId = references[0]?.id || null;
   }
   renderReferenceStrip();
@@ -1705,10 +1754,21 @@ function setReferences(references) {
   renderAnnotations();
   saveDraft();
 }
-function activeReference() { return state.references.find((ref) => ref.id === state.activeReferenceId); }
+function activeReference() { return clipReference() || state.references.find((ref) => ref.id === state.activeReferenceId); }
 function renderReferenceStrip() {
   ui.referenceStrip.replaceChildren();
-  if (!state.references.length) {
+  if (state.referenceClip) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'compact-button';
+    button.textContent = (state.clipEnabled ? '✓ ' : '↺ ') + state.referenceClip.name;
+    button.addEventListener('click', () => {
+      if (!editable()) return;
+      state.clipEnabled = true; seekTimeline(state.time);
+      renderReferenceStrip();
+    });
+    ui.referenceStrip.append(button);
+  }
+  if (!state.references.length && !state.referenceClip) {
     const empty = document.createElement('span');
     empty.className = 'muted';
     empty.textContent = '还没有参考图';
@@ -1740,6 +1800,9 @@ function renderReferenceStrip() {
       button.append(badge);
     }
     button.addEventListener('click', () => {
+      if (!editable()) return;
+      pauseTimeline();
+      state.clipEnabled = false;
       state.activeReferenceId = ref.id;
       state.referenceZoom = 1;
       state.referencePan = {x:0,y:0};
@@ -1767,7 +1830,7 @@ function showActiveReference() {
     drawOverlays();
     return;
   }
-  ui.referenceImage.src = ref.url;
+  if (ui.referenceImage.getAttribute('src') !== ref.url) ui.referenceImage.src = ref.url;
   const compareUrl = alignmentOverlayUrl(ref);
   if (ui.compareImage.getAttribute('src') !== compareUrl) ui.compareImage.src = compareUrl;
   ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
@@ -1851,6 +1914,349 @@ async function uploadReferences(files) {
   }
 }
 
+function dynamicEnabled() { return !!state.referenceClip || state.animations.size > 0 || state.dynamicSnapshots.length > 0; }
+function timelineDuration() {
+  return state.referenceClip?.duration_sec || Math.max(0, ...[...state.animations.values()].map((entry) => entry.clip.duration), ...state.dynamicSnapshots.map((entry) => entry.time_sec + 1 / timelineFps()));
+}
+function timelineFps() { return state.referenceClip?.fps || 30; }
+function clipReference() {
+  return state.clipEnabled ? frameAtTime(state.referenceClip?.frames, state.time) : null;
+}
+function registerAnimations(item, gltf) {
+  if (!gltf.animations?.length) return;
+  const choice = state.animationChoices[item.id];
+  const clip = gltf.animations[choice?.index] || gltf.animations.find((entry) => entry.name === choice) || gltf.animations[0];
+  const mixer = new THREE.AnimationMixer(gltf.scene);
+  const action = mixer.clipAction(clip);
+  action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true;
+  const entry = {mixer, action, clip, clips:gltf.animations, root:gltf.scene};
+  state.animations.set(item.id, entry);
+  state.animationChoices[item.id] = {index:gltf.animations.indexOf(clip), name:clip.name};
+  applyAnimationTime(state.time);
+}
+function applyAnimationTime(time) {
+  for (const entry of state.animations.values()) {
+    // reset is needed for backward seeks after a LoopOnce action reached its end.
+    entry.action.reset().play();
+    entry.mixer.setTime(clamp(time, 0, entry.clip.duration));
+    entry.root.updateMatrixWorld(true);
+    entry.root.traverse((node) => {
+      if (node.isSkinnedMesh) {
+        node.skeleton.update(); node.computeBoundingBox(); node.computeBoundingSphere();
+      }
+    });
+  }
+  if (selectionHelper && state.selectedId) {
+    const node = resolveSceneNode(state.selectedSceneNode) || state.objectNodes.get(state.selectedId);
+    if (node) selectionHelper.box.setFromObject(node, true);
+  }
+}
+function renderAnimationChoices() {
+  ui.animationChoices.replaceChildren();
+  for (const [objectId, entry] of state.animations) {
+    if (entry.clips.length < 2) continue;
+    const label = document.createElement('label');
+    label.textContent = (sceneObject(objectId)?.name || objectId) + ' 动作 ';
+    const select = document.createElement('select');
+    entry.clips.forEach((clip, index) => {
+      const option = document.createElement('option'); option.value = String(index);
+      option.textContent = clip.name || '动作 ' + (index + 1); option.selected = clip === entry.clip;
+      select.append(option);
+    });
+    select.addEventListener('change', () => {
+      if (!editable()) return;
+      pauseTimeline(); entry.mixer.stopAllAction();
+      entry.clip = entry.clips[Number(select.value)];
+      entry.action = entry.mixer.clipAction(entry.clip);
+      entry.action.setLoop(THREE.LoopOnce, 1); entry.action.clampWhenFinished = true;
+      state.animationChoices[objectId] = {index:entry.clips.indexOf(entry.clip), name:entry.clip.name};
+      seekTimeline(state.time); saveDraft();
+    });
+    label.append(select); ui.animationChoices.append(label);
+  }
+}
+function setReferenceClip(clip) {
+  if ((state.referenceClip?.clip_id || null) === (clip?.clip_id || null)) return;
+  const previous = state.referenceClip;
+  state.referenceClip = clip;
+  if (previous && previous.clip_id !== clip?.clip_id) {
+    // Keep old evidence available, but make replacement explicit before submission.
+    pauseTimeline();
+  }
+  state.time = clamp(state.time, 0, timelineDuration());
+  if (state.clipEnabled && clip?.frames.length) state.time = frameAtTime(clip.frames, state.time).time_sec;
+  applyAnimationTime(state.time);
+  syncTimelineReference(); renderReferenceStrip(); renderTimeline();
+}
+function syncTimelineReference() {
+  const ref = clipReference();
+  if (!ref) return;
+  const changed = state.activeReferenceId !== ref.id;
+  const followCamera = state.alignmentExact || !state.alignedReferenceId;
+  state.activeReferenceId = ref.id;
+  if (changed) {
+    showActiveReference();
+    if (referenceCamera(ref) && followCamera) alignActiveReference({showLive:false, persist:false});
+    else if (!referenceCamera(ref)) {
+      state.alignedReferenceId = null; state.alignmentExact = false;
+      resizeScene(); updateAlignmentStatus();
+    }
+    drawOverlays();
+  }
+}
+function pauseTimeline() {
+  state.playing = false; state.playbackStart = null;
+  state.seekGeneration++; state.seeking = false;
+  ui.play.textContent = '播放';
+}
+async function preparedFrame(ref) {
+  if (!state.frameImages.has(ref.id)) {
+    const pending = loadImage(ref.url).catch((error) => { state.frameImages.delete(ref.id); throw error; });
+    state.frameImages.set(ref.id, pending);
+    if (state.frameImages.size > 12) state.frameImages.delete(state.frameImages.keys().next().value);
+  }
+  return state.frameImages.get(ref.id);
+}
+async function seekTimeline(time, {playback=false}={}) {
+  if (!playback && !editable()) return;
+  if (playback && state.seeking) return;
+  if (!playback) { pauseTimeline(); hideTextEditor(); state.drag = null; }
+  const generation = ++state.seekGeneration;
+  const wanted = clamp(time, 0, timelineDuration());
+  const ref = state.clipEnabled && frameAtTime(state.referenceClip?.frames, wanted);
+  const next = ref ? ref.time_sec : wanted;
+  try {
+    if (ref && state.activeReferenceId !== ref.id) {
+      state.seeking = true;
+      const image = await preparedFrame(ref);
+      if (generation !== state.seekGeneration) return;
+      // Commit decoded reference pixels and geometry together, so slow image
+      // loading cannot leave a newer pose next to an older reference frame.
+      image.id = 'reference-image'; image.alt = '当前参考帧';
+      ui.referenceImage.replaceWith(image); ui.referenceImage = image;
+      image.addEventListener('load', updateReferenceGeometry);
+    }
+    if (generation !== state.seekGeneration) return;
+    const changed = Math.abs(state.time - next) > 1e-7;
+    state.time = next;
+    if (changed || !playback) applyAnimationTime(next);
+    syncTimelineReference();
+    if (changed || !playback) { state.sceneView = 'live'; renderSceneView(); }
+    updateReferenceGeometry();
+    renderTimeline({moments:!playback});
+    if (!playback) saveDraft();
+  } catch (error) {
+    pauseTimeline(); announce('参考帧无法加载：' + error.message, true);
+  } finally { if (generation === state.seekGeneration) state.seeking = false; }
+}
+
+function advanceTimeline(timestamp) {
+  if (!state.playing || !Number.isFinite(timestamp)) return;
+  if (!state.playbackStart) state.playbackStart = {timestamp, time:state.time};
+  const next = state.playbackStart.time + (timestamp - state.playbackStart.timestamp) / 1000;
+  seekTimeline(next, {playback:true});
+  if (next >= timelineDuration() && !state.seeking) { pauseTimeline(); saveDraft(); }
+}
+function renderTimeline({moments=true}={}) {
+  const enabled = dynamicEnabled();
+  ui.timeline.classList.toggle('hidden', !enabled);
+  const duration = timelineDuration();
+  ui.seek.max = String(duration || 1); ui.seek.value = String(state.time);
+  ui.time.textContent = state.time.toFixed(3) + ' / ' + duration.toFixed(3) + ' s';
+  ui.play.textContent = state.playing ? '暂停' : '播放';
+  ui.timelineSource.textContent = state.referenceClip
+    ? state.referenceClip.name + ' · ' + state.referenceClip.frames.length + ' 帧 · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
+    : 'GLB 动画 · ' + timelineFps() + ' fps';
+  ui.range.classList.toggle('hidden', ui.scope.value !== 'range');
+  for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), id('save-moment'), ui.scope, ui.rangeStart, ui.rangeEnd, ui.clipInput]) {
+    element.disabled = !editable() || (element !== ui.clipInput && duration <= 0);
+  }
+  if (!moments) return;
+  ui.moments.replaceChildren();
+  if (!state.dynamicSnapshots.length) {
+    const hint = document.createElement('span'); hint.className = 'muted';
+    hint.textContent = '圈画时自动保留时刻；也可先点「保留此刻」。最多 8 个。'; ui.moments.append(hint);
+  }
+  for (const moment of state.dynamicSnapshots) {
+    const card = document.createElement('div');
+    card.className = 'moment-card' + (state.snapshot?.id === moment.id && state.sceneView === 'snapshot' ? ' active' : '');
+    const button = document.createElement('button'); button.type = 'button';
+    const count = state.annotations.filter((mark) => markMatchesMoment(mark, moment)).length;
+    button.textContent = moment.time_sec.toFixed(3) + ' s · v' + moment.scene_revision + ' · ' + count + ' 标记';
+    button.addEventListener('click', () => openMoment(moment.id));
+    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×';
+    remove.title = '移除此刻和它的标记'; remove.disabled = !editable();
+    remove.addEventListener('click', () => {
+      if (!editable()) return;
+      state.annotations = state.annotations.filter((mark) => !markMatchesMoment(mark, moment));
+      state.dynamicSnapshots = state.dynamicSnapshots.filter((entry) => entry.id !== moment.id);
+      if (state.snapshot?.id === moment.id) { state.snapshot = null; state.sceneView = 'live'; }
+      renderSceneView(); renderAnnotations(); renderTimeline(); saveDraft();
+    });
+    card.append(button, remove); ui.moments.append(card);
+  }
+}
+function referencePixelsReady() {
+  const ref = activeReference();
+  return !ref || (ui.referenceImage.complete && ui.referenceImage.naturalWidth > 0 &&
+    ui.referenceImage.getAttribute('src') === ref.url);
+}
+function ensureDynamicMoment({showSnapshot=false}={}) {
+  if (!editable()) return null;
+  pauseTimeline();
+  if (!referencePixelsReady()) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
+  const matching = state.dynamicSnapshots.find((entry) => entry.id === state.snapshot?.id &&
+    entry.clip_id === (state.referenceClip?.clip_id || null) && entry.reference_id === (activeReference()?.id || null) &&
+    Math.abs(entry.time_sec - state.time) < 1e-6 &&
+    (state.sceneView === 'snapshot' || (entry.scene_revision === state.sceneRevision &&
+      JSON.stringify(entry.camera) === JSON.stringify(cameraData()) &&
+      JSON.stringify(entry.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []) &&
+      JSON.stringify(entry.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []))));
+  if (matching) {
+    if (showSnapshot) { state.sceneView = 'snapshot'; renderSceneView(); }
+    return matching;
+  }
+  if (state.dynamicSnapshots.length >= 8) { announce('已保留 8 个时刻，请先移除一个再圈画。', true); return null; }
+  const ref = activeReference();
+  settleOrbit();
+  const selectedShot = captureLiveScene();
+  const priorVisibility = feedbackLayer.visible;
+  feedbackLayer.visible = false;
+  const shot = captureLiveScene();
+  feedbackLayer.visible = priorVisibility;
+  const moment = {id:newId(), data_url:shot, selected_data_url:selectedShot,
+    time_sec:state.time, clip_id:state.referenceClip?.clip_id || null,
+    scene_revision:state.sceneRevision, camera:cameraData(),
+    reference_frame_id:clipReference()?.id || null,
+    reference_id:ref?.id || null, reference_url:ref?.url || null,
+    selected_object_ids:state.selectedId ? [state.selectedId] : [],
+    selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : [],
+    animation_clips:[...state.animations].map(([object_id, entry]) => ({object_id, name:entry.clip.name.slice(0,160), index:entry.clips.indexOf(entry.clip)}))};
+  state.dynamicSnapshots.push(moment); state.snapshot = moment;
+  if (showSnapshot) state.sceneView = 'snapshot';
+  renderSceneView(); renderTimeline(); saveDraft();
+  return moment;
+}
+function openMoment(momentId) {
+  if (!editable()) return;
+  const moment = state.dynamicSnapshots.find((entry) => entry.id === momentId);
+  if (!moment) return;
+  pauseTimeline(); hideTextEditor(); state.drag = null;
+  state.time = moment.time_sec; applyAnimationTime(state.time);
+  if (moment.clip_id === state.referenceClip?.clip_id) state.clipEnabled = !!moment.reference_frame_id;
+  if (moment.reference_frame_id) syncTimelineReference();
+  else { state.activeReferenceId = moment.reference_id; showActiveReference(); }
+  state.snapshot = moment; state.sceneView = 'snapshot';
+  renderSceneView(); renderTimeline(); drawOverlays(); saveDraft();
+}
+async function uploadClip(files) {
+  if (!editable() || !files.length) return;
+  if (state.dynamicSnapshots.length && !window.confirm('替换动态参考会清除已保留的动态时刻及其标记。继续？')) return;
+  const fps = Number(ui.clipFps.value);
+  if (!Number.isFinite(fps) || fps < 0.1 || fps > 120) { announce('帧率需在 0.1–120 之间。', true); return; }
+  const ordered = [...files].sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true}));
+  const video = ordered.length === 1 && (ordered[0].type.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(ordered[0].name));
+  if (ordered.length > 600 || ordered.reduce((sum, file) => sum + file.size, 0) > 40 * 1024 * 1024) {
+    announce('最多 600 帧，一次上传总大小最多 40 MiB。可通过 MCP 导入服务器上的文件。', true); return;
+  }
+  pauseTimeline(); state.uploading = true; renderTimeline(); updateSubmitLabel();
+  ui.clipStatus.textContent = video ? '正在上传并采样视频…' : '正在导入参考帧…';
+  try {
+    const body = video ? {name:ordered[0].name, fps, video_data_url:await readFile(ordered[0])}
+      : {name:ordered[0].name + ' 等 ' + ordered.length + ' 帧', fps, frames:await Promise.all(ordered.map(async (file,index) => {
+        if (!['image/png','image/jpeg'].includes(file.type)) throw new Error('序列请使用 PNG / JPEG；视频请单独选择。');
+        return {name:file.name, time_sec:index / fps, data_url:await readFile(file)};
+      }))};
+    const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/clip', {method:'POST', body});
+    state.annotations = state.annotations.filter((mark) => !mark.frame_id);
+    state.dynamicSnapshots = []; state.snapshot = null; state.sceneView = 'live';
+    state.time = 0; state.clipEnabled = true;
+    setReferenceClip(result.reference_clip || result); applyAnimationTime(state.time);
+    renderSceneView(); renderAnnotations(); saveDraft();
+    ui.rangeStart.value = '0'; ui.rangeEnd.value = String(timelineDuration());
+    announce('已导入动态参考，时间轴已同步。');
+  } catch (error) { announce('导入失败：' + error.message, true); }
+  finally { state.uploading = false; ui.clipInput.value = ''; ui.clipStatus.textContent = ''; renderTimeline(); updateSubmitLabel(); }
+}
+function bindTimelineEvents() {
+  ui.clipInput.addEventListener('change', () => uploadClip(ui.clipInput.files));
+  ui.play.addEventListener('click', () => {
+    if (!editable()) return;
+    if (state.playing) { pauseTimeline(); saveDraft(); }
+    else {
+      setMode('select'); hideTextEditor();
+      if (state.time >= timelineDuration() - 1 / timelineFps()) seekTimeline(0);
+      state.sceneView = 'live'; renderSceneView();
+      state.playing = true; state.playbackStart = null;
+    }
+    renderTimeline(); drawOverlays();
+  });
+  ui.seek.addEventListener('input', () => seekTimeline(Number(ui.seek.value)));
+  id('timeline-prev').addEventListener('click', () => seekTimeline(stepTime(state.clipEnabled ? state.referenceClip?.frames : null, state.time, -1, timelineFps(), timelineDuration())));
+  id('timeline-next').addEventListener('click', () => seekTimeline(stepTime(state.clipEnabled ? state.referenceClip?.frames : null, state.time, 1, timelineFps(), timelineDuration())));
+  id('save-moment').addEventListener('click', () => ensureDynamicMoment({showSnapshot:true}));
+  ui.scope.addEventListener('change', () => { renderTimeline(); saveDraft(); });
+  for (const input of [ui.rangeStart, ui.rangeEnd]) input.addEventListener('change', saveDraft);
+}
+function momentDatabase() {
+  return new Promise((resolve,reject) => {
+    const request = indexedDB.open('astra-visual-moments', 1);
+    request.onupgradeneeded = () => request.result.createObjectStore('drafts');
+    request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+  });
+}
+function saveMomentDraft() {
+  if (!state.sessionId) return;
+  const signature = state.dynamicSnapshots.map((entry) => entry.id).join(',');
+  if (signature === state.draftMomentSignature) return;
+  state.draftMomentSignature = signature;
+  const sessionId = state.sessionId, moments = [...state.dynamicSnapshots];
+  // Serial writes prevent an earlier async save from replacing a newer collection.
+  saveMomentDraft.pending = (saveMomentDraft.pending || Promise.resolve()).catch(() => {}).then(async () => {
+    const db = await momentDatabase();
+    try {
+      await new Promise((resolve,reject) => {
+        const tx = db.transaction('drafts', 'readwrite'); tx.objectStore('drafts').put(moments, sessionId);
+        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+      });
+    } finally { db.close(); }
+  }).catch(() => { state.draftMomentSignature = null; });
+}
+async function restoreMomentDraft() {
+  try {
+    const db = await momentDatabase();
+    const moments = await new Promise((resolve,reject) => {
+      const request = db.transaction('drafts').objectStore('drafts').get(state.sessionId);
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    }); db.close();
+    state.dynamicSnapshots = Array.isArray(moments) ? moments.filter((entry) => entry?.id && Number.isFinite(entry.time_sec) && entry.data_url?.startsWith('data:image/')).slice(0,8) : [];
+    if (state.snapshot?.time_sec !== undefined && !state.dynamicSnapshots.some((entry) => entry.id === state.snapshot.id)) state.dynamicSnapshots = [...state.dynamicSnapshots.slice(0,7), state.snapshot];
+    state.draftMomentSignature = state.dynamicSnapshots.map((entry) => entry.id).join(',');
+  } catch { /* Draft is still usable in memory when browser storage is unavailable. */ }
+}
+async function captureDynamicFrames() {
+  const entries = [];
+  for (const moment of state.dynamicSnapshots) {
+    const sceneBundle = await captureScene(moment);
+    const entry = {id:moment.id, time_sec:moment.time_sec, scene_revision:moment.scene_revision,
+      reference_frame_id:moment.reference_frame_id, static_reference_id:moment.reference_frame_id ? null : moment.reference_id, camera:moment.camera,
+      selected_object_ids:moment.selected_object_ids, selected_scene_nodes:moment.selected_scene_nodes,
+      animation_clips:moment.animation_clips, ...sceneBundle};
+    if (moment.reference_url) {
+      const image = await loadImage(moment.reference_url);
+      const canvas = scaledCanvas(image.naturalWidth, image.naturalHeight);
+      const context = canvas.getContext('2d'); context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      entry.reference_original_data_url = canvas.toDataURL('image/jpeg', 0.88);
+      for (const mark of state.annotations) {
+        if (mark.pane === 'reference' && markMatchesMoment(mark, moment)) drawAnnotation(context, mark, canvas.width, canvas.height);
+      }
+      entry.reference_annotated_data_url = canvas.toDataURL('image/jpeg', 0.84);
+    }
+    entries.push(entry);
+  }
+  return entries;
+}
+
 function cameraData() {
   const result = {
     position:array(camera.position), target:array(controls.target),
@@ -1882,20 +2288,22 @@ function updateSceneHint() {
 }
 function updateMode() {
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
-  const drawing = state.mode !== 'select' && state.sessionStatus === 'open';
+  const drawing = state.mode !== 'select' && editable();
   ui.referenceCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
   ui.sceneCanvas.style.pointerEvents = drawing && state.sceneView === 'snapshot' ? 'auto' : 'none';
   ui.referenceCanvas.style.cursor = drawing ? 'crosshair' : 'default';
   ui.sceneCanvas.style.cursor = drawing ? 'crosshair' : 'default';
-  controls.enabled = state.mode === 'select' && state.sceneView === 'live';
+  controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
   ui.referenceHint.classList.toggle('hidden', !drawing || !activeReference());
   updateSceneHint();
   state.drag = null;
   drawOverlays();
 }
 function setMode(mode) {
+  if (state.submitting || state.pendingSubmission) return;
   if (!['select','point','rectangle','line','arrow','text','freehand'].includes(mode)) return;
   state.mode = mode;
+  if (mode !== 'select') pauseTimeline();
   hideTextEditor();
   if (mode === 'select' && state.sceneView === 'snapshot') {
     state.sceneView = 'live';
@@ -1913,6 +2321,7 @@ function updateSelectionLevelControls() {
     : '部件：点击 GLB 的具体节点；基本图元整体选中。';
 }
 function setSelectionLevel(level) {
+  if (state.submitting || state.pendingSubmission) return;
   if (!['item','part'].includes(level)) return;
   state.selectionLevel = level;
   updateSelectionLevelControls();
@@ -1948,6 +2357,12 @@ function addAnnotation(annotation) {
   }
   if (annotation.text) item.text = annotation.text;
   if (annotation.points) item.points = annotation.points;
+  if (dynamicEnabled() && state.snapshot?.time_sec !== undefined) {
+    item.frame_id = state.snapshot.id;
+    item.time_sec = state.snapshot.time_sec;
+    item.clip_id = state.snapshot.clip_id;
+    item.scene_revision = state.snapshot.scene_revision;
+  }
   state.annotations.push(item);
   renderAnnotations();
   drawOverlays();
@@ -1957,6 +2372,9 @@ function annotationPointerDown(event, pane) {
   if (!editable() || state.mode === 'select' || state.spacePan) return;
   if (pane === 'reference' && !activeReference()) return;
   if (pane === 'scene' && (state.sceneView !== 'snapshot' || !state.snapshot)) return;
+  if (dynamicEnabled()) {
+    if (!ensureDynamicMoment({showSnapshot:pane === 'scene'})) return;
+  }
   event.preventDefault();
   const canvas = event.currentTarget;
   const point = pointFromPointer(event, canvas);
@@ -1979,6 +2397,7 @@ function annotationPointerMove(event) {
   drawOverlays();
 }
 function annotationPointerUp(event) {
+  if (!editable()) { state.drag = null; return; }
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   const drag = state.drag;
   state.drag = null;
@@ -2009,6 +2428,7 @@ function hideTextEditor() {
   ui.textEditor.classList.add('hidden');
 }
 function saveTextAnnotation() {
+  if (!editable()) { hideTextEditor(); return; }
   const text = ui.annotationText.value.trim();
   if (text && state.textPending) {
     addAnnotation({
@@ -2025,7 +2445,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   const y = clamp(Number(p.y) || 0, 0, 1) * height;
   const x2 = clamp(Number(p.x2) || 0, 0, 1) * width;
   const y2 = clamp(Number(p.y2) || 0, 0, 1) * height;
-  const stale = annotation.pane === 'scene' && state.snapshot && annotation.snapshot_id !== state.snapshot.id;
+  const stale = false;
   const color = stale ? '#bdcad0' : '#ffbd78';
   const scale = Math.max(1, Math.min(width, height) / 550);
   ctx.save();
@@ -2110,6 +2530,8 @@ function drawOverlays() {
     for (const annotation of state.annotations) {
       if (annotation.pane !== pane) continue;
       if (pane === 'reference' && annotation.reference_image_id !== state.activeReferenceId) continue;
+      if (pane === 'reference' && annotation.frame_id &&
+          (state.playing || annotation.frame_id !== state.snapshot?.id || Math.abs(annotation.time_sec - state.time) > 1e-6)) continue;
       if (pane === 'scene' && (!state.snapshot || annotation.snapshot_id !== state.snapshot.id)) continue;
       drawAnnotation(surface.context, annotation, surface.width, surface.height);
     }
@@ -2143,14 +2565,19 @@ function renderAnnotations() {
     const copy = document.createElement('div');
     copy.className = 'annotation-copy';
     const title = document.createElement('strong');
-    const ref = state.references.find((item) => item.id === annotation.reference_image_id);
+    const ref = [...state.references, ...(state.referenceClip?.frames || [])].find((item) => item.id === annotation.reference_image_id);
     title.textContent = (annotation.group_id ? circled[Number(annotation.group_id)] + ' ' : '') +
       (annotation.pane === 'reference' ? '参考图 · ' + (ref?.name || '图片') : '当前场景') +
-      ' · ' + (labels[annotation.type] || annotation.type);
+      ' · ' + (labels[annotation.type] || annotation.type) + (Number.isFinite(annotation.time_sec) ? ' · ' + annotation.time_sec.toFixed(3) + ' s' : '');
     const subtitle = document.createElement('small');
     const stale = annotation.pane === 'scene' && annotation.scene_revision !== state.sceneRevision;
     subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
     if (stale) subtitle.classList.add('stale-label');
+    if (annotation.frame_id) {
+      title.style.cursor = 'pointer';
+      title.title = '回到这条标记的时刻';
+      title.addEventListener('click', () => openMoment(annotation.frame_id));
+    }
     copy.append(title, subtitle);
     const cite = document.createElement('button');
     cite.type = 'button';
@@ -2168,8 +2595,9 @@ function renderAnnotations() {
     remove.className = 'annotation-remove';
     remove.textContent = '×';
     remove.title = '删除这条标记';
-    remove.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+    remove.disabled = !editable();
     remove.addEventListener('click', () => {
+      if (!editable()) return;
       state.annotations = state.annotations.filter((item) => item.id !== annotation.id);
       renderAnnotations();
       drawOverlays();
@@ -2209,7 +2637,7 @@ async function captureReferenceAnnotations() {
       const context = canvas.getContext('2d');
       context.drawImage(image, 0, 0, canvas.width, canvas.height);
       const marks = state.annotations.filter((annotation) =>
-        annotation.pane === 'reference' && annotation.reference_image_id === ref.id
+        annotation.pane === 'reference' && annotation.reference_image_id === ref.id && !annotation.frame_id
       );
       for (const annotation of marks) drawAnnotation(context, annotation, canvas.width, canvas.height);
       images.push({reference_id:ref.id, data_url:canvas.toDataURL('image/jpeg', 0.84)});
@@ -2254,7 +2682,8 @@ async function captureScene(snapshot) {
   annotated.width = original.width;
   annotated.height = original.height;
   const annotatedContext = annotated.getContext('2d');
-  annotatedContext.drawImage(original, 0, 0);
+  if (snapshot?.selected_data_url) annotatedContext.drawImage(await loadImage(snapshot.selected_data_url), 0, 0);
+  else annotatedContext.drawImage(original, 0, 0);
   for (const annotation of state.annotations) {
     if (annotation.pane === 'scene' && snapshot && annotation.snapshot_id === snapshot.id) {
       drawAnnotation(annotatedContext, annotation, annotated.width, annotated.height);
@@ -2321,7 +2750,8 @@ function promptReferences(note=ui.note.value) {
         throw new Error('提示引用的场景节点来自旧模型，请重新选中并引用它。');
       }
       nodes.push({parent_object_id:node.parent_object_id, node_path:[...node.node_path],
-        ...(node.node_name ? {node_name:node.node_name} : {})});
+        ...(node.node_name ? {node_name:node.node_name} : {}),
+        ...(node.stable_id ? {stable_id:node.stable_id} : {}), ...(node.semantic_id ? {semantic_id:node.semantic_id} : {})});
       if (nodes.length > 64) throw new Error('一条提示最多引用 64 个场景节点。');
     }
   }
@@ -2340,16 +2770,19 @@ function clearSubmittedPrompt(submission) {
 }
 async function feedbackPayload(referencedSceneNodes, promptText) {
   const snapshot = snapshotForFeedback();
+  const submittedCamera = snapshot?.camera || cameraData();
   const imageBundle = await captureScene(snapshot);
   const annotatedReferences = await captureReferenceAnnotations();
-  const submittedCamera = snapshot?.camera || cameraData();
+  const dynamicFrames = dynamicEnabled() ? await captureDynamicFrames() : [];
   const note = promptText.trim();
   return {
-    scene_revision:snapshot?.scene_revision || state.sceneRevision,
+    scene_revision:Math.min(snapshot?.scene_revision || state.sceneRevision, ...dynamicFrames.map((entry) => entry.scene_revision)),
     latest_scene_revision:state.sceneRevision,
-    active_reference_id:state.activeReferenceId,
-    aligned_reference_id:submittedCamera.alignment_exact && submittedCamera.reference_image_id === state.activeReferenceId
+    active_reference_id:clipReference() ? null : state.activeReferenceId,
+    aligned_reference_id:!clipReference() && submittedCamera.alignment_exact && submittedCamera.reference_image_id === state.activeReferenceId
       ? state.activeReferenceId : null,
+    ...(dynamicEnabled() ? {timeline:{clip_id:state.referenceClip?.clip_id || null, time_sec:state.time, duration_sec:timelineDuration(), fps:timelineFps(),
+      scope:feedbackScope(ui.scope.value, state.time, Number(ui.rangeStart.value), Number(ui.rangeEnd.value), timelineDuration())}, dynamic_frames:dynamicFrames} : {}),
     note:note || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
     referenced_scene_nodes:referencedSceneNodes,
     annotations:state.annotations.map((annotation) => {
@@ -2381,15 +2814,29 @@ async function submitFeedback() {
     try { referencedSceneNodes = promptReferences(promptText); }
     catch (error) { announce(error.message, true); ui.note.focus(); return; }
   }
-  if (!state.pendingSubmission && !state.annotations.length && !promptText.trim() && !state.references.length) {
+  if (!state.pendingSubmission && !state.annotations.length && !promptText.trim() && !state.references.length && !state.referenceClip) {
     announce('请添加参考图、画标记，或填写提示后再发送。', true);
     return;
   }
+  if (!state.pendingSubmission && dynamicEnabled()) {
+    const mismatched = state.dynamicSnapshots.some((entry) => entry.clip_id !== (state.referenceClip?.clip_id || null));
+    if (state.annotations.some((mark) => mark.frame_id && !state.dynamicSnapshots.some((moment) => moment.id === mark.frame_id))) {
+      announce('有标记的原截图未能恢复，请移除这条标记并重新圈画。', true); return;
+    }
+    if (mismatched) { announce('动态参考已替换，请移除旧片段的时刻和标记后再提交。', true); return; }
+    if (!state.dynamicSnapshots.length && !ensureDynamicMoment()) return;
+  }
   const chosenSnapshot = snapshotForFeedback();
-  const staleSnapshot = chosenSnapshot && chosenSnapshot.scene_revision !== state.sceneRevision;
+  const oldMoments = dynamicEnabled() ? state.dynamicSnapshots.filter((entry) => entry.scene_revision !== state.sceneRevision) : [];
+  const staleSnapshot = (chosenSnapshot && chosenSnapshot.scene_revision !== state.sceneRevision) || oldMoments.length;
+  const oldestRevision = Math.min(chosenSnapshot?.scene_revision || state.sceneRevision, ...oldMoments.map((entry) => entry.scene_revision));
   if (!state.pendingSubmission && staleSnapshot &&
-      !window.confirm('这条反馈针对场景版本 ' + chosenSnapshot.scene_revision + ' 的固定截图，当前已是版本 ' + state.sceneRevision + '。仍按旧截图发送给 Codex？')) return;
+      !window.confirm('这条反馈针对场景版本 ' + oldestRevision + ' 的固定截图，当前已是版本 ' + state.sceneRevision + '。仍按旧截图发送给 Codex？')) return;
+  pauseTimeline();
+  hideTextEditor(); state.drag = null; settleOrbit();
   state.submitting = true;
+  updateMode();
+  renderTimeline();
   ui.submit.disabled = true;
   ui.note.disabled = true;
   ui.submit.querySelector('span:first-child').textContent = '正在准备图片…';
@@ -2447,8 +2894,10 @@ async function submitFeedback() {
     }
   } finally {
     state.submitting = false;
+    renderTimeline();
     updateSubmitLabel();
     renderAnnotations();
+    updateMode();
   }
 }
 
@@ -2524,8 +2973,9 @@ function resizeScene() {
   updateSnapshotGeometry();
   drawOverlays();
 }
-function animate() {
+function animate(timestamp) {
   requestAnimationFrame(animate);
+  advanceTimeline(timestamp);
   controls.update();
   renderer.render(threeScene, camera);
 }
@@ -2538,6 +2988,7 @@ async function poll() {
       api('/api/sessions/' + encodeURIComponent(state.sessionId))
     ]);
     if (scene.revision !== state.sceneRevision) await loadScene(scene);
+    setReferenceClip(session.reference_clip || null);
     if (session.reference_images) setReferences(session.reference_images);
     if (session.status !== state.sessionStatus || Number(session.feedback_count) !== state.feedbackCount) setSession(session);
     await refreshWorkspace();
@@ -2578,14 +3029,16 @@ function bindEvents() {
   document.querySelectorAll('[data-selection-level]').forEach((button) => button.addEventListener('click', () => setSelectionLevel(button.dataset.selectionLevel)));
   updateSelectionLevelControls();
   ui.groupSelect.addEventListener('change', () => {
+    if (!editable()) return;
     state.groupId = ui.groupSelect.value;
     saveDraft();
   });
+  bindTimelineEvents();
   ui.referenceInput.addEventListener('change', () => uploadReferences(ui.referenceInput.files));
   ui.referenceImage.addEventListener('load', updateReferenceGeometry);
   ui.referenceImage.addEventListener('error', () => announce('这张参考图无法显示。', true));
   ui.compareImage.addEventListener('load', resizeScene);
-  ui.alignReference.addEventListener('click', () => alignActiveReference({notify:true}));
+  ui.alignReference.addEventListener('click', () => { if (editable()) { pauseTimeline(); alignActiveReference({notify:true}); } });
   ui.referenceZoomIn.addEventListener('click', () => setReferenceZoom(state.referenceZoom * 1.4));
   ui.referenceZoomOut.addEventListener('click', () => setReferenceZoom(state.referenceZoom / 1.4));
   ui.referenceZoomReset.addEventListener('click', () => {
@@ -2620,8 +3073,8 @@ function bindEvents() {
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
   ui.freeze.addEventListener('click', freezeScene);
-  ui.browse.addEventListener('click', () => setMode('select'));
-  ui.snapshotButton.addEventListener('click', () => { state.sceneView = 'snapshot'; renderSceneView(); });
+  ui.browse.addEventListener('click', () => { if (editable()) setMode('select'); });
+  ui.snapshotButton.addEventListener('click', () => { if (!editable()) return; if (state.snapshot?.time_sec !== undefined) openMoment(state.snapshot.id); else { state.sceneView = 'snapshot'; renderSceneView(); } });
   ui.compareOpacity.addEventListener('input', () => {
     ui.opacityValue.textContent = ui.compareOpacity.value + '%';
     ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
@@ -2649,6 +3102,9 @@ function bindEvents() {
   id('clear-annotations').addEventListener('click', () => {
     if (!editable()) return;
     state.annotations = [];
+    state.dynamicSnapshots = [];
+    if (state.snapshot?.time_sec !== undefined) { state.snapshot = null; state.sceneView = 'live'; renderSceneView(); }
+    renderTimeline();
     renderAnnotations();
     drawOverlays();
     saveDraft();
@@ -2662,12 +3118,13 @@ function bindEvents() {
     saveDraft();
   });
   id('frame-button').addEventListener('click', () => {
+    if (!editable()) return;
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
     if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
     else if (state.selectedId) frameBox(objectBox(state.selectedId));
     else frameAll();
   });
-  id('reset-button').addEventListener('click', frameAll);
+  id('reset-button').addEventListener('click', () => { if (editable()) frameAll(); });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
   ui.annotationText.addEventListener('keydown', (event) => {

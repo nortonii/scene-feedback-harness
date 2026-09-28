@@ -271,6 +271,7 @@ class SceneStore:
             self.state["schema_version"] = 2
             for session in self.state.get("sessions", {}).values():
                 session.setdefault("reference_images", [])
+                session.setdefault("reference_clip", None)
                 session.setdefault("feedback_count", 0)
         else:
             self.state = {"schema_version": 2, "scene": {"revision": 1, "objects": _default_objects()}, "sessions": {}, "feedback": []}
@@ -469,18 +470,20 @@ class SceneStore:
             if reference_images is not None and reference_session_id is not None:
                 raise APIError(400, "choose reference_images or reference_session_id")
             references: list[dict[str, str]] = []
+            reference_clip = None
             if reference_session_id is not None:
                 previous = self.state["sessions"].get(reference_session_id)
                 if previous is None:
                     raise APIError(404, "reference session not found")
                 references = copy.deepcopy(previous.get("reference_images", []))
+                reference_clip = copy.deepcopy(previous.get("reference_clip"))
             elif reference_images is not None:
                 if not isinstance(reference_images, list) or len(reference_images) > MAX_REFERENCES:
                     raise APIError(400, "reference_images must be an array of at most 8 local paths")
                 prepared = [self._read_reference_path(path) for path in reference_images]
                 references = [{"id": uuid.uuid4().hex, "url": self._write_media(data), "name": name} for name, data in prepared]
             session_id = uuid.uuid4().hex
-            session = {"session_id": session_id, "scene_revision": self.state["scene"]["revision"], "status": "open", "created_at": _now(), "feedback_count": 0, "reference_images": references}
+            session = {"session_id": session_id, "scene_revision": self.state["scene"]["revision"], "status": "open", "created_at": _now(), "feedback_count": 0, "reference_images": references, "reference_clip": reference_clip}
             self.state["sessions"][session_id] = session
             self._save()
             return copy.deepcopy(session)
@@ -502,6 +505,41 @@ class SceneStore:
             references.append(reference)
             self._save()
             return copy.deepcopy(reference)
+
+    def set_reference_clip(self, session_id: str, payload: Any, *, local_frames: list[dict[str, Any]] | None = None,
+                           source_type: str = "sequence", byte_limit: int | None = None) -> dict[str, Any]:
+        from dynamic import MAX_BROWSER_CLIP_BYTES, decode_video, fps_value, prepare_clip, sample_video
+
+        # Check the destination before decoding; no session lock held during ffmpeg.
+        session = self.get_session(session_id)
+        if session["status"] != "open":
+            raise APIError(409, "session is closed")
+        if not isinstance(payload, dict):
+            raise APIError(400, "clip must be an object")
+        if payload.get("clear") is True:
+            if set(payload) != {"clear"}:
+                raise APIError(400, "clear cannot be combined with clip data")
+            clip = None
+        else:
+            if "video_data_url" in payload:
+                if "frames" in payload or local_frames is not None:
+                    raise APIError(400, "choose clip frames or a video")
+                video = decode_video(payload["video_data_url"])
+                with tempfile.TemporaryDirectory(prefix="scene-feedback-upload-") as temporary:
+                    path = Path(temporary) / "clip.video"
+                    path.write_bytes(video)
+                    local_frames, duration = sample_video(path, fps_value(payload.get("fps", 10)))
+                payload = {**payload, "fps": fps_value(payload.get("fps", 10)), "duration_sec": duration}
+                source_type = "video"
+            clip = prepare_clip(self, payload, local_frames=local_frames, source_type=source_type,
+                                byte_limit=byte_limit or MAX_BROWSER_CLIP_BYTES)
+        with self.lock:
+            session = self.state["sessions"].get(session_id)
+            if session is None or session["status"] != "open":
+                raise APIError(409, "session changed while importing the clip")
+            session["reference_clip"] = clip
+            self._save()
+            return {"session_id": session_id, "reference_clip": copy.deepcopy(clip)}
 
     @staticmethod
     def _normalize_reference_camera(camera: Any) -> dict[str, Any]:
@@ -785,7 +823,7 @@ class SceneStore:
 
     @staticmethod
     def _scene_node(value: Any, model_ids: set[str]) -> dict[str, Any]:
-        if not isinstance(value, dict) or set(value) - {"parent_object_id", "node_path", "node_name"}:
+        if not isinstance(value, dict) or set(value) - {"parent_object_id", "node_path", "node_name", "stable_id", "semantic_id"}:
             raise APIError(400, "scene_node must identify a model and child path")
         parent = value.get("parent_object_id")
         if not isinstance(parent, str) or parent not in model_ids:
@@ -799,6 +837,12 @@ class SceneStore:
         result = {"parent_object_id": parent, "node_path": list(path)}
         if name is not None:
             result["node_name"] = name
+        for key in ("stable_id", "semantic_id"):
+            if key in value:
+                stable = value[key]
+                if not isinstance(stable, str) or not 1 <= len(stable) <= 160 or any(ord(char) < 32 for char in stable):
+                    raise APIError(400, f"scene_node {key} must be short text")
+                result[key] = stable
         return result
 
     def _normalize_annotation(self, annotation: Any, object_ids: set[str], model_ids: set[str], reference_ids: set[str]) -> dict[str, Any]:
@@ -958,6 +1002,8 @@ class SceneStore:
             revision = payload.get("scene_revision")
             if type(revision) is not int or revision < 1:
                 raise APIError(400, "scene_revision must be a positive integer")
+            if revision > self.state["scene"]["revision"]:
+                raise APIError(400, "scene_revision cannot be newer than the current scene")
             stale_snapshot = revision != self.state["scene"]["revision"]
             if stale_snapshot and payload.get("confirm_stale") is not True:
                 raise APIError(409, f"scene revision changed to {self.state['scene']['revision']}; reload and resubmit")
@@ -982,8 +1028,21 @@ class SceneStore:
                 historic_referenced_nodes = payload.get("referenced_scene_nodes", [])
                 if isinstance(historic_referenced_nodes, list):
                     model_ids.update(node.get("parent_object_id") for node in historic_referenced_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
-            reference_ids = {image["id"] for image in session.get("reference_images", [])}
-            references_by_id = {image["id"]: image for image in session.get("reference_images", [])}
+                for frame in payload.get("dynamic_frames", []) if isinstance(payload.get("dynamic_frames", []), list) else []:
+                    if not isinstance(frame, dict):
+                        continue
+                    selected = frame.get("selected_object_ids", [])
+                    if isinstance(selected, list):
+                        object_ids.update(item for item in selected if isinstance(item, str) and ID_RE.fullmatch(item))
+                    nodes = frame.get("selected_scene_nodes", [])
+                    if isinstance(nodes, list):
+                        model_ids.update(node.get("parent_object_id") for node in nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
+                    clips = frame.get("animation_clips", [])
+                    if isinstance(clips, list):
+                        model_ids.update(item.get("object_id") for item in clips if isinstance(item, dict) and isinstance(item.get("object_id"), str) and ID_RE.fullmatch(item["object_id"]))
+            clip_references = (session.get("reference_clip") or {}).get("frames", [])
+            references_by_id = {image["id"]: image for image in session.get("reference_images", []) + clip_references}
+            reference_ids = set(references_by_id)
             active_reference_id = payload.get("active_reference_id")
             aligned_reference_id = payload.get("aligned_reference_id")
             if active_reference_id is not None and active_reference_id not in reference_ids:
@@ -991,6 +1050,9 @@ class SceneStore:
             if aligned_reference_id is not None and (aligned_reference_id not in reference_ids or "camera" not in references_by_id[aligned_reference_id]):
                 raise APIError(400, "aligned_reference_id must identify a calibrated reference")
             normalized_annotations = [self._normalize_annotation(item, object_ids, model_ids, reference_ids) for item in annotations]
+            from dynamic import prepare_dynamic_feedback, validate_timed_annotations
+            timeline, dynamic_frames = prepare_dynamic_feedback(self, session, payload, revision, object_ids, model_ids)
+            validate_timed_annotations(normalized_annotations, timeline, dynamic_frames)
             referenced_scene_nodes = payload.get("referenced_scene_nodes", [])
             if not isinstance(referenced_scene_nodes, list) or len(referenced_scene_nodes) > 64:
                 raise APIError(400, "referenced_scene_nodes must be an array of at most 64 nodes")
@@ -1024,7 +1086,7 @@ class SceneStore:
                         raise APIError(400, "object prompt refers to an unknown object id")
                     normalized["object_id"] = object_id
                 normalized_prompts.append(normalized)
-            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images"):
+            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images") and not dynamic_frames:
                 raise APIError(400, "add a reference, annotation, object prompt or note before submitting")
             camera = payload.get("camera")
             if camera is not None:
@@ -1075,6 +1137,11 @@ class SceneStore:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
             feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "inline_references": inline_references, "object_prompts": normalized_prompts, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes, "referenced_scene_nodes": referenced_scene_nodes}
+            if timeline is not None:
+                feedback["timeline"] = timeline
+                feedback["dynamic_frames"] = [{**item["frame"], **{field + "_url": self._write_media(data) for field, data in item["images"].items()}} for item in dynamic_frames]
+                if session.get("reference_clip"):
+                    feedback["reference_clip"] = {key: copy.deepcopy(value) for key, value in session["reference_clip"].items() if key != "frames"}
             if active_reference_id is not None:
                 feedback["active_reference_id"] = active_reference_id
             if aligned_reference_id is not None:

@@ -45,6 +45,53 @@
 
 每张图的相机元数据包含 GLB 世界坐标中的 `camera_to_world`（按行排列的 4×4 矩阵）和以该图像素为单位的 `intrinsics`（`width`、`height`、`fx`、`fy`、`cx`、`cy`）。已有图片可通过受保护的 `POST /api/workspace/reference-cameras` 接口按 `reference_id` 附加 `camera` 与可选的 `alignment_image_data_url`；未来导入的图片可由工作台数据目录中的 `reference_cameras.json` 清单按文件名前缀匹配（[示例](examples/reference_cameras.example.json)）。放入清单后，对已有图片发送 `{"apply_manifest":true}` 即可应用。相机位姿应与发布的 GLB 使用同一世界坐标系。
 
+## 动态场景：共享时间轴与多帧反馈
+
+参考图序列或视频可以与带动画的 GLB 共用时间轴。播放、暂停、拖动时间轴和逐帧前后跳转，会同时更新参考帧与 3D 动画；静态图片和静态 GLB 的原有流程仍可使用。GLB 支持节点位移、旋转、缩放、骨骼和固定拓扑的 morph 动画；可变拓扑网格缓存、流体与实时物理模拟尚未接入。
+
+- 开始圈画时自动暂停，标记记录当时的时间、参考帧、相机和场景版本。可以保留最多 8 个不同时间点的场景快照，切回对应时间点继续查看或标注。
+- 一次提示可以引用多个时间点的标记和物体，并选择反馈作用于「当前帧」「时间区间」或「整个片段」。区间只是表达修改范围，不会把画线变成轨迹或几何约束。
+- 标记默认只显示在自己的帧上。发送时交付所选时间点的原图、标注图和场景快照，以及时间戳、相机、对象引用与场景版本；不会把整段视频逐帧塞给模型。
+- 每帧可带自己的相机位姿，切帧时按对应相机对齐。更新 GLB 后保留当前播放位置；拖动时间轴不会增加 `scene_revision`。
+- 导出 GLB 时，可在节点的 `extras` 中保留 `semantic_id` 或 `stable_id`，帮助模型跨帧及重新导出识别同一物体。节点路径只定位当前版本内的节点；名称和路径不保证跨版本不变，也不会自动跟踪物体。
+
+浏览器可按指定 FPS 导入有序图片，或导入视频并由服务端抽帧。视频导入需要服务主机安装可执行的 `ffmpeg` 和 `ffprobe`；图片序列不需要它们。视频按公共时间网格采样，默认 10 FPS，每个片段最多 600 帧，超过上限会报错，请降低采样率或先截取所需片段。
+
+Codex 也可调用 `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)` 导入项目内的素材；`manifest_path` 与 `video_path` 二选一。图片序列使用清单自己的 `fps`（省略时为 30），工具参数 `fps` 仅用于视频（默认 10）。每帧可指定 `time_sec`；省略时按从 0 开始的帧序号除以清单 FPS 计算，不从文件名推测帧率。帧路径可相对清单文件指定，但所有素材必须位于项目内。FPS 范围为 0.1–120；浏览器视频上传上限 40 MiB，项目本地视频上限 250 MiB。`clear=True` 移除当前参考片段，不改变场景版本。
+
+图片序列清单示例（所有输入文件须位于当前项目内）：
+
+```json
+{
+  "name": "assembly-review",
+  "fps": 10,
+  "frames": [
+    {"path": "/absolute/path/to/project/frames/0000.png", "time_sec": 0.0},
+    {"path": "/absolute/path/to/project/frames/0001.png", "time_sec": 0.1}
+  ]
+}
+```
+
+要保留相机对齐，请通过清单 / MCP 导入：在序列的每个帧条目内添加前文定义的 `camera`。浏览器只导入图片文件或视频时不会自动获得相机位姿。视频可另传 `camera_manifest_path`；固定相机清单示例如下（须将示例值替换为实际标定）：
+
+```json
+{
+  "camera": {
+    "camera_to_world": [[1,0,0,0],[0,1,0,0],[0,0,1,2],[0,0,0,1]],
+    "intrinsics": {"width":1920,"height":1080,"fx":1200,"fy":1200,"cx":960,"cy":540}
+  }
+}
+```
+
+移动相机清单使用 `{"frames":[{"time_sec":0.0,"camera":…},…]}`，须覆盖视频的采样时刻；这一版按邻近采样匹配，不插值或估计相机。视频相机内参会按抽帧图片的尺寸缩放；序列的相机内参应直接匹配对应图片的尺寸。
+
+导入清单，或按指定 FPS 抽取视频：
+
+```text
+workspace_set_reference_clip(manifest_path="/absolute/path/to/project/clip.json")
+workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json")
+```
+
 ## 快速试用：房间与柜子
 
 需要 Python 3.11+、支持 WebGL 的浏览器，以及已登录的 **`codex-cli 0.156.1`**。App Server 的请求和响应格式已对照这个版本生成的 JSON Schema 核对；其他版本会明确报错，避免静默使用不兼容字段。
@@ -59,7 +106,7 @@ codex --version
 .venv/bin/python backend/server.py --project-dir "$PWD" --data-dir "$PWD/examples/room_demo/output/data"
 ```
 
-Gateway 会在项目的 Codex thread 中自动配置这五个 MCP 工具，无需手动执行 `codex mcp add`。端口、数据目录和项目目录由 Gateway 传给该 thread，避免其他项目或全局 MCP 配置指向错误的工作台。
+Gateway 会在项目的 Codex thread 中自动配置工作台 MCP 工具，无需手动执行 `codex mcp add`。端口、数据目录和项目目录由 Gateway 传给该 thread，避免其他项目或全局 MCP 配置指向错误的工作台。
 
 打开 <http://127.0.0.1:18765/>。左侧是目标示意图，右侧是初始房间 GLB。选中柜子，在图上指出目标位置，输入「柜子应该更靠近左墙，请按左图调整」，然后点击「发送」。演示源参数在 [`examples/room_demo/scene.json`](examples/room_demo/scene.json)，[`build_scene.py`](examples/room_demo/build_scene.py) 会从参数生成 GLB；结果由 Codex 调用 `workspace_publish_scene` 后出现在页面。`seed_demo.py` 使用独立的 `examples/room_demo/output/data`，不会覆盖普通工作区的数据。
 
@@ -136,6 +183,7 @@ LAN_IP=192.168.1.10
 | `workspace_get_context` | 读取当前参考图、场景版本和项目上下文 |
 | `workspace_get_feedback` | 读取已提交反馈及其实际图像 |
 | `workspace_publish_scene` | 校验并发布新的 GLB，检查预期版本，通知页面刷新 |
+| `workspace_set_reference_clip` | 导入带时间戳及可选逐帧相机的参考图序列，或用 FFmpeg 对项目内的视频抽帧 |
 | `workspace_request_feedback` | 默认模式：在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |
 | `request_visual_feedback` / `wait_visual_feedback` | 未绑定的外部 MCP 模式：等待提交并把图文作为工具结果交回；绑定桌面任务时，前者返回页面链接，提交自动创建新回合 |
 | `get_visual_feedback` | 外部 MCP 模式：读取已提交的视觉反馈 |
