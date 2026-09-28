@@ -431,6 +431,7 @@ function updateSubmitLabel() {
       : bound
         ? '原图、标注图和场景截图会送入当前选择的 Codex 任务。'
       : '反馈会保存在工作台，待 MCP 工具读取后交回 Codex。';
+    appendSceneSnapshotHint();
     return;
   }
   const label = state.pendingSubmission ? '重试发送'
@@ -445,6 +446,12 @@ function updateSubmitLabel() {
   else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
   else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
   else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
+  appendSceneSnapshotHint();
+}
+function appendSceneSnapshotHint() {
+  if (state.annotations.some((mark) => mark.pane === 'scene')) {
+    ui.caption.textContent += ' 场景标记使用已保存的原截图，旋转不会改变其视角。';
+  }
 }
 function shortTaskId(threadId) {
   return typeof threadId === 'string' && threadId.length > 12
@@ -2713,7 +2720,7 @@ function drawOverlays() {
   }
 }
 function renderAnnotations() {
-  updateAnnotationHistory();
+  updateSubmitLabel();
   ui.annotationList.replaceChildren();
   ui.annotationCount.textContent = String(state.annotations.length);
   renderReferenceStrip();
