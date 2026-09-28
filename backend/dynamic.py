@@ -188,9 +188,11 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
         frame_time = number(item.get("time_sec"), "dynamic frame time_sec", maximum=duration)
         frame_revision = item.get("scene_revision")
         if type(frame_revision) is not int or not revision <= frame_revision <= store.state["scene"]["revision"]:
-            raise APIError(409, "dynamic frame scene_revision must be between the submitted and current scene revisions")
+            raise APIError(409, "dynamic frame scene_revision must be between the submitted and current scene revisions",
+                           detail={"code": "feedback_revision_conflict", "current_scene_revision": store.state["scene"]["revision"]})
         if frame_revision != store.state["scene"]["revision"] and payload.get("confirm_stale") is not True:
-            raise APIError(409, "scene revision changed; confirm stale dynamic evidence before submitting")
+            raise APIError(409, "scene revision changed; confirm stale dynamic evidence before submitting",
+                           detail={"code": "feedback_revision_conflict", "current_scene_revision": store.state["scene"]["revision"]})
         reference_id = item.get("reference_frame_id")
         static_reference_id = item.get("static_reference_id")
         if static_reference_id is not None and static_reference_id not in static_references:
@@ -272,7 +274,8 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
             raise APIError(400, "reference original image requires a reference clip")
         prepared.append({"frame": frame, "images": images})
     if min(item["frame"]["scene_revision"] for item in prepared) != revision:
-        raise APIError(409, "submitted scene_revision must be the oldest saved dynamic evidence revision")
+        raise APIError(409, "submitted scene_revision must be the oldest saved dynamic evidence revision",
+                       detail={"code": "feedback_revision_conflict", "current_scene_revision": store.state["scene"]["revision"]})
     return normalized_timeline, prepared
 
 

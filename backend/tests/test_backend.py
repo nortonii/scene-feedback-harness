@@ -542,7 +542,7 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(gateway.state()["thread_id"], "thread-new-empty")
             self.assertTrue(any(event["type"] == "empty_thread_recreated" for event in gateway.store.workspace_events()["items"]))
 
-    def test_direct_image_turn_idempotency_queue_stale_gate_and_approval(self) -> None:
+    def test_direct_image_turn_idempotency_scene_updates_and_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             project = root / "project"
@@ -565,18 +565,21 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(len(gateway.state()["queue"]), 1)
             with self.assertRaisesRegex(APIError, "another submission"):
                 gateway.submit(session_id, {**first_payload, "note": "different"})
-            second = gateway.submit(session_id, {"idempotency_key": "second-message-0001", "scene_revision": 1, "note": "Make it taller."})
+            second = gateway.submit(session_id, {"idempotency_key": "second-message-0001", "scene_revision": 1,
+                                                "note": "Make it taller.", "scene_original_data_url": data_url})
             self.assertEqual(len(adapter.calls), 1)
             model = root / "updated.glb"
             tiny_glb(model)
             scene = store.set_scene_preview(str(model), expected_revision=1)
             self.assertEqual(scene["revision"], 2)
             gateway.on_adapter_event({"method": "turn/completed", "params": {"turn": {"id": "turn-1", "status": "completed"}}})
-            self.wait_for(lambda: any(item["feedback_id"] == second["feedback_id"] and item["status"] == "blocked_stale" for item in gateway.state()["queue"]))
-            self.assertEqual(len(adapter.calls), 1)
-            gateway.confirm_queue(second["feedback_id"], {"confirm": True})
             self.wait_for(lambda: len(adapter.calls) == 2)
-            self.assertIn("较早的冻结场景截图", adapter.calls[1]["text"])
+            self.wait_for(lambda: any(item["feedback_id"] == second["feedback_id"] and item["status"] == "running" for item in gateway.state()["queue"]))
+            self.assertIn("场景版本 1，发送时当前版本为 2", adapter.calls[1]["text"])
+            self.assertNotIn("用户已确认", adapter.calls[1]["text"])
+            self.assertEqual(store.feedback_by_id(second["feedback_id"])["scene_revision"], 1)
+            self.assertEqual((store.data_dir / second["scene_original_url"].lstrip("/")).read_bytes(), original)
+            self.assertFalse(any(event["type"] == "stale_feedback_confirmation_required" for event in store.workspace_events()["items"]))
             gateway.on_adapter_event({"method": "adapter/request_pending", "params": {"request_id": "rpc-3", "method": "item/commandExecution/requestApproval", "params": {"command": "true"}}})
             approval = gateway.state()["approvals"][0]
             self.assertEqual(gateway.state()["agent"]["status"], "awaiting_approval")
@@ -591,6 +594,72 @@ class GatewayTests(unittest.TestCase):
             gateway.on_adapter_event({"method": "turn/completed", "params": {"turn": {"id": "turn-2", "status": "completed"}}})
             self.assertEqual(gateway.state()["thread_id"], "thread-test-persistent")
             self.assertEqual(gateway.state()["agent"]["status"], "idle")
+
+    def test_restart_resumes_saved_visual_feedback_without_replaying_delivered_packets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            project.mkdir()
+            store = SceneStore(root / "data")
+            staging = WorkspaceGateway(store, project, adapter=FakeAdapter())
+            session_id = staging.ensure()["session_id"]
+            store.workspace_thread("thread-test-persistent")
+            image_url, original = image_data_url()
+            packets = []
+            for name in ("resume", "legacy-text", "already-sent"):
+                payload = {"idempotency_key": "saved-stale-" + name, "scene_revision": 1, "note": name}
+                if name != "legacy-text":
+                    payload["scene_original_data_url"] = image_url
+                packets.append(store.submit_feedback(session_id, payload))
+            store.replace_scene(1, [])
+            with store.lock:
+                for item in store.state["workspace"]["queue"]:
+                    item["status"] = "blocked_stale"
+                    if item["feedback_id"] == packets[2]["feedback_id"]:
+                        item["turn_id"] = "already-delivered-turn"
+                store._save()
+
+            reloaded = SceneStore(store.data_dir)
+            adapter = FakeAdapter()
+            gateway = WorkspaceGateway(reloaded, project, adapter=adapter)
+            gateway.start()
+            try:
+                self.wait_for(lambda: len(adapter.calls) == 1)
+                self.assertEqual(adapter.calls[0]["message_id"], packets[0]["feedback_id"])
+                self.assertIn("场景版本 1，发送时当前版本为 2", adapter.calls[0]["text"])
+                self.assertNotIn("用户已确认", adapter.calls[0]["text"])
+                stored = reloaded.feedback_by_id(packets[0]["feedback_id"])
+                self.assertEqual(stored["scene_revision"], 1)
+                self.assertEqual((reloaded.data_dir / stored["scene_original_url"].lstrip("/")).read_bytes(), original)
+                queued = {item["feedback_id"]: item for item in gateway.state()["queue"]}
+                self.assertEqual(queued[packets[1]["feedback_id"]]["status"], "blocked_stale")
+                self.assertEqual(queued[packets[2]["feedback_id"]]["status"], "blocked_stale")
+                self.assertEqual(queued[packets[2]["feedback_id"]]["turn_id"], "already-delivered-turn")
+                gateway._restore_blocked_visual_feedback()
+                self.assertEqual(len(adapter.calls), 1)
+                self.assertEqual(sum(event["type"] == "saved_visual_feedback_resumed" for event in reloaded.workspace_events()["items"]), 1)
+            finally:
+                gateway.close()
+
+    def test_restart_keeps_active_legacy_packet_out_of_automatic_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = SceneStore(root / "data")
+            gateway = WorkspaceGateway(store, root, adapter=FakeAdapter())
+            session_id = gateway.ensure()["session_id"]
+            image_url, _ = image_data_url()
+            packet = store.submit_feedback(session_id, {"idempotency_key": "active-old-packet", "scene_revision": 1,
+                                                       "note": "saved", "scene_original_data_url": image_url})
+            with store.lock:
+                item = store.state["workspace"]["queue"][0]
+                item["status"] = "blocked_stale"
+                store.state["workspace"]["active_feedback_id"] = packet["feedback_id"]
+                store._save()
+            gateway._restore_blocked_visual_feedback()
+            reloaded = SceneStore(store.data_dir).workspace()
+            self.assertEqual(reloaded["queue"][0]["status"], "blocked_stale")
+            self.assertEqual(reloaded["active_feedback_id"], packet["feedback_id"])
+            self.assertEqual(gateway.adapter.calls, [])
 
     def test_disconnect_during_turn_never_replays_without_explicit_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

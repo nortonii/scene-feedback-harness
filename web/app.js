@@ -67,7 +67,7 @@ const state = {
   canSetPermissions:false,
   modelOptionsSignature:null, effortOptionsSignature:null, modelLoadError:null, creatingTarget:false,
   eventCursor:0, seenEventIds:new Set(), submittingKey:null, workspaceReady:false,
-  sceneRevision:null, sceneObjects:[], objectNodes:new Map(),
+  sceneRevision:null, sceneLoading:false, sceneObjects:[], objectNodes:new Map(),
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
   lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
@@ -246,11 +246,11 @@ function restoreDraft() {
   } catch { /* Ignore a stale or corrupt local draft. */ }
 }
 
-function editable() { return state.workspaceReady && state.sessionStatus === 'open' && !state.submitting && !state.uploading && !state.pendingSubmission; }
+function editable() { return state.workspaceReady && state.sessionStatus === 'open' && !state.sceneLoading && !state.submitting && !state.uploading && !state.pendingSubmission; }
 function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
-  ui.clearAnnotations.disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length);
+  ui.clearAnnotations.disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length && !state.snapshot);
   ui.referenceAllAnnotations.disabled = !editable() || !state.annotations.length;
 }
 function annotationEditState() {
@@ -419,7 +419,7 @@ function updateSubmitLabel() {
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
       : bound ? '发送反馈' : '保存反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
-    ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
+    ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
@@ -438,7 +438,7 @@ function updateSubmitLabel() {
     : status === 'disconnected' || status === 'error' ? '保存反馈'
     : '发送反馈';
   ui.submit.querySelector('span:first-child').textContent = label;
-  ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
+  ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
@@ -797,6 +797,10 @@ function renderQueue({boundExternal=false}={}) {
       : item.status === 'interrupted' ? '，反馈已送入目标任务，但回合中断；请在目标任务中查看原因。'
       : item.status === 'discarded' ? '，这条反馈不会再次发送。'
       : '');
+    if (state.sceneRevision !== null && item.scene_revision !== state.sceneRevision &&
+        ['queued','dispatching','running'].includes(item.status)) {
+      body.textContent += ' 当前场景是版本 ' + state.sceneRevision + '；反馈会保留原截图版本交给 Codex。';
+    }
     if (item.error && ['queued','failed'].includes(item.status)) body.textContent += ' 最近一次原因：' + String(item.error).slice(0, 240);
     card.append(title, body);
     if (boundExternal && item.target_thread_id) {
@@ -1671,7 +1675,7 @@ function renderObjectList() {
   }
 }
 function selectObject(objectId, sceneNode=null, detailNode=null) {
-  if (state.submitting || state.pendingSubmission) return;
+  if (!editable()) return;
   if (!sceneObject(objectId)) return;
   state.selectedId = objectId;
   state.selectedSceneNode = sceneNode;
@@ -1682,54 +1686,61 @@ function selectObject(objectId, sceneNode=null, detailNode=null) {
 async function loadScene(sceneData) {
   const scene = sceneData || await api('/api/scene');
   const priorRevision = state.sceneRevision;
-  if (priorRevision === scene.revision) return;
-  const priorSelectedObject = sceneObject(state.selectedId);
-  state.sceneRevision = scene.revision;
-  state.sceneObjects = scene.objects || [];
-  if (priorRevision !== null && priorSelectedObject?.url !== sceneObject(state.selectedId)?.url) {
-    state.selectedSceneNode = null;
-    state.lastPickedDetailNode = null;
-  }
-  if (priorRevision === null && (state.selectedSceneNode || state.lastPickedDetailNode) &&
-      (state.restoredModelUrl !== (sceneObject(state.selectedId)?.url || null) ||
-       (state.restoredModelUrl === null && state.restoredSceneRevision !== scene.revision))) {
-    state.selectedSceneNode = null;
-    state.lastPickedDetailNode = null;
-  }
-  pauseTimeline();
-  for (const entry of state.animations.values()) {
-    entry.mixer.stopAllAction();
-    entry.mixer.uncacheRoot(entry.root);
-  }
-  state.animations.clear();
-  objectLayer.traverse((node) => {
-    node.geometry?.dispose();
-    for (const material of (Array.isArray(node.material) ? node.material : node.material ? [node.material] : [])) {
-      for (const value of Object.values(material)) if (value?.isTexture) value.dispose();
-      material.dispose();
+  if (state.sceneLoading || priorRevision === scene.revision) return;
+  state.sceneLoading = true;
+  updateSubmitLabel(); updateMode(); renderTimeline();
+  try {
+    const priorSelectedObject = sceneObject(state.selectedId);
+    state.sceneRevision = scene.revision;
+    state.sceneObjects = scene.objects || [];
+    if (priorRevision !== null && priorSelectedObject?.url !== sceneObject(state.selectedId)?.url) {
+      state.selectedSceneNode = null;
+      state.lastPickedDetailNode = null;
     }
-  });
-  objectLayer.clear();
-  state.objectNodes.clear();
-  await Promise.allSettled(state.sceneObjects.map(addObject));
-  applyAnimationTime(state.time);
-  renderTimeline();
-  renderAnimationChoices();
-  frameAllIfReady();
-  if (state.selectedId && !sceneObject(state.selectedId)) state.selectedId = null;
-  if (state.selectedSceneNode && !resolveSceneNode(state.selectedSceneNode)) state.selectedSceneNode = null;
-  if (state.lastPickedDetailNode && !resolveSceneNode(state.lastPickedDetailNode)) state.lastPickedDetailNode = null;
-  renderSelection();
-  renderAnnotations();
-  drawOverlays();
-  id('revision-label').textContent = '版本 ' + scene.revision;
-  id('scene-name').textContent = scene.name || '当前场景';
-  id('scene-title').textContent = scene.name || 'Codex 的当前结果';
-  if (priorRevision !== null) {
-    announce('场景已更新到版本 ' + scene.revision + '。已有标注仍绑定原截图。');
+    if (priorRevision === null && (state.selectedSceneNode || state.lastPickedDetailNode) &&
+        (state.restoredModelUrl !== (sceneObject(state.selectedId)?.url || null) ||
+         (state.restoredModelUrl === null && state.restoredSceneRevision !== scene.revision))) {
+      state.selectedSceneNode = null;
+      state.lastPickedDetailNode = null;
+    }
+    pauseTimeline();
+    for (const entry of state.animations.values()) {
+      entry.mixer.stopAllAction();
+      entry.mixer.uncacheRoot(entry.root);
+    }
+    state.animations.clear();
+    objectLayer.traverse((node) => {
+      node.geometry?.dispose();
+      for (const material of (Array.isArray(node.material) ? node.material : node.material ? [node.material] : [])) {
+        for (const value of Object.values(material)) if (value?.isTexture) value.dispose();
+        material.dispose();
+      }
+    });
+    objectLayer.clear();
+    state.objectNodes.clear();
+    await Promise.allSettled(state.sceneObjects.map(addObject));
+    applyAnimationTime(state.time);
+    renderTimeline();
+    renderAnimationChoices();
+    frameAllIfReady();
+    if (state.selectedId && !sceneObject(state.selectedId)) state.selectedId = null;
+    if (state.selectedSceneNode && !resolveSceneNode(state.selectedSceneNode)) state.selectedSceneNode = null;
+    if (state.lastPickedDetailNode && !resolveSceneNode(state.lastPickedDetailNode)) state.lastPickedDetailNode = null;
+    renderSelection();
+    renderAnnotations();
+    drawOverlays();
+    id('revision-label').textContent = '版本 ' + scene.revision;
+    id('scene-name').textContent = scene.name || '当前场景';
+    id('scene-title').textContent = scene.name || 'Codex 的当前结果';
+    if (priorRevision !== null) {
+      announce('场景已更新到版本 ' + scene.revision + '。已有标注仍绑定原截图。');
+    }
+    renderSceneView();
+    saveDraft();
+  } finally {
+    state.sceneLoading = false;
+    updateSubmitLabel(); updateMode(); renderTimeline();
   }
-  renderSceneView();
-  saveDraft();
 }
 
 function settleOrbit() {
@@ -2399,6 +2410,7 @@ function cameraData() {
   return result;
 }
 function updateSceneHint() {
+  if (state.sceneLoading) { ui.sceneHint.textContent = '新场景正在加载，完成后可继续标注和发送。'; return; }
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
       ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 标注前先固定视角'
@@ -2413,6 +2425,7 @@ function updateSceneHint() {
 }
 function updateMode() {
   updateAnnotationHistory();
+  for (const button of [ui.freeze, ui.browse, ui.snapshotButton]) button.disabled = !editable();
   document.body.dataset.tool = state.mode;
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
@@ -2965,7 +2978,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
   };
 }
 async function submitFeedback() {
-  if (!state.workspaceReady || !state.sessionId || state.submitting || state.uploading) return;
+  if (!state.workspaceReady || !state.sessionId || state.sceneLoading || state.submitting || state.uploading) return;
   const promptText = ui.note.value;
   let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
@@ -3038,12 +3051,14 @@ async function submitFeedback() {
     }
     try { await refreshWorkspace(); } catch { /* The next poll will recover status. */ }
   } catch (error) {
-    if (error.status === 400 || error.status === 422 || (error.status === 409 && /scene revision changed/i.test(error.message))) {
+    const revisionConflict = error.status === 409 && (error.detail?.code === 'feedback_revision_conflict' ||
+      /^(scene revision changed|dynamic frame scene_revision must be|submitted scene_revision must be the oldest)/i.test(error.message));
+    if (error.status === 400 || error.status === 422 || revisionConflict) {
       await clearOutbox();
       state.pendingSubmission = null;
-      if (error.status === 409) {
+      if (revisionConflict) {
         try { await loadScene(); } catch { /* Poll will retry. */ }
-        announce('场景在发送时更新了，草稿已保留。请检查当前版本后再发送。', true);
+        announce('反馈版本校验未通过，已解除重试锁定。原截图和提示仍保留，可修改后重新发送。', true);
       } else {
         announce('反馈需要修改：' + error.message + '。草稿已保留，请修改后再发送。', true);
       }
@@ -3145,6 +3160,9 @@ async function poll() {
       api('/api/scene'),
       api('/api/sessions/' + encodeURIComponent(state.sessionId))
     ]);
+    // A send may have started while these reads were in flight. Keep its
+    // captured scene and version together until the packet has been saved.
+    if (state.submitting || state.uploading) return;
     if (scene.revision !== state.sceneRevision) await loadScene(scene);
     setReferenceClip(session.reference_clip || null);
     if (session.reference_images) setReferences(session.reference_images);
@@ -3265,7 +3283,7 @@ function bindEvents() {
     const before = annotationEditState();
     state.annotations = [];
     state.dynamicSnapshots = [];
-    if (state.snapshot?.time_sec !== undefined) { state.snapshot = null; state.sceneView = 'live'; renderSceneView(); }
+    state.snapshot = null; state.sceneView = 'live'; renderSceneView();
     recordAnnotationEdit(before);
     renderTimeline();
     renderAnnotations();

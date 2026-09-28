@@ -72,6 +72,7 @@ class WorkspaceGateway:
 
     def start(self) -> None:
         self.ensure()
+        self._restore_blocked_visual_feedback()
         self._started = True
         if self.external_review and self.adapter is None:
             self.store.workspace_agent(status="external_idle")
@@ -145,6 +146,34 @@ class WorkspaceGateway:
             logging.exception("Could not connect local Codex App Server")
             self.store.workspace_agent(status="disconnected", error=str(exc)[:500])
             self.store.workspace_event("disconnected", {"message": str(exc)[:500]})
+
+    def _restore_blocked_visual_feedback(self) -> None:
+        """Resume saved visual packets held by the former revision gate.
+
+        Only never-dispatched packets with immutable scene pixels are eligible.
+        Active packets and packets with a turn ID remain in their existing
+        reconciliation path, so restarting cannot replay a delivered message.
+        """
+        with self.store.lock:
+            workspace = self.store.state["workspace"]
+            feedback = {item["feedback_id"]: item for item in self.store.state["feedback"]}
+            restored = []
+            for item in workspace["queue"]:
+                if (item["status"] != "blocked_stale" or item.get("turn_id")
+                        or item["feedback_id"] == workspace.get("active_feedback_id")):
+                    continue
+                packet = feedback.get(item["feedback_id"], {})
+                has_evidence = bool(packet.get("scene_original_url")) or any(
+                    frame.get("scene_original_url") for frame in packet.get("dynamic_frames", [])
+                )
+                if not has_evidence:
+                    continue
+                item["status"] = "queued"
+                item["error"] = None
+                restored.append(item["feedback_id"])
+            if restored:
+                self.store._save()
+                self.store.workspace_event("saved_visual_feedback_resumed", {"feedback_ids": restored})
 
     def close(self) -> None:
         with self._worker_lock:
@@ -1240,18 +1269,13 @@ class WorkspaceGateway:
                 workspace = self.store.state["workspace"]
                 if workspace.get("active_feedback_id"):
                     return
-                # A feedback captured against an older scene needs a human
-                # decision, but must not hold up newer feedback that already
-                # targets the current revision.
+                # The submission already authorizes sending this immutable
+                # packet. A scene published while it waits does not invalidate
+                # the captured evidence or require another send confirmation.
                 item = next((entry for entry in workspace["queue"] if entry["status"] == "queued" and entry.get("target_thread_id") == workspace.get("thread_id")), None)
                 if item is None:
                     return
                 revision = self.store.state["scene"]["revision"]
-                if item["scene_revision"] != revision and item.get("confirmed_against_revision") != revision:
-                    item["status"] = "blocked_stale"
-                    self.store._save()
-                    self.store.workspace_event("stale_feedback_confirmation_required", {"feedback_id": item["feedback_id"], "captured_revision": item["scene_revision"], "current_revision": revision})
-                    return
                 item["status"] = "dispatching"
                 item["error"] = None
                 workspace["active_feedback_id"] = item["feedback_id"]
@@ -1259,8 +1283,10 @@ class WorkspaceGateway:
                 self.store._save()
                 feedback = next(entry for entry in self.store.state["feedback"] if entry["feedback_id"] == item["feedback_id"])
                 feedback = copy.deepcopy(feedback)
+                feedback["delivery_scene_revision"] = revision
                 if item["scene_revision"] != revision:
                     feedback["submitted_from_stale_snapshot"] = True
+                    feedback["stale_snapshot_confirmed"] = item.get("confirmed_against_revision") is not None
             text, image_paths = self._turn_input(feedback)
             send_attempted = True
             response = self.adapter.start_turn(text, image_paths, message_id=feedback["feedback_id"])
@@ -1314,7 +1340,10 @@ class WorkspaceGateway:
             fallback = "（仅有视觉标记）"
         lines = ["用户通过 Visual Reconstruction Workspace 发送视觉反馈。", "项目根目录：" + str(self.project_dir), "用户原话：", feedback.get("note", "") or fallback, "", f"场景版本：{feedback['scene_revision']}", f"反馈 ID：{feedback['feedback_id']}"]
         if feedback.get("submitted_from_stale_snapshot"):
-            lines.append("这份反馈针对较早的冻结场景截图。用户已确认继续发送；请依据截图和版本判断，不要把旧标记当成当前视角坐标。")
+            current_revision = feedback.get("delivery_scene_revision", self.store.scene()["revision"])
+            lines.append(f"这份反馈采集于较早的场景版本 {feedback['scene_revision']}，发送时当前版本为 {current_revision}。附带的截图和标记仍属于采集时的版本；请结合当前场景判断修改，不要把旧标记当成当前视角坐标。")
+            if feedback.get("stale_snapshot_confirmed"):
+                lines.append("用户已确认按保存的旧截图发送。")
         if feedback.get("selected_object_ids"):
             lines.append("选中对象 ID：" + ", ".join(feedback["selected_object_ids"]))
         if feedback.get("selected_scene_nodes"):

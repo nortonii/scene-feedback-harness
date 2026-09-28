@@ -1006,7 +1006,8 @@ class SceneStore:
                 raise APIError(400, "scene_revision cannot be newer than the current scene")
             stale_snapshot = revision != self.state["scene"]["revision"]
             if stale_snapshot and payload.get("confirm_stale") is not True:
-                raise APIError(409, f"scene revision changed to {self.state['scene']['revision']}; reload and resubmit")
+                raise APIError(409, f"scene revision changed to {self.state['scene']['revision']}; reload and resubmit",
+                               detail={"code": "feedback_revision_conflict", "current_scene_revision": self.state["scene"]["revision"]})
             annotations = payload.get("annotations", [])
             if not isinstance(annotations, list) or len(annotations) > 100:
                 raise APIError(400, "annotations must be an array with at most 100 items")

@@ -215,20 +215,38 @@ class DynamicSceneTests(unittest.TestCase):
         payload = self.payload()
         self.store.replace_scene(1, [])
         payload["dynamic_frames"].append({**payload["dynamic_frames"][0], "id": "moment2", "time_sec": 0.5, "scene_revision": 2})
-        with self.assertRaisesRegex(APIError, "scene revision changed"):
+        with self.assertRaisesRegex(APIError, "scene revision changed") as rejected:
             self.store.submit_feedback(self.session, payload)
+        self.assertEqual(rejected.exception.detail, {"code": "feedback_revision_conflict", "current_scene_revision": 2})
         payload["confirm_stale"] = True
         packet = self.store.submit_feedback(self.session, payload)
         self.assertEqual([frame["scene_revision"] for frame in packet["dynamic_frames"]], [1, 2])
         self.assertTrue(packet["submitted_from_stale_snapshot"])
         payload["scene_revision"] = 2
-        with self.assertRaisesRegex(APIError, "revision"):
+        with self.assertRaisesRegex(APIError, "revision") as rejected:
             self.store.submit_feedback(self.session, payload)
+        self.assertEqual(rejected.exception.detail["code"], "feedback_revision_conflict")
         payload = self.payload()
         payload["confirm_stale"] = True
         payload["dynamic_frames"][0]["scene_revision"] = 99
-        with self.assertRaisesRegex(APIError, "revision"):
+        with self.assertRaisesRegex(APIError, "revision") as rejected:
             self.store.submit_feedback(self.session, payload)
+        self.assertEqual(rejected.exception.detail["code"], "feedback_revision_conflict")
+
+    def test_legacy_blocked_dynamic_evidence_is_restored_without_relabeling(self) -> None:
+        clip = self.import_clip()
+        payload = self.payload(clip)
+        payload["idempotency_key"] = "legacy-dynamic-image"
+        packet = self.store.submit_feedback(self.session, payload)
+        self.store.replace_scene(1, [])
+        with self.store.lock:
+            self.store.state["workspace"]["queue"][0]["status"] = "blocked_stale"
+            self.store._save()
+        self.gateway._restore_blocked_visual_feedback()
+        reloaded = SceneStore(self.store.data_dir)
+        self.assertEqual(reloaded.workspace()["queue"][0]["status"], "queued")
+        self.assertEqual(reloaded.feedback_by_id(packet["feedback_id"]), packet)
+        self.assertEqual(packet["dynamic_frames"][0]["scene_revision"], 1)
 
     def test_animation_only_and_stable_node_metadata(self) -> None:
         payload = self.payload()
@@ -301,6 +319,47 @@ class DynamicSceneTests(unittest.TestCase):
 
 
 class DynamicHTTPTests(unittest.TestCase):
+    def test_revision_rejections_have_a_recoverable_code_and_never_save_a_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "project").mkdir()
+            (root / "web").mkdir()
+            server = make_server(port=0, data_dir=root / "data", web_dir=root / "web", project_dir=root / "project", external_review=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            base = f"http://127.0.0.1:{server.server_port}"
+            store = server.scene_store
+            session = store.workspace()["session_id"]
+            store.replace_scene(1, [])
+            _, data_url = image_data()
+            dynamic = {"note": "review", "confirm_stale": True,
+                       "timeline": {"clip_id": None, "time_sec": 0, "duration_sec": 2, "fps": 2, "scope": {"kind": "frame"}},
+                       "dynamic_frames": [{"id": "frame1", "time_sec": 0, "camera": {}, "scene_original_data_url": data_url}]}
+            cases = [
+                {"scene_revision": 1, "note": "stale"},
+                {**copy.deepcopy(dynamic), "scene_revision": 2},
+                {**copy.deepcopy(dynamic), "scene_revision": 1},
+            ]
+            cases[1]["dynamic_frames"][0]["scene_revision"] = 1
+            cases[2]["dynamic_frames"][0]["scene_revision"] = 2
+            try:
+                for index, payload in enumerate(cases):
+                    payload["idempotency_key"] = f"rejected-packet-{index}"
+                    request = urllib.request.Request(base + f"/api/sessions/{session}/feedback", data=json.dumps(payload).encode(),
+                                                     headers={"Content-Type": "application/json", "X-Workspace-Capability": store.browser_token}, method="POST")
+                    with self.assertRaises(urllib.error.HTTPError) as rejected:
+                        opener.open(request)
+                    self.assertEqual(rejected.exception.code, 409)
+                    body = json.load(rejected.exception)
+                    rejected.exception.close()
+                    self.assertEqual(body["code"], "feedback_revision_conflict")
+                    self.assertEqual(body["current_scene_revision"], 2)
+                    self.assertEqual(store.list_all_feedback(), [])
+                    self.assertEqual(store.workspace()["queue"], [])
+            finally:
+                server.shutdown()
+                server.server_close()
+
     def test_clip_routes_capabilities_and_context(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

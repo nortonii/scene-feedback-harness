@@ -558,7 +558,7 @@ class BoundGatewayTests(unittest.TestCase):
         self.assertEqual(SceneStore(self.store.data_dir).workspace()["queue"][0]["status"], "completed")
         gateway.close()
 
-    def test_stale_feedback_does_not_block_newer_feedback_for_current_scene(self) -> None:
+    def test_scene_updates_do_not_block_authorized_feedback_or_newer_packets(self) -> None:
         adapter = FakeBoundAdapter()
         gateway = WorkspaceGateway(self.store, self.project, adapter=adapter, external_review=True)
         gateway.start()
@@ -569,13 +569,19 @@ class BoundGatewayTests(unittest.TestCase):
         self.assertEqual(scene["revision"], 2)
 
         new = gateway.submit(session_id, {"idempotency_key": "new-shape", "scene_revision": 2, "note": "Current shape"})
-        wait_for(lambda: any(item["feedback_id"] == new["feedback_id"] and item["status"] == "running" for item in gateway.state()["queue"]))
+        wait_for(lambda: any(item["feedback_id"] == old["feedback_id"] and item["status"] == "running" for item in gateway.state()["queue"]))
         state = gateway.state()
         items = {item["feedback_id"]: item for item in state["queue"]}
-        self.assertEqual(items[old["feedback_id"]]["status"], "blocked_stale")
-        self.assertEqual(items[new["feedback_id"]]["status"], "running")
-        self.assertEqual(state["active_feedback_id"], new["feedback_id"])
-        self.assertEqual([call["message_id"] for call in adapter.calls], [new["feedback_id"]])
+        self.assertEqual(items[old["feedback_id"]]["status"], "running")
+        self.assertEqual(items[new["feedback_id"]]["status"], "queued")
+        self.assertEqual(state["active_feedback_id"], old["feedback_id"])
+        self.assertIn("场景版本 1，发送时当前版本为 2", adapter.calls[0]["text"])
+        self.assertNotIn("用户已确认", adapter.calls[0]["text"])
+        gateway.on_adapter_event({"method": "turn/completed", "params": {
+            "threadId": THREAD_ID, "turn": {"id": "turn-1", "status": "completed"},
+        }})
+        wait_for(lambda: any(item["feedback_id"] == new["feedback_id"] and item["status"] == "running" for item in gateway.state()["queue"]))
+        self.assertEqual([call["message_id"] for call in adapter.calls], [old["feedback_id"], new["feedback_id"]])
         gateway.close()
 
     def test_uncertain_bound_delivery_stays_queued_for_explicit_resolution(self) -> None:
