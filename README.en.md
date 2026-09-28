@@ -25,14 +25,29 @@ In the default mode, the Gateway keeps one persistent Codex thread for this proj
 
 This interface helps people point out problems. It does not define a reconstruction algorithm or ask people to enter coordinates or geometric constraints. Codex can use the modeling, reconstruction, and editing tools already available in the project.
 
+## Page layout and navigation
+
+The page uses a warm off-white background and black or gray controls. On wide screens the reference and scene sit side by side, with a horizontal toolbar above and one prompt box below. Task, activity, and reference panels open when needed.
+
+| Control | Purpose |
+| --- | --- |
+| Toolbar | `选择` (select), point, box, line, and arrow; `更多` (more) contains text, freehand, and optional correspondence numbers. `物品 / 部件` switches item / part selection |
+| Current task name at the top | Open the task panel to switch recipients or create a task with a name, model, reasoning effort, and permissions |
+| `记录` at the top | Execution, approvals, feedback queue, and message history. Closed by default; a new approval or actionable failed, stale, or uncertain-delivery item opens it once |
+| `物体与标记` below the canvases | Object and mark references. Clicking `引用` inserts at the prompt cursor, closes the panel, and returns focus to the prompt |
+| Reference pane’s `导入` menu | Import reference images, a video, or a frame sequence, and set the sequence FPS |
+| Timeline’s `选项` menu | Feedback scope, time interval, and GLB animation action selection |
+
+The bottom button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The old snapshot and marks remain available.
+
 ## What you can do on the page
 
 - Switch between reference images and pan or zoom them on the left; rotate, zoom, and select nodes in a GLB scene on the right.
 - Switch between item and part selection. Item selection picks a top-level GLB scene node (one whole physical item in the current asset); part selection picks the detailed named node you click. Primitive scene objects are always selected as a whole. Either level can be referenced in the same prompt.
 - Draw points, rectangles, lines, arrows, freehand strokes, and text on either side. Related marks can share a number; a missing object can be marked only on the reference image.
 - Write one freeform prompt to Codex. Put the cursor in your text and click “引用” (“Insert reference”) beside an object, a selected GLB node, or a visual mark to insert multiple references into that same prompt. Their forms are `[[object:ID]]`, `[[node:MODEL_ID:0/2]]`, and `[[annotation:ID]]`. For example, ask Codex to move a cabinet toward a marked spot and align its top with a marked line, then send the prompt once. You can mark and reference something that has not been modeled yet on the reference image; the scene still highlights only one selected object at a time.
-- Click “Annotate current view” to bind scene marks to **the screenshot, camera, selected object, and scene revision at that moment**. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
-- Inserting a mark reference or choosing “View / Select object” returns to live 3D selection. The frozen screenshot and existing marks remain; click “Back to annotation” to continue marking that screenshot.
+- Click `标注` (“Annotate”) to bind scene marks to **the screenshot, camera, selected object, and scene revision at that moment**. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
+- Inserting a mark reference, choosing `选择` (“Select”), or clicking `返回 3D` returns to live 3D selection. The frozen screenshot and existing marks remain; click `看标注` (“View marks”) to continue marking that screenshot.
 - Sending saves an immutable feedback packet: your exact words, original and annotated reference images, clean and annotated scene screenshots, selected nodes, camera, and scene revision. Marks are your hints; the original image is kept separately.
 - Once the server confirms that it saved feedback over HTTP, the prompt text clears for the next round while existing marks remain, even if delivery to Codex is queued or uncertain. If the HTTP save fails or is unconfirmed, the local draft and outbox entry remain for correction and retry.
 - New feedback submitted while Codex is running joins a queue for the next turn. If the scene changes while feedback is queued, the page first asks you to confirm feedback made against the old revision. Approval requests and stop actions are also handled on the page. Your project, thread, and drafts remain available after refreshing the page.
@@ -41,7 +56,7 @@ Scene input currently uses a self-contained `.glb` file. Publishing requires geo
 
 ## Align to a reference camera
 
-Selecting a reference with camera metadata automatically moves the 3D view to its capture pose. The overlay is shown by default; adjust its opacity directly, or set it to 0% to hide it. After orbiting manually, click `对齐参考视角` (“Align to reference view”) to return to that camera. When an undistorted copy is supplied, the overlay uses it to match the pinhole camera projection; the original reference remains separate for viewing and feedback. References without calibration can still be compared manually. Approximate intrinsics can leave residual alignment error near the image edges.
+Selecting a reference with camera metadata automatically moves the 3D view to its capture pose. The overlay is shown by default; adjust its opacity directly, or set it to 0% to hide it. After orbiting manually, click `对齐` (“Align”) to return to that camera. When an undistorted copy is supplied, the overlay uses it to match the pinhole camera projection; the original reference remains separate for viewing and feedback. References without calibration can still be compared manually. Approximate intrinsics can leave residual alignment error near the image edges.
 
 Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the GLB world) and pixel-based `intrinsics` (`width`, `height`, `fx`, `fy`, `cx`, `cy`). Attach `camera` and optional `alignment_image_data_url` to an existing image by its `reference_id` through the protected `POST /api/workspace/reference-cameras` endpoint. A `reference_cameras.json` manifest in the private workbench data directory matches camera metadata by filename prefix on future imports ([example](examples/reference_cameras.example.json)); send `{"apply_manifest":true}` to the same endpoint to apply it to existing images. Camera poses and the published GLB must use the same world coordinates.
 
@@ -50,12 +65,12 @@ Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the G
 A reference image sequence or video can share a timeline with an animated GLB. Play, pause, seek, and stepping to the previous or next sampled frame update both the reference and the 3D animation. The existing static-image and static-GLB workflow remains available. GLB animation supports node translation, rotation, scale, skinning, and morph targets with fixed topology. Variable-topology mesh caches, fluids, and live physics simulation are not integrated yet.
 
 - Starting a mark pauses playback and records its time, reference frame, camera, and scene revision. Keep up to 8 scene snapshots from different moments and return to a moment to review or annotate it.
-- One prompt can reference marks and objects from several moments. Choose whether the feedback applies to the current frame, a time interval, or the whole clip. The interval expresses the requested scope; drawn lines are not interpreted as motion paths or geometric constraints.
+- One prompt can reference marks and objects from several moments. Use the timeline’s `选项` menu to choose the marked frames (`所标帧`), a time interval, or the whole clip as the feedback scope. The interval expresses the requested scope; drawn lines are not interpreted as motion paths or geometric constraints.
 - Marks appear on their own frame. A submission includes original and annotated references and scene snapshots for the selected moments, plus timestamps, cameras, object references, and scene revisions. The whole video is not sent frame by frame to the model.
 - Each reference frame can carry its own camera pose, used for alignment when that frame is selected. Publishing a new GLB preserves the playback position; seeking does not increase `scene_revision`.
 - Preserve `semantic_id` or `stable_id` in node `extras` when exporting a GLB to help identify the same object across frames and exports. A node path locates a node only within its scene revision. Names and paths are not guaranteed to survive a new export; this does not automatically track objects.
 
-Import an ordered image sequence at a chosen FPS in the browser, or import a video for server-side sampling. Video import requires executable `ffmpeg` and `ffprobe` on the service host; image sequences do not. Video is sampled on a common time grid at 10 FPS by default, with a maximum of 600 frames per clip. Imports exceeding the limit fail; lower the sampling rate or trim the clip first.
+Use the reference pane’s `导入` menu to import an ordered image sequence at a chosen FPS or a video for server-side sampling. Video import requires executable `ffmpeg` and `ffprobe` on the service host; image sequences do not. Video is sampled on a common time grid at 10 FPS by default, with a maximum of 600 frames per clip. Imports exceeding the limit fail; lower the sampling rate or trim the clip first.
 
 Codex can also import project-local material with `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)`. Supply either `manifest_path` or `video_path`. Image sequences use the manifest’s own `fps` (30 when omitted); the tool’s `fps` parameter applies only to video (default 10). A frame can supply `time_sec`; otherwise its zero-based index divided by the manifest FPS is used. Frame rate is not inferred from filenames. Frame paths may be relative to the manifest, but every input must remain inside the project. FPS must be between 0.1 and 120. The video size limit is 40 MiB for browser uploads and 250 MiB for project-local files. `clear=True` removes the reference clip without changing the scene revision.
 
@@ -94,7 +109,7 @@ workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4
 
 ## Quick start: room and cabinet
 
-The browser UI currently uses Chinese labels: `标注当前视角` means “Annotate current view,” and `发送到 Codex` means “Send to Codex.”
+The browser UI uses Chinese labels: `标注` means “Annotate,” `返回 3D` returns to live selection, and `发送反馈` means “Send feedback.”
 
 You need Python 3.11+, a WebGL-capable browser, and a signed-in **`codex-cli 0.156.1`**. The App Server request and response formats were checked against JSON Schema generated by this version. Other versions produce an explicit error instead of silently using incompatible fields.
 
@@ -158,9 +173,9 @@ The workbench connects to the running **Codex Desktop App Server on the same hos
 
 Feedback known not to have been sent stays queued while the connection is unavailable or the original task is busy, then retries automatically. A definite send failure has a manual Retry button. If delivery is uncertain, the workbench checks the original task history by feedback ID. An unresolved item is isolated so later feedback can proceed, but it is **never resent automatically**. Check the original task first; use “Confirm not received, retry” only when the feedback is absent.
 
-To change agents, open the task that should take over in Codex Desktop, then select it under “Codex task receiving feedback” in the workbench. The current scene and references stay in place. New feedback goes to the selected task; unsent feedback remains assigned to its original task and resumes only if you switch back. The Codex task controls its own model; changing the workbench target does not change that model.
+To change agents, open the task that should take over in Codex Desktop, then click the current task name at the top of the workbench and select it under `发送到哪个 Codex 任务` in the task panel. The current scene and references stay in place. New feedback goes to the selected task; unsent feedback remains assigned to its original task and resumes only if you switch back. The Codex task controls its own model; changing the workbench target does not change that model.
 
-You can also expand “Create Codex task” in the same panel, select an available model, reasoning effort, and permission mode, then click “Create and switch.” The default is workspace write with approvals when needed. You can explicitly choose full access (`never` approval policy, removing routine file and command sandbox approvals) or read only (writes require approval). Tool-specific consent or interaction may still need a response. This starts a fresh conversation without copying the previous chat history. The scene, references, and workbench annotations remain available. No task is created until you click the button. The new task's permissions cannot retroactively change a turn already running or awaiting approval.
+You can also expand `新建 Codex 任务` (“Create Codex task”) in that task panel, select an available model, reasoning effort, and permission mode, then click “Create and switch.” The default is workspace write with approvals when needed. You can explicitly choose full access (`never` approval policy, removing routine file and command sandbox approvals) or read only (writes require approval). Tool-specific consent or interaction may still need a response. This starts a fresh conversation without copying the previous chat history. The scene, references, and workbench annotations remain available. No task is created until you click the button. The new task's permissions cannot retroactively change a turn already running or awaiting approval.
 
 ## Open the page from another device on the LAN
 

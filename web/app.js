@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
+import { setupMinimalLayout } from './layout.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -78,9 +79,10 @@ Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:fals
   animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
   seekGeneration:0, seeking:false, frameImages:new Map()});
 
+let minimalLayout = null;
 const threeScene = new THREE.Scene();
-threeScene.background = new THREE.Color('#1b2731');
-threeScene.fog = new THREE.Fog('#1b2731', 14, 36);
+threeScene.background = new THREE.Color('#eae9e3');
+threeScene.fog = new THREE.Fog('#eae9e3', 14, 36);
 const camera = new THREE.PerspectiveCamera(44, 1, 0.01, 2000);
 camera.up.set(0, 0, 1);
 camera.position.set(5.5, -8.5, 6.5);
@@ -106,15 +108,15 @@ threeScene.add(keyLight);
 const fillLight = new THREE.DirectionalLight(0x9bc6ea, 1.8);
 fillLight.position.set(-5, 6, 5);
 threeScene.add(fillLight);
-const grid = new THREE.GridHelper(30, 30, 0x6b8493, 0x465966);
+const grid = new THREE.GridHelper(30, 30, 0xb8b8ad, 0xc9c9bf);
 grid.rotateX(Math.PI / 2);
 grid.position.z = -0.003;
 grid.material.transparent = true;
-grid.material.opacity = 0.4;
+grid.material.opacity = 0.18;
 threeScene.add(grid);
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(200, 200),
-  new THREE.MeshBasicMaterial({color:0x1b2832, transparent:true, opacity:0.48, depthWrite:false, side:THREE.DoubleSide})
+  new THREE.MeshBasicMaterial({color:0xeae9e3, transparent:true, opacity:0.18, depthWrite:false, side:THREE.DoubleSide})
 );
 ground.position.z = -0.008;
 threeScene.add(ground);
@@ -350,9 +352,9 @@ function updateSubmitLabel() {
   const status = state.agent?.status || 'disconnected';
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
-    const label = state.pendingSubmission ? '重试同一条反馈'
-      : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入目标任务下一轮'
-      : bound ? '发送到目标 Codex 任务' : '保存视觉反馈';
+    const label = state.pendingSubmission ? '重试发送'
+      : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
+      : bound ? '发送反馈' : '保存反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
@@ -369,10 +371,10 @@ function updateSubmitLabel() {
       : '反馈会保存在工作台，待 MCP 工具读取后交回 Codex。';
     return;
   }
-  const label = state.pendingSubmission ? '重试上一条消息'
+  const label = state.pendingSubmission ? '重试发送'
     : ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
-    : status === 'disconnected' || status === 'error' ? '保存并等待连接'
-    : '发送到 Codex';
+    : status === 'disconnected' || status === 'error' ? '保存反馈'
+    : '发送反馈';
   ui.submit.querySelector('span:first-child').textContent = label;
   ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
@@ -460,6 +462,7 @@ function renderCreateTarget() {
   else ui.createTargetHelp.textContent = '权限模式只应用于新任务；当前场景和参考图会留在工作台。';
 }
 function renderTargetPicker() {
+  minimalLayout?.refresh();
   ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.boundThreadId);
   if (state.deliveryMode !== 'external' || !state.boundThreadId) return;
   const bound = state.boundThreadId;
@@ -640,6 +643,7 @@ function renderWorkspace(workspace) {
   renderQueue();
   renderApprovals();
   updateSubmitLabel();
+  minimalLayout?.refresh();
 }
 function renderExternalWorkspace(workspace) {
   const bound = !!state.boundThreadId;
@@ -687,6 +691,7 @@ function renderExternalWorkspace(workspace) {
       : '反馈保存在工作台；MCP 读取后，请在原 Codex 任务中查看后续。';
   }
   updateSubmitLabel();
+  minimalLayout?.refresh();
 }
 function renderExternalDelivery() {
   ui.queue.replaceChildren();
@@ -1407,19 +1412,19 @@ function updateAlignmentStatus() {
   ui.alignReference.disabled = !pose;
   ui.alignReference.classList.toggle('aligned', !!pose && state.alignedReferenceId === ref?.id && state.alignmentExact);
   if (!ref) {
-    ui.alignReference.textContent = '对齐参考视角';
+    ui.alignReference.textContent = '对齐';
     ui.alignReference.title = '请先选择参考图';
     ui.alignmentStatus.textContent = '选择带相机位姿的参考图，可让场景自动切换到同一视角。';
     return;
   }
   if (!pose) {
-    ui.alignReference.textContent = '对齐参考视角';
+    ui.alignReference.textContent = '对齐';
     ui.alignReference.title = '当前参考图没有可用的相机位姿';
     ui.alignmentStatus.textContent = '这张图没有可用的相机位姿；仍可手动旋转场景对照。';
     return;
   }
   const current = state.alignedReferenceId === ref.id;
-  ui.alignReference.textContent = current && state.alignmentExact ? '✓ 已对齐机位' : '对齐参考视角';
+  ui.alignReference.textContent = current && state.alignmentExact ? '✓ 机位' : '对齐';
   ui.alignReference.title = current ? '重新应用这张参考图的相机位姿' : '切换到这张参考图的拍摄机位';
   const caveats = [];
   if (pose.raw?.calibration_status?.includes('proxy')) caveats.push('内参为近似值');
@@ -1523,7 +1528,7 @@ function renderSelection() {
     if (state.selectedSceneNode && !selectedNode) state.selectedSceneNode = null;
     const box = selectedNode ? new THREE.Box3().setFromObject(selectedNode) : objectBox(item.id);
     if (box) {
-      selectionHelper = new THREE.Box3Helper(box, 0x9fe1e8);
+      selectionHelper = new THREE.Box3Helper(box, 0x292925);
       selectionHelper.material.transparent = true;
       selectionHelper.material.opacity = 0.95;
       selectionHelper.material.depthTest = false;
@@ -1546,7 +1551,8 @@ function renderSelection() {
       const cite = document.createElement('button');
       cite.type = 'button';
       cite.className = 'reference-insert selected-reference-insert';
-      cite.textContent = '在提示中引用这个' + (state.selectionLevel === 'item' ? '物品' : '部件');
+      cite.textContent = '引用';
+      cite.title = '在提示中引用选中的' + (state.selectionLevel === 'item' ? '物品' : '部件');
       cite.disabled = !editable();
       cite.addEventListener('mousedown', (event) => event.preventDefault());
       cite.addEventListener('click', () => insertSceneNodeReference({...state.selectedSceneNode}, nodeLabel));
@@ -1715,9 +1721,10 @@ function renderSceneView() {
   ui.browse.classList.toggle('hidden', !showingSnapshot);
   ui.snapshotButton.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
   ui.freeze.classList.toggle('hidden', showingSnapshot);
-  ui.newSceneBadge.classList.toggle('hidden', !hasSnapshot || state.snapshot.scene_revision === state.sceneRevision);
+  ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
-    ui.newSceneBadge.textContent = '新结果：版本 ' + state.sceneRevision + '；当前标注仍对应截图版本 ' + state.snapshot.scene_revision;
+    ui.newSceneBadge.textContent = '标注 v' + state.snapshot.scene_revision + ' · 查看最新 v' + state.sceneRevision + ' ↗';
+    ui.newSceneBadge.title = '这些标记保留在版本 ' + state.snapshot.scene_revision + ' 的截图上。点击查看版本 ' + state.sceneRevision + '。';
   }
   ui.compareImage.classList.toggle('hidden', showingSnapshot || !activeReference());
   controls.enabled = editable() && state.mode === 'select' && !showingSnapshot;
@@ -2277,9 +2284,9 @@ function updateSceneHint() {
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
       ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 标注前先固定视角'
-      : '点击「标注当前视角」后，在固定截图上圈画';
+      : '点击「标注」后，在固定截图上圈画';
   } else if (state.mode === 'select') {
-    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「返回 3D 点选」可继续选择';
+    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「返回 3D」可继续选择';
   } else {
     ui.sceneHint.textContent = '在场景上' +
       ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
@@ -2287,6 +2294,8 @@ function updateSceneHint() {
   }
 }
 function updateMode() {
+  document.body.dataset.tool = state.mode;
+  minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
   const drawing = state.mode !== 'select' && editable();
   ui.referenceCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
@@ -2446,7 +2455,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   const x2 = clamp(Number(p.x2) || 0, 0, 1) * width;
   const y2 = clamp(Number(p.y2) || 0, 0, 1) * height;
   const stale = false;
-  const color = stale ? '#bdcad0' : '#ffbd78';
+  const color = stale ? '#8a8a83' : '#bd4c37';
   const scale = Math.max(1, Math.min(width, height) / 550);
   ctx.save();
   ctx.strokeStyle = color;
@@ -2454,7 +2463,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   ctx.lineWidth = 3 * scale;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  ctx.shadowColor = '#15222c';
+  ctx.shadowColor = '#f5f4ef';
   ctx.shadowBlur = 3 * scale;
   if (stale) ctx.setLineDash([6 * scale, 5 * scale]);
   if (preview) ctx.globalAlpha = 0.68;
@@ -2489,7 +2498,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
     ctx.font = 'bold ' + Math.round(13 * scale) + 'px sans-serif';
     const text = String(annotation.text).slice(0, 100);
     const textWidth = Math.min(ctx.measureText(text).width, width - 12);
-    ctx.fillStyle = '#17242de8';
+    ctx.fillStyle = '#f5f4efed';
     ctx.fillRect(x, y - 19 * scale, textWidth + 12 * scale, 25 * scale);
     ctx.fillStyle = color;
     ctx.fillText(text, x + 5 * scale, y, Math.max(0, width - x - 10));
@@ -2497,7 +2506,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   if (annotation.group_id && circled[Number(annotation.group_id)]) {
     ctx.setLineDash([]);
     ctx.font = 'bold ' + Math.round(20 * scale) + 'px sans-serif';
-    ctx.fillStyle = '#15222c';
+    ctx.fillStyle = '#f5f4ef';
     ctx.fillRect(x - 5 * scale, y - 30 * scale, 26 * scale, 23 * scale);
     ctx.fillStyle = color;
     ctx.fillText(circled[Number(annotation.group_id)], x - 3 * scale, y - 12 * scale);
@@ -2696,6 +2705,7 @@ async function captureScene(snapshot) {
 }
 function insertNoteReference(label, token) {
   if (!editable()) return;
+  minimalLayout?.closeReferences();
   const start = ui.note.selectionStart;
   const end = ui.note.selectionEnd;
   const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
@@ -2839,7 +2849,7 @@ async function submitFeedback() {
   renderTimeline();
   ui.submit.disabled = true;
   ui.note.disabled = true;
-  ui.submit.querySelector('span:first-child').textContent = '正在准备图片…';
+  ui.submit.querySelector('span:first-child').textContent = '准备图片…';
   try {
     if (!state.pendingSubmission) {
       const payload = await feedbackPayload(referencedSceneNodes, promptText);
@@ -2999,6 +3009,7 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
+  minimalLayout = setupMinimalLayout({getState:() => state});
   ui.targetSelect.addEventListener('change', () => {
     state.targetChoice = ui.targetSelect.value || null;
     renderTargetPicker();
@@ -3074,6 +3085,7 @@ function bindEvents() {
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
   ui.freeze.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', () => { if (editable()) setMode('select'); });
+  ui.newSceneBadge.addEventListener('click', () => { if (editable()) setMode('select'); });
   ui.snapshotButton.addEventListener('click', () => { if (!editable()) return; if (state.snapshot?.time_sec !== undefined) openMoment(state.snapshot.id); else { state.sceneView = 'snapshot'; renderSceneView(); } });
   ui.compareOpacity.addEventListener('input', () => {
     ui.opacityValue.textContent = ui.compareOpacity.value + '%';
@@ -3159,7 +3171,7 @@ function bindEvents() {
     saveDraft();
   });
   document.addEventListener('keydown', (event) => {
-    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
+    if (event.target.closest('input, textarea, select, button, summary, a, [contenteditable=true], dialog[open]')) return;
     if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; }
     if (event.key >= '1' && event.key <= '7') {
       setMode(['select','point','rectangle','line','arrow','text','freehand'][Number(event.key) - 1]);
