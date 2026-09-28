@@ -246,7 +246,7 @@ function restoreDraft() {
   } catch { /* Ignore a stale or corrupt local draft. */ }
 }
 
-function editable() { return state.workspaceReady && state.sessionStatus === 'open' && !state.sceneLoading && !state.submitting && !state.uploading && !state.pendingSubmission; }
+function editable() { return state.workspaceReady && Number.isInteger(state.sceneRevision) && state.sessionStatus === 'open' && !state.sceneLoading && !state.submitting && !state.uploading && !state.pendingSubmission; }
 function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
@@ -419,7 +419,7 @@ function updateSubmitLabel() {
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
       : bound ? '发送反馈' : '保存反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
-    ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
@@ -438,7 +438,7 @@ function updateSubmitLabel() {
     : status === 'disconnected' || status === 'error' ? '保存反馈'
     : '发送反馈';
   ui.submit.querySelector('span:first-child').textContent = label;
-  ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
+  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
@@ -1747,13 +1747,14 @@ function settleOrbit() {
   const damping = controls.enableDamping;
   controls.enableDamping = false; controls.update(); controls.enableDamping = damping;
 }
-function captureLiveScene() {
+function captureLiveScene({includeSize=false}={}) {
   controls.update();
   renderer.render(threeScene, camera);
   const source = renderer.domElement;
   const canvas = scaledCanvas(source.width, source.height, 1440);
   canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.88);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+  return includeSize ? {data_url:dataUrl, width:canvas.width, height:canvas.height} : dataUrl;
 }
 function freezeScene() {
   if (!editable() || state.sceneView !== 'live') return;
@@ -1762,9 +1763,10 @@ function freezeScene() {
   if (oldMarks.length && !window.confirm('拍新截图会清除旧截图上的 ' + oldMarks.length + ' 条场景标记。继续？')) return;
   const before = annotationEditState();
   settleOrbit();
-  const shot = captureLiveScene();
+  const shot = captureLiveScene({includeSize:true});
   state.snapshot = {
-    id:newId(), data_url:shot, scene_revision:state.sceneRevision,
+    id:newId(), data_url:shot.data_url, image_width:shot.width, image_height:shot.height,
+    scene_revision:state.sceneRevision,
     camera:cameraData(), selected_object_ids:state.selectedId ? [state.selectedId] : [],
     selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : []
   };
@@ -1777,13 +1779,18 @@ function freezeScene() {
   announce('已固定当前视角。现在可在这张截图上标注。');
 }
 function updateSnapshotGeometry() {
-  if (!state.snapshot || !ui.snapshotImage.naturalWidth || !ui.snapshotImage.naturalHeight) return;
+  if (!state.snapshot) return;
+  // Size a new screenshot immediately. Its image can still be decoding when
+  // the user's first drag starts, or the previous image can have another aspect.
+  const width = state.snapshot.image_width || (ui.snapshotImage.complete && ui.snapshotImage.naturalWidth);
+  const height = state.snapshot.image_height || (ui.snapshotImage.complete && ui.snapshotImage.naturalHeight);
+  if (!width || !height) return;
   const scale = Math.min(
-    ui.sceneStage.clientWidth / ui.snapshotImage.naturalWidth,
-    ui.sceneStage.clientHeight / ui.snapshotImage.naturalHeight
+    ui.sceneStage.clientWidth / width,
+    ui.sceneStage.clientHeight / height
   );
-  ui.snapshotMedia.style.width = Math.max(1, ui.snapshotImage.naturalWidth * scale) + 'px';
-  ui.snapshotMedia.style.height = Math.max(1, ui.snapshotImage.naturalHeight * scale) + 'px';
+  ui.snapshotMedia.style.width = Math.max(1, width * scale) + 'px';
+  ui.snapshotMedia.style.height = Math.max(1, height * scale) + 'px';
   drawOverlays();
 }
 function renderSceneView() {
@@ -2253,9 +2260,10 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   const selectedShot = captureLiveScene();
   const priorVisibility = feedbackLayer.visible;
   feedbackLayer.visible = false;
-  const shot = captureLiveScene();
+  const shot = captureLiveScene({includeSize:true});
   feedbackLayer.visible = priorVisibility;
-  const moment = {id:newId(), data_url:shot, selected_data_url:selectedShot,
+  const moment = {id:newId(), data_url:shot.data_url, selected_data_url:selectedShot,
+    image_width:shot.width, image_height:shot.height,
     time_sec:state.time, clip_id:state.referenceClip?.clip_id || null,
     scene_revision:state.sceneRevision, camera:cameraData(),
     reference_frame_id:clipReference()?.id || null,
@@ -2413,8 +2421,8 @@ function updateSceneHint() {
   if (state.sceneLoading) { ui.sceneHint.textContent = '新场景正在加载，完成后可继续标注和发送。'; return; }
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
-      ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 标注前先固定视角'
-      : '点击「标注」后，在固定截图上圈画';
+      ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
+      : '直接在渲染图上圈画，自动保留当前截图';
   } else if (state.mode === 'select') {
     ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「返回 3D」可继续选择';
   } else {
@@ -2434,6 +2442,7 @@ function updateMode() {
   ui.sceneCanvas.style.pointerEvents = drawing && state.sceneView === 'snapshot' ? 'auto' : 'none';
   ui.referenceCanvas.style.cursor = drawing ? 'crosshair' : 'default';
   ui.sceneCanvas.style.cursor = drawing ? 'crosshair' : 'default';
+  renderer.domElement.style.cursor = drawing && state.sceneView === 'live' ? 'crosshair' : '';
   controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
   ui.referenceHint.classList.toggle('hidden', !drawing || !activeReference());
   updateSceneHint();
@@ -2513,16 +2522,30 @@ function addAnnotation(annotation) {
   drawOverlays();
   saveDraft();
 }
+function prepareSceneAnnotation() {
+  if (state.sceneView === 'snapshot' && state.snapshot) return true;
+  if (dynamicEnabled()) return !!ensureDynamicMoment({showSnapshot:true});
+  settleOrbit();
+  const snapshot = state.snapshot;
+  const reusable = snapshot && snapshot.scene_revision === state.sceneRevision &&
+    JSON.stringify(snapshot.camera) === JSON.stringify(cameraData()) &&
+    JSON.stringify(snapshot.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []) &&
+    JSON.stringify(snapshot.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []);
+  if (reusable) { state.sceneView = 'snapshot'; renderSceneView(); return true; }
+  // Replacing an already marked static view keeps the existing explicit choice
+  // and undo entry; a new gesture must never be drawn into another camera view.
+  freezeScene();
+  return state.sceneView === 'snapshot' && !!state.snapshot;
+}
 function annotationPointerDown(event, pane) {
-  if (!editable() || state.mode === 'select' || state.spacePan) return;
+  if (!editable() || state.mode === 'select' || state.spacePan || event.button !== 0) return;
   if (pane === 'reference' && !activeReference()) return;
-  if (pane === 'scene' && (state.sceneView !== 'snapshot' || !state.snapshot)) return;
-  if (dynamicEnabled()) {
-    if (!ensureDynamicMoment({showSnapshot:pane === 'scene'})) return;
-  }
-  event.preventDefault();
   const canvas = event.currentTarget;
+  // Preserve the clicked pixel before saving a moment can resize the timeline.
   const point = pointFromPointer(event, canvas);
+  event.preventDefault();
+  if (pane === 'scene') { if (!prepareSceneAnnotation()) return; }
+  else if (dynamicEnabled() && !ensureDynamicMoment()) return;
   if (state.mode === 'text') {
     showTextEditor(pane, point, event.clientX, event.clientY);
     return;
@@ -2534,7 +2557,7 @@ function annotationPointerDown(event, pane) {
 }
 function annotationPointerMove(event) {
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
-  state.drag.end = pointFromPointer(event, event.currentTarget);
+  state.drag.end = pointFromPointer(event, state.drag.pane === 'scene' ? ui.sceneCanvas : event.currentTarget);
   if (state.drag.type === 'freehand' && state.drag.points.length < 256) {
     const last = state.drag.points.at(-1);
     if (Math.hypot(last.x - state.drag.end.x, last.y - state.drag.end.y) > 0.003) state.drag.points.push(state.drag.end);
@@ -2546,7 +2569,7 @@ function annotationPointerUp(event) {
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   const drag = state.drag;
   state.drag = null;
-  const end = pointFromPointer(event, event.currentTarget);
+  const end = pointFromPointer(event, drag.pane === 'scene' ? ui.sceneCanvas : event.currentTarget);
   const distance = Math.hypot(end.x - drag.start.x, end.y - drag.start.y);
   if (drag.type === 'point') {
     addAnnotation({pane:drag.pane, type:'point', coordinates:{x:drag.start.x, y:drag.start.y}});
@@ -2978,7 +3001,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
   };
 }
 async function submitFeedback() {
-  if (!state.workspaceReady || !state.sessionId || state.sceneLoading || state.submitting || state.uploading) return;
+  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading) return;
   const promptText = ui.note.value;
   let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
@@ -3253,7 +3276,7 @@ function bindEvents() {
     ui.opacityValue.textContent = ui.compareOpacity.value + '%';
     ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
   });
-  for (const [canvas,pane] of [[ui.referenceCanvas,'reference'],[ui.sceneCanvas,'scene']]) {
+  for (const [canvas,pane] of [[ui.referenceCanvas,'reference'],[ui.sceneCanvas,'scene'],[renderer.domElement,'scene']]) {
     canvas.addEventListener('pointerdown', (event) => annotationPointerDown(event, pane));
     canvas.addEventListener('pointermove', annotationPointerMove);
     canvas.addEventListener('pointerup', annotationPointerUp);
