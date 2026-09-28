@@ -45,6 +45,7 @@ const ui = {
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
   undoAnnotation:id('undo-annotation'), redoAnnotation:id('redo-annotation'),
+  clearAnnotations:id('clear-annotations'),
   note:id('feedback-note'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
@@ -248,6 +249,7 @@ function editable() { return state.workspaceReady && state.sessionStatus === 'op
 function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
+  ui.clearAnnotations.disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length);
 }
 function annotationEditState() {
   return {annotations:[...state.annotations], dynamicSnapshots:[...state.dynamicSnapshots],
@@ -311,7 +313,6 @@ function setSession(session) {
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   ui.clipInput.disabled = !editable();
-  id('clear-annotations').disabled = state.sessionStatus !== 'open';
   if (state.sessionStatus !== 'open') {
     ui.caption.textContent = '这个会话已结束。已保存的标记仍可查看。';
   } else {
@@ -419,7 +420,6 @@ function updateSubmitLabel() {
     ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
-    id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
     ui.caption.textContent = state.pendingSubmission
       ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status)
@@ -439,7 +439,6 @@ function updateSubmitLabel() {
   ui.submit.disabled = !state.workspaceReady || state.sessionStatus !== 'open' || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
-  id('clear-annotations').disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
   else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
   else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
@@ -3177,8 +3176,9 @@ function bindEvents() {
     } catch (error) { announce('停止失败：' + error.message, true); }
     finally { ui.stop.disabled = false; }
   });
-  id('clear-annotations').addEventListener('click', () => {
+  ui.clearAnnotations.addEventListener('click', () => {
     if (!editable()) return;
+    pauseTimeline(); hideTextEditor(); state.drag = null;
     const before = annotationEditState();
     state.annotations = [];
     state.dynamicSnapshots = [];
@@ -3188,6 +3188,7 @@ function bindEvents() {
     renderAnnotations();
     drawOverlays();
     saveDraft();
+    announce('已清空标注，可点击「撤销」恢复。');
   });
   ui.undoAnnotation.addEventListener('click', undoAnnotationEdit);
   ui.redoAnnotation.addEventListener('click', redoAnnotationEdit);

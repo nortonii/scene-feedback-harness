@@ -47,6 +47,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 1px
 .annotation-history-tools { display: flex; align-items: center; gap: 4px; flex: none; }
 .annotation-history-tools .compact-button { gap: 5px; }
 .annotation-history-tools [aria-hidden] { font-size: 17px; }
+.annotation-history-tools .clear-annotations-button { margin-left: 4px; border-left-color: var(--line); }
 .tool-button { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 5px 10px; border: 1px solid transparent; font-size: 12px; white-space: nowrap; }
 .tool-button:hover { border-color: var(--line); }
 .tool-button.active { border-color: var(--ink); }
@@ -246,13 +247,13 @@ dialog::backdrop { background: #17171522; }
   .pane-heading { gap: 8px; }
 }
 @media (max-width: 900px) {
-  .app-shell { padding: 0 20px; }
+  .app-shell { padding: 0 20px; grid-template-rows: 88px auto minmax(0,1fr) 166px; }
   .scene-meta { display: none; }
   .brand h1 { font-size: 26px; }
   .top-actions { gap: 10px; }
   .task-nav { max-width: 120px; }
   .workspace { column-gap: 16px; }
-  .tool-panel { gap: 14px; }
+  .tool-panel { gap: 14px; flex-wrap: wrap; padding: 8px 0; min-height: 54px; }
   .tool-list { gap: 0; }
   .tool-button { padding-left: 7px; padding-right: 7px; }
   .annotation-history-tools .compact-button > span:last-child { display: none; }
