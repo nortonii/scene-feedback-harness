@@ -27,18 +27,20 @@ This interface helps people point out problems. It does not define a reconstruct
 
 ## Page layout and navigation
 
-The page uses a warm off-white background and black or gray controls. On wide screens the reference and scene sit side by side, with a horizontal toolbar above and one prompt box below. Task, activity, and reference panels open when needed.
+The page uses a light gray background, white panels, and blue action buttons. Wide screens place the reference and 3D scene side by side with tools above and a feedback sidebar on the right. Narrower screens move feedback below; mobile screens stack the views. A persistent status card shows connection, execution, queue, and approval states. Task, activity, and reference panels open when needed.
 
 | Control | Purpose |
 | --- | --- |
-| Toolbar | `选择` (select), point, box, line, and arrow; `更多` (more) contains text, freehand, and optional correspondence numbers. `物品 / 部件` switches item / part selection |
-| Current task name at the top | Open the task panel to switch recipients or create a task with a name, model, reasoning effort, and permissions |
-| `记录` at the top | Execution, approvals, feedback queue, and message history. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
-| `物体与标记` below the canvases | Object and mark references. Clicking `引用` inserts at the prompt cursor, closes the panel, and returns focus to the prompt |
-| Reference pane’s `导入` menu | Import reference images, a video, or a frame sequence, and set the sequence FPS |
+| Toolbar | `浏览` (browse), point, box, line, and arrow; `更多` (more) contains text, freehand, and optional correspondence numbers. `物品 / 部件` switches item / part selection |
+| Current task name at the top | Inspect the current connection mode. When bound to a desktop task, switch recipients or create a task with a name, model, reasoning effort, and permissions. Standalone mode explains its dedicated conversation and does not offer model or project switching |
+| `执行记录` at the top | Execution, approvals, feedback queue, and message history. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
+| `物体与标记` in the feedback panel | Object and mark references. Clicking `引用` inserts at the prompt cursor, closes the panel, and returns focus to the prompt |
+| Reference pane’s `导入素材` menu | Import reference images, a video, or a frame sequence, and set the sequence FPS |
 | Timeline’s `选项` menu | Feedback scope, time interval, and GLB animation action selection |
 
-The bottom button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The old snapshot and marks remain available.
+The send button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The old snapshot and marks remain available.
+
+Prompt examples append at the caret without removing existing text. Press `Ctrl/Cmd + Enter` to send. A scene badge distinguishes live 3D from a saved annotation snapshot and its revision.
 
 ## What you can do on the page
 
@@ -47,8 +49,8 @@ The bottom button normally reads `发送反馈` (send feedback). While the task 
 - Draw points, rectangles, lines, arrows, freehand strokes, and text on either side. Related marks can share a number; a missing object can be marked only on the reference image.
 - Use the toolbar's `撤销 / 重做` (undo / redo) to reverse or restore adding, deleting, or clearing marks. Shortcuts are `Ctrl/Cmd + Z` and `Ctrl/Cmd + Shift + Z`. `清空` (clear) removes all marks, fixed snapshots, and saved dynamic moments in one click, returns to the live 3D scene, and can be undone; it keeps the prompt and reference images. The prompt field keeps native text undo. Annotation history lasts only for the current page and starts fresh after a reload.
 - Write one freeform prompt to Codex. Put the cursor in your text and click “引用” (“Insert reference”) beside an object, a selected GLB node, or a visual mark to insert multiple references into that same prompt. Their forms are `[[object:ID]]`, `[[node:MODEL_ID:0/2]]`, and `[[annotation:ID]]`. For example, ask Codex to move a cabinet toward a marked spot and align its top with a marked line, then send the prompt once. You can mark and reference something that has not been modeled yet on the reference image; the scene still highlights only one selected object at a time. In the `物体与标记` (objects and marks) panel, click `引用全部标记` (reference all marks) to insert all missing mark references at the caret, including saved dynamic moments. Existing references are not repeated; the panel closes so you can continue writing.
-- Select a drawing tool and click or drag directly in the right pane to annotate. The workbench automatically saves **the screenshot, camera, selected object, and scene revision at that moment**. You can also click `标注` (“Annotate”) to freeze the view beforehand. A static scene reuses its screenshot when you continue drawing at the same view and revision. Replacing an annotated static screenshot asks before clearing its old scene marks. Cancel keeps it unchanged, and a confirmed replacement can be undone. Dynamic scenes keep snapshots for each saved moment. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
-- Inserting a mark reference, choosing `选择` (“Select”), or clicking `返回 3D` returns to live 3D selection. The frozen screenshot and existing marks remain; click `标注截图` (“Annotation snapshot”) to return to the saved view and continue marking it. Scene arrows and other marks stay attached to their original screenshot. Rotating the live view or refreshing the page does not overwrite it: sending includes the marked screenshot and its original camera, rather than placing those arrows over the newly rotated view.
+- Select a drawing tool and click or drag directly in the right pane to annotate. The workbench automatically saves **the screenshot, camera, selected object, and scene revision at that moment**. You can also click `标注此视角` (“Annotate this view”) to freeze the view beforehand. A static scene reuses its screenshot when you continue drawing at the same view and revision. Replacing an annotated static screenshot asks before clearing its old scene marks. Cancel keeps it unchanged, and a confirmed replacement can be undone. Dynamic scenes keep snapshots for each saved moment. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
+- Inserting a mark reference, choosing `浏览` (“Browse”), or clicking `返回 3D` returns to live 3D selection. The frozen screenshot and existing marks remain; click `标注截图` (“Annotation snapshot”) to return to the saved view and continue marking it. Scene arrows and other marks stay attached to their original screenshot. Rotating the live view or refreshing the page does not overwrite it: sending includes the marked screenshot and its original camera, rather than placing those arrows over the newly rotated view.
 - Sending saves an immutable feedback packet: your exact words, original and annotated reference images, clean and annotated scene screenshots, selected nodes, camera, and scene revision. Marks are your hints; the original image is kept separately.
 - Once the server confirms that it saved feedback over HTTP, the prompt text clears for the next round while existing marks remain, even if delivery to Codex is queued or uncertain. If the HTTP save fails or is unconfirmed, the local draft and outbox entry remain for correction and retry.
 - New feedback submitted while Codex is running joins a queue for the next turn. Saved feedback is delivered automatically even if the scene changes while it waits. The model receives both the original snapshot revision and the current revision at delivery, so it can interpret your prompt against the older evidence. Even if the snapshot is already old when you send, clicking Send submits it directly without another confirmation; the model still receives its actual revision. Approval requests and stop actions are also handled on the page.
@@ -58,7 +60,7 @@ Scene input currently uses a self-contained `.glb` file. Publishing requires geo
 
 ## Align to a reference camera
 
-Selecting a reference with camera metadata automatically moves the 3D view to its capture pose. The overlay is shown by default; adjust its opacity directly, or set it to 0% to hide it. After orbiting manually, click `对齐` (“Align”) to return to that camera. When an undistorted copy is supplied, the overlay uses it to match the pinhole camera projection; the original reference remains separate for viewing and feedback. References without calibration can still be compared manually. Approximate intrinsics can leave residual alignment error near the image edges.
+Selecting a reference with camera metadata automatically moves the 3D view to its capture pose. The overlay starts hidden at 0%; adjust its opacity manually. The setting is saved with this session’s browser draft. After orbiting manually, click `对齐` (“Align”) to return to that camera. When an undistorted copy is supplied, the overlay uses it to match the pinhole camera projection; the original reference remains separate for viewing and feedback. References without calibration can still be compared manually. Approximate intrinsics can leave residual alignment error near the image edges.
 
 Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the GLB world) and pixel-based `intrinsics` (`width`, `height`, `fx`, `fy`, `cx`, `cy`). Attach `camera` and optional `alignment_image_data_url` to an existing image by its `reference_id` through the protected `POST /api/workspace/reference-cameras` endpoint. A `reference_cameras.json` manifest in the private workbench data directory matches camera metadata by filename prefix on future imports ([example](examples/reference_cameras.example.json)); send `{"apply_manifest":true}` to the same endpoint to apply it to existing images. Camera poses and the published GLB must use the same world coordinates.
 
@@ -216,6 +218,17 @@ The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruct
 ```bash
 .venv/bin/python -m unittest discover -s backend/tests -v
 ```
+
+The optional browser smoke check creates isolated temporary data and a random local port. It does not start Codex or submit feedback to an existing task:
+
+```bash
+.venv/bin/python -m pip install playwright
+.venv/bin/python -m playwright install chromium
+.venv/bin/python tests/ui_smoke.py --artifacts-dir /tmp/scene-feedback-ui
+```
+
+It covers annotation undo, snapshot and draft restoration, prompt examples, keyboard/IME handling, feedback persistence, connection recovery, frame sequences, and narrow layouts.
+
 
 The real App Server integration was tested with two different local images: Codex recognized a red image in the first turn, then recognized a blue image in the **same thread** after stdio was closed and restarted. The `thread/read` history contains `localImage` items for both turns. This verifies that the images reached the model, rather than merely sending their file paths.
 

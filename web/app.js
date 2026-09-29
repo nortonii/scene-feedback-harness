@@ -42,6 +42,8 @@ const ui = {
   createTargetPanel:id('create-target-panel'), createTitle:id('create-title'), createModel:id('create-model'),
   createEffort:id('create-effort'), createPermissions:id('create-permissions'),
   createTarget:id('create-target'), createTargetHelp:id('create-target-help'),
+  standaloneTaskInfo:id('standalone-task-info'), standaloneTaskTitle:id('standalone-task-title'),
+  standaloneTaskDescription:id('standalone-task-description'),
   objectList:id('object-list'), selectionSummary:id('selection-summary'),
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
@@ -50,19 +52,20 @@ const ui = {
   referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
   submit:id('submit-button'), caption:id('submit-caption'),
-  pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
+  pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'), sceneViewLabel:id('scene-view-label'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
   freeze:id('freeze-button'), browse:id('browse-button'), snapshotButton:id('snapshot-button'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
   feedbackIntro:id('feedback-intro'),
+  workflowStatus:id('workflow-status'), workflowDetail:id('workflow-detail'), workflowDot:id('workflow-dot'),
   approvals:id('approval-list'), queue:id('queue-list'), conversation:id('conversation')
 };
 const state = {
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
-  boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
+  boundThreadId:null, workspaceThreadId:null, workspaceError:null, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
   canSetPermissions:false,
@@ -89,8 +92,8 @@ const frameImages = createFrameImageCache();
 let minimalLayout = null;
 const annotationHistory = createAnnotationHistory();
 const threeScene = new THREE.Scene();
-threeScene.background = new THREE.Color('#eae9e3');
-threeScene.fog = new THREE.Fog('#eae9e3', 14, 36);
+threeScene.background = new THREE.Color('#eef2f8');
+threeScene.fog = new THREE.Fog('#eef2f8', 14, 36);
 const camera = new THREE.PerspectiveCamera(44, 1, 0.01, 2000);
 camera.up.set(0, 0, 1);
 camera.position.set(5.5, -8.5, 6.5);
@@ -117,7 +120,7 @@ threeScene.add(keyLight);
 const fillLight = new THREE.DirectionalLight(0x9bc6ea, 1.8);
 fillLight.position.set(-5, 6, 5);
 threeScene.add(fillLight);
-const grid = new THREE.GridHelper(30, 30, 0xb8b8ad, 0xc9c9bf);
+const grid = new THREE.GridHelper(30, 30, 0xb8c5d6, 0xd2dce8);
 grid.rotateX(Math.PI / 2);
 grid.position.z = -0.003;
 grid.material.transparent = true;
@@ -125,7 +128,7 @@ grid.material.opacity = 0.18;
 threeScene.add(grid);
 const ground = new THREE.Mesh(
   new THREE.PlaneGeometry(200, 200),
-  new THREE.MeshBasicMaterial({color:0xeae9e3, transparent:true, opacity:0.18, depthWrite:false, side:THREE.DoubleSide})
+  new THREE.MeshBasicMaterial({color:0xeef2f8, transparent:true, opacity:0.18, depthWrite:false, side:THREE.DoubleSide})
 );
 ground.position.z = -0.008;
 threeScene.add(ground);
@@ -191,6 +194,7 @@ function saveDraft() {
       dynamicTime:state.time, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
       feedbackScope:ui.scope.value, rangeStart:ui.rangeStart.value, rangeEnd:ui.rangeEnd.value,
       referenceZoom:state.referenceZoom, referencePan:state.referencePan,
+      compareOpacity:Number(ui.compareOpacity.value),
       eventCursor:state.eventCursor
     }));
   } catch { /* A full or disabled local store should not block feedback. */ }
@@ -232,6 +236,10 @@ function restoreDraft() {
     state.referencePan = Number.isFinite(draft.referencePan?.x) && Number.isFinite(draft.referencePan?.y)
       ? draft.referencePan : {x:0,y:0};
     ui.groupSelect.value = state.groupId;
+    if (Number.isFinite(draft.compareOpacity)) {
+      ui.compareOpacity.value = clamp(draft.compareOpacity, 0, 100);
+      ui.opacityValue.textContent = ui.compareOpacity.value + '%';
+    }
     // Preserve drafts from the former two-field composer as one freeform prompt.
     const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
     const currentNote = typeof draft.note === 'string' ? draft.note : '';
@@ -327,6 +335,7 @@ function setSession(session) {
   }
   renderTimeline();
   updateAnnotationHistory();
+  renderWorkflowStatus();
 }
 
 async function ensureSession() {
@@ -415,8 +424,72 @@ async function clearOutbox() {
   try { localStorage.removeItem(outboxKey()); } catch { /* Ignore unavailable local storage. */ }
 }
 
+function renderWorkflowStatus() {
+  if (!ui.workflowStatus) return;
+  const status = state.agent?.status || 'disconnected';
+  const pending = state.queue.filter((item) => ['queued', 'dispatching', 'awaiting_mcp', 'submitted'].includes(item.status));
+  const currentPending = pending.filter((item) => !state.boundThreadId || !item.target_thread_id || item.target_thread_id === state.boundThreadId);
+  const otherPending = pending.length - currentPending.length;
+  const lastFeedback = state.queue.filter((item) => !state.boundThreadId || !item.target_thread_id || item.target_thread_id === state.boundThreadId).at(-1);
+  const attention = state.queue.filter((item) => ['blocked_stale', 'delivery_uncertain'].includes(item.status) ||
+    (item.status === 'failed' && !item.turn_id));
+  const approvals = state.approvals.filter((item) => item?.approval_id).length;
+  let tone = 'ready';
+  let title = '可以开始反馈';
+  let detail = '查看参考图与场景，圈画问题或直接描述你想修改的地方。';
+  if (state.workspaceError) {
+    tone = 'error'; title = state.workspaceReady ? '工作台连接中断' : '工作台未能连接';
+    detail = state.workspaceReady ? '正在重新连接；你的反馈草稿会保留。' : state.workspaceError;
+  } else if (!state.workspaceReady || state.sessionStatus === 'connecting') {
+    tone = 'connecting'; title = '正在连接工作台'; detail = '正在读取场景和 Codex 会话…';
+  } else if (state.sessionStatus !== 'open') {
+    tone = 'warning'; title = '当前会话已结束'; detail = '已保存的场景和标记仍可查看。';
+  } else if (state.submitting) {
+    tone = 'running'; title = '正在发送反馈'; detail = '正在准备图片并保存这条反馈…';
+  } else if (state.uploading) {
+    tone = 'running'; title = '正在导入参考资料'; detail = '导入完成后即可继续标注和发送反馈。';
+  } else if (approvals || status === 'awaiting_approval') {
+    tone = 'warning'; title = '需要你的审批';
+    detail = (approvals ? approvals + ' 项待审批。' : '') + '打开「执行记录」查看并处理后，Codex 才能继续。';
+  } else if (state.pendingSubmission) {
+    tone = 'warning'; title = '上次发送待确认'; detail = '点击「重试发送」沿用同一消息编号，避免重复提交。';
+  } else if (attention.length) {
+    tone = 'warning'; title = '有 ' + attention.length + ' 条反馈需要处理';
+    detail = '打开「执行记录」核对送达状态、旧场景截图或发送失败原因。';
+  } else if (['disconnected', 'error', 'delivery_uncertain'].includes(status)) {
+    tone = status === 'delivery_uncertain' ? 'warning' : 'error';
+    title = ({disconnected:'Codex 暂未连接', error:'Codex 执行出错', delivery_uncertain:'反馈送达待核实'})[status];
+    detail = state.agent.error ? String(state.agent.error).slice(0, 160)
+      : status === 'delivery_uncertain' ? '请在「执行记录」核对这条反馈的送达情况。'
+      : '反馈可以先保存；在「执行记录」查看连接状态。';
+  } else if (state.sceneLoading || !Number.isInteger(state.sceneRevision)) {
+    tone = 'running'; title = '正在加载场景'; detail = '场景就绪后即可选择对象、标注和发送反馈。';
+  } else if (status === 'running' || currentPending.some((item) => item.status === 'dispatching')) {
+    tone = 'running'; title = 'Codex 正在处理';
+    detail = currentPending.length ? currentPending.length + ' 条反馈等待送达；可在「执行记录」查看进度。'
+      : '可继续整理下一轮反馈；处理进度在「执行记录」中。';
+  } else if (state.deliveryMode === 'external' && !state.boundThreadId) {
+    title = pending.length ? '反馈已保存，等待读取' : '可以保存审图反馈';
+    detail = '由原 Codex 任务通过 MCP 读取反馈；后续进度请在原任务中查看。';
+  } else if (currentPending.length || status === 'waiting') {
+    tone = 'running'; title = '反馈正在排队';
+    detail = '等待 Codex 空闲或连接恢复后自动发送。可在「执行记录」查看队列。';
+  } else if (otherPending) {
+    tone = 'warning'; title = otherPending + ' 条反馈留在其他任务';
+    detail = '当前任务可以接收新反馈；旧反馈需要切回其原任务后才能继续发送。';
+  } else if (['failed', 'interrupted'].includes(lastFeedback?.status)) {
+    tone = 'warning'; title = lastFeedback.status === 'failed' ? '上一轮执行失败' : '上一轮执行中断';
+    detail = '打开「执行记录」查看原因；需要继续时可发送新的反馈。';
+  }
+  if (ui.workflowStatus.textContent !== title) ui.workflowStatus.textContent = title;
+  ui.workflowStatus.dataset.state = tone;
+  if (ui.workflowDetail && ui.workflowDetail.textContent !== detail) ui.workflowDetail.textContent = detail;
+  if (ui.workflowDot) ui.workflowDot.dataset.state = tone;
+}
 function updateSubmitLabel() {
   updateAnnotationHistory();
+  renderWorkflowStatus();
+  document.querySelectorAll('[data-prompt-example]').forEach((button) => { button.disabled = !editable(); });
   const status = state.agent?.status || 'disconnected';
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
@@ -448,7 +521,7 @@ function updateSubmitLabel() {
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
-  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
+  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '发送后加入下一轮，Codex 空闲后会自动处理。';
   else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
   else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
   appendSceneSnapshotHint();
@@ -534,8 +607,24 @@ function renderCreateTarget() {
   else if (!state.canSetPermissions) ui.createTargetHelp.textContent = '服务正在更新任务权限功能；请等当前回合结束后刷新页面。';
   else ui.createTargetHelp.textContent = '权限模式只应用于新任务；当前场景和参考图会留在工作台。';
 }
+function renderStandaloneTaskInfo() {
+  if (!ui.standaloneTaskInfo) return;
+  const standalone = state.deliveryMode !== 'external';
+  ui.standaloneTaskInfo.classList.toggle('hidden', !standalone && !!state.boundThreadId);
+  if (!standalone && state.boundThreadId) return;
+  const thread = state.workspaceThreadId;
+  ui.standaloneTaskTitle.textContent = standalone ? '独立工作台 · 专用 Codex 对话' : '已有任务审图 · MCP 反馈';
+  ui.standaloneTaskTitle.title = thread || '';
+  ui.standaloneTaskDescription.textContent = !state.workspaceReady
+    ? '正在连接工作台，连接后会显示当前会话信息。'
+    : standalone
+      ? '工作台会自动连接 Codex。' + (thread ? '当前会话：' + shortTaskId(thread) + '。' : '正在建立专用对话。') +
+        '当前模式暂不支持在页面切换模型或工程；修改其他工程需要另开工作台。'
+      : '视觉反馈先保存在工作台，原 Codex 任务通过 MCP 读取后才会继续执行。请在原任务中查看后续进度。';
+}
 function renderTargetPicker() {
   minimalLayout?.refresh();
+  renderStandaloneTaskInfo();
   ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.boundThreadId);
   if (state.deliveryMode !== 'external' || !state.boundThreadId) return;
   const bound = state.boundThreadId;
@@ -685,6 +774,8 @@ async function switchTask(threadId) {
   }
 }
 function renderWorkspace(workspace) {
+  state.workspaceError = null;
+  state.workspaceThreadId = typeof workspace.thread_id === 'string' ? workspace.thread_id : null;
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
   const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
@@ -2007,8 +2098,7 @@ async function uploadReferences(files) {
   const images = [...files];
   if (!images.length) return;
   state.uploading = true;
-  ui.submit.disabled = true;
-  updateAnnotationHistory();
+  updateSubmitLabel();
   try {
     for (const file of images) {
       if (!['image/jpeg','image/png'].includes(file.type)) throw new Error('请使用 PNG 或 JPEG 图片');
@@ -2037,8 +2127,7 @@ async function uploadReferences(files) {
     announce('添加参考图失败：' + error.message, true);
   } finally {
     state.uploading = false;
-    ui.submit.disabled = !editable();
-    updateAnnotationHistory();
+    updateSubmitLabel();
     ui.referenceInput.value = '';
   }
 }
@@ -2511,6 +2600,11 @@ function cameraData() {
   return result;
 }
 function updateSceneHint() {
+  if (ui.sceneViewLabel) {
+    const showingSnapshot = state.sceneView === 'snapshot' && !!state.snapshot;
+    ui.sceneViewLabel.textContent = showingSnapshot ? '标注截图 · v' + state.snapshot.scene_revision : '实时 3D';
+    ui.sceneViewLabel.dataset.mode = showingSnapshot ? 'snapshot' : 'live';
+  }
   if (state.sceneLoading) { ui.sceneHint.textContent = '新场景正在加载，完成后可继续标注和发送。'; return; }
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
@@ -2529,7 +2623,11 @@ function updateMode() {
   for (const button of [ui.freeze, ui.browse, ui.snapshotButton]) button.disabled = !editable();
   document.body.dataset.tool = state.mode;
   minimalLayout?.refresh();
-  document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
+  document.querySelectorAll('.tool-button').forEach((button) => {
+    const active = button.dataset.tool === state.mode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
   const drawing = state.mode !== 'select' && editable();
   ui.referenceCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
   ui.sceneCanvas.style.pointerEvents = drawing && state.sceneView === 'snapshot' ? 'auto' : 'none';
@@ -2951,6 +3049,21 @@ async function captureScene(snapshot) {
     scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84)
   };
 }
+function insertPromptExample(text) {
+  if (!editable() || !text) return;
+  // Append at the end of any selection so existing prompt text is retained.
+  const cursor = ui.note.selectionEnd;
+  const before = cursor > 0 && !/\s/.test(ui.note.value[cursor - 1]) ? '\n' : '';
+  const after = cursor < ui.note.value.length && !/\s/.test(ui.note.value[cursor]) ? '\n' : '';
+  const insertion = before + text + after;
+  if (ui.note.value.length + insertion.length > 10000) {
+    announce('加入示例会超过 10000 字上限，请先精简提示。', true);
+    return;
+  }
+  ui.note.setRangeText(insertion, cursor, cursor, 'end');
+  ui.note.focus();
+  saveDraft();
+}
 function insertNoteText(text, {replaceSelection=true}={}) {
   if (!editable()) return false;
   const start = replaceSelection ? ui.note.selectionStart : ui.note.selectionEnd;
@@ -3116,6 +3229,7 @@ async function submitFeedback() {
   pauseTimeline();
   hideTextEditor(); state.drag = null; settleOrbit();
   state.submitting = true;
+  updateSubmitLabel();
   updateMode();
   renderTimeline();
   ui.submit.disabled = true;
@@ -3284,14 +3398,20 @@ async function poll() {
     if (session.reference_images) setReferences(session.reference_images);
     if (session.status !== state.sessionStatus || Number(session.feedback_count) !== state.feedbackCount) setSession(session);
     await refreshWorkspace();
-  } catch {
+  } catch (error) {
+    state.workspaceError = error.message;
     ui.agentStatus.textContent = '工作台连接中断，正在重试…';
     ui.agentStatus.className = 'agent-status error';
+    ui.pill.textContent = '工作台连接中断';
+    ui.pill.className = 'session-pill error';
+    renderWorkflowStatus();
   }
   finally { poll.running = false; }
 }
 function bindEvents() {
   minimalLayout = setupMinimalLayout({getState:() => state});
+  renderTargetPicker();
+  updateSubmitLabel();
   ui.targetSelect.addEventListener('change', () => {
     state.targetChoice = ui.targetSelect.value || null;
     renderTargetPicker();
@@ -3372,6 +3492,7 @@ function bindEvents() {
   ui.compareOpacity.addEventListener('input', () => {
     ui.opacityValue.textContent = ui.compareOpacity.value + '%';
     ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
+    saveDraft();
   });
   for (const [canvas,pane] of [[ui.referenceCanvas,'reference'],[ui.sceneCanvas,'scene'],[renderer.domElement,'scene']]) {
     canvas.addEventListener('pointerdown', (event) => annotationPointerDown(event, pane));
@@ -3383,6 +3504,18 @@ function bindEvents() {
     });
   }
   ui.note.addEventListener('input', saveDraft);
+  ui.note.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.altKey &&
+        !event.isComposing && event.keyCode !== 229 && !event.repeat && !ui.submit.disabled) {
+      event.preventDefault();
+      ui.submit.click();
+    }
+  });
+  document.querySelectorAll('[data-prompt-example]').forEach((button) => {
+    // Preserve the cursor position when choosing an example with a pointer.
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', () => insertPromptExample(button.dataset.promptExample));
+  });
   ui.submit.addEventListener('click', submitFeedback);
   ui.stop.addEventListener('click', async () => {
     ui.stop.disabled = true;
@@ -3430,6 +3563,7 @@ function bindEvents() {
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
   ui.annotationText.addEventListener('keydown', (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Enter') { event.preventDefault(); saveTextAnnotation(); }
     if (event.key === 'Escape') { event.preventDefault(); hideTextEditor(); }
   });
@@ -3461,6 +3595,7 @@ function bindEvents() {
     saveDraft();
   });
   document.addEventListener('keydown', (event) => {
+    if (event.isComposing || event.keyCode === 229 || document.querySelector('dialog[open]')) return;
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.isComposing &&
         !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false])')) {
       const key = event.key.toLowerCase();
@@ -3505,6 +3640,8 @@ try {
   drawOverlays();
 } catch (error) {
   state.sessionStatus = 'error';
+  state.workspaceError = error.message;
+  renderWorkflowStatus();
   ui.pill.textContent = '连接失败';
   ui.pill.className = 'session-pill error';
   ui.submit.disabled = true;

@@ -64,14 +64,14 @@ export function setupMinimalLayout({getState}) {
       ? state.targets.find((item) => item?.thread_id === bound) : null;
     const rawName = target?.title?.trim();
     const name = rawName?.startsWith('未命名任务 · ')
-      ? '未命名任务' : rawName || (bound ? '当前任务' : '任务');
+      ? '未命名任务' : rawName || (bound ? '当前任务' : state.deliveryMode === 'external' ? '已有任务审图' : '独立工作台');
     const taskTitle = byId('task-short-title');
     if (taskTitle && taskTitle.textContent !== name) taskTitle.textContent = name;
     const taskButton = byId('task-dialog-button');
     if (taskButton) {
-      taskButton.disabled = state.deliveryMode !== 'external' || !bound;
+      taskButton.disabled = false;
       taskButton.title = [name, target?.model, target?.reasoning_effort].filter(Boolean).join(' · ');
-      taskButton.setAttribute('aria-label', bound ? '任务：' + name : '任务');
+      taskButton.setAttribute('aria-label', '任务与会话：' + name);
     }
 
     const attention = new Set();
