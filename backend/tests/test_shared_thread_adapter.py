@@ -134,6 +134,26 @@ class FakeBoundAdapter:
 
 
 class SharedDesktopAdapterTests(unittest.TestCase):
+    def test_owned_task_reconnect_carries_its_scene_mcp_config(self) -> None:
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/new-scene"}}}}
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True, thread_config=config)
+        bridge = FakeBridge()
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge) as connect:
+            adapter._connect(subscribe=True)
+        self.assertEqual(connect.call_args.kwargs["thread_config"], config)
+        self.assertTrue(connect.call_args.kwargs["allow_owned_resume"])
+        self.assertTrue(connect.call_args.kwargs["subscribe"])
+        adapter.close()
+
+    def test_existing_loaded_task_subscription_gets_selected_scene_config(self) -> None:
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_PROJECT_DIR": "/tmp/new-scene"}}}}
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, thread_config=config)
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=FakeBridge()) as connect:
+            adapter._connect(subscribe=True)
+        self.assertFalse(connect.call_args.kwargs["allow_owned_resume"])
+        self.assertEqual(connect.call_args.kwargs["thread_config"], config)
+        adapter.close()
+
     def test_dead_creation_socket_falls_back_to_owned_resume(self) -> None:
         class DeadBridge(FakeBridge):
             def read_thread(self, include_turns: bool = False) -> dict:

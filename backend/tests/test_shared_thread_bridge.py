@@ -106,10 +106,13 @@ class SharedThreadBridgeTests(unittest.TestCase):
                 bridge = SharedThreadBridge.connect_for_thread(
                     THREAD_ID, socket_dir=root, connector=lambda _path, _timeout: ws,
                     allow_owned_resume=True, subscribe=True,
+                    thread_config={"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/new-data"}}}},
                 )
                 try:
                     self.assertEqual(bridge.read_thread()["status"]["type"], "idle")
                     self.assertEqual([item["method"] for item in ws.sent].count("thread/resume"), 1)
+                    resume = next(item for item in ws.sent if item.get("method") == "thread/resume")
+                    self.assertEqual(resume["params"]["config"]["mcp_servers"]["scene_feedback"]["env"]["SCENE_FEEDBACK_DATA_DIR"], "/tmp/new-data")
                 finally:
                     bridge.close()
 
@@ -154,15 +157,17 @@ class SharedThreadBridgeTests(unittest.TestCase):
         ws = CreationWebSocket()
         bridge = SharedThreadBridge(ws, THREAD_ID)
         self.assertEqual(bridge.list_models(), [{"model": "gpt-6-astra"}])
-        self.assertEqual(bridge.create_thread("gpt-6-astra", Path("/tmp/project"), reasoning_effort="ultra", title="Astra feedback"), created)
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/project-data"}}}}
+        self.assertEqual(bridge.create_thread("gpt-6-astra", Path("/tmp/project"), reasoning_effort="ultra", title="Astra feedback", config=config), created)
         start = next(item for item in ws.sent if item.get("method") == "thread/start")
         self.assertEqual(bridge.thread_id, created)
         self.assertEqual(bridge.read_thread()["id"], created)
         self.assertEqual(start["params"], {
             "model": "gpt-6-astra", "cwd": "/tmp/project", "ephemeral": False,
-            "serviceName": "scene_feedback_workspace", "config": {"model_reasoning_effort": "ultra"},
+            "serviceName": "scene_feedback_workspace", "config": {**config, "model_reasoning_effort": "ultra"},
             "approvalPolicy": "on-request", "sandbox": "workspace-write", "approvalsReviewer": "user",
         })
+        self.assertNotIn("model_reasoning_effort", config)
         self.assertTrue(any(item.get("method") == "thread/name/set" for item in ws.sent))
 
     def test_new_task_permission_modes_are_sent_explicitly(self) -> None:
@@ -260,7 +265,8 @@ class SharedThreadBridgeTests(unittest.TestCase):
                 loaded_path.chmod(0o600)
                 other_path.chmod(0o600)
                 bridge = SharedThreadBridge.connect_for_thread(
-                    THREAD_ID, socket_dir=root, connector=lambda path, _timeout: connections[path], subscribe=True
+                    THREAD_ID, socket_dir=root, connector=lambda path, _timeout: connections[path], subscribe=True,
+                    thread_config={"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/selected-data"}}}},
                 )
                 try:
                     self.assertEqual(bridge.socket_path, loaded_path)
@@ -268,6 +274,7 @@ class SharedThreadBridgeTests(unittest.TestCase):
                     other_subscriptions = [item for item in connections[other_path].sent if item.get("method") == "thread/resume"]
                     self.assertEqual(len(loaded_subscriptions), 1)
                     self.assertEqual(loaded_subscriptions[0]["params"]["threadId"], THREAD_ID)
+                    self.assertEqual(loaded_subscriptions[0]["params"]["config"]["mcp_servers"]["scene_feedback"]["env"]["SCENE_FEEDBACK_DATA_DIR"], "/tmp/selected-data")
                     self.assertEqual(other_subscriptions, [])
                 finally:
                     bridge.close()

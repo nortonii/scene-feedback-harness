@@ -69,9 +69,10 @@ export function setupMinimalLayout({getState}) {
     if (taskTitle && taskTitle.textContent !== name) taskTitle.textContent = name;
     const taskButton = byId('task-dialog-button');
     if (taskButton) {
-      taskButton.disabled = state.deliveryMode !== 'external' || !bound;
-      taskButton.title = [name, target?.model, target?.reasoning_effort].filter(Boolean).join(' · ');
-      taskButton.setAttribute('aria-label', bound ? '任务：' + name : '任务');
+      taskButton.disabled = state.deliveryMode !== 'external' || !state.desktopAvailable;
+      taskButton.title = bound ? [name, target?.model, target?.reasoning_effort].filter(Boolean).join(' · ')
+        : '选择或新建本场景的 Codex 任务';
+      taskButton.setAttribute('aria-label', bound ? '任务：' + name : '选择或新建本场景的 Codex 任务');
     }
 
     const attention = new Set();

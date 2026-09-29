@@ -39,10 +39,11 @@ class SharedDesktopAdapter:
     human approval requests.
     """
 
-    def __init__(self, thread_id: str, on_event: Callable[[dict[str, Any]], None], *, allow_owned_resume: bool = False, initial_bridge: SharedThreadBridge | None = None):
+    def __init__(self, thread_id: str, on_event: Callable[[dict[str, Any]], None], *, allow_owned_resume: bool = False, initial_bridge: SharedThreadBridge | None = None, thread_config: dict[str, Any] | None = None):
         self.thread_id = thread_id
         self.on_event = on_event
         self.allow_owned_resume = allow_owned_resume
+        self.thread_config = thread_config
         self._initial_bridge = initial_bridge
         self._lock = threading.RLock()
         self._turn_lock = threading.Lock()
@@ -58,11 +59,13 @@ class SharedDesktopAdapter:
         self._uncertain_feedback_id: str | None = None
 
     def _connect(self, *, require_idle: bool = True, subscribe: bool = False) -> SharedThreadBridge:
+        kwargs = {"thread_config": self.thread_config} if self.thread_config is not None else {}
         return SharedThreadBridge.connect_for_thread(
             self.thread_id,
             require_idle=require_idle,
             subscribe=subscribe,
             allow_owned_resume=self.allow_owned_resume,
+            **kwargs,
         )
 
     def start(self) -> str:

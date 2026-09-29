@@ -58,6 +58,16 @@ The bottom button normally reads `发送反馈` (send feedback). While the task 
 
 Scene input currently uses a self-contained `.glb` file. Publishing requires geometry and texture resources to be embedded in the GLB's BIN chunk. Both external URIs and data URIs are rejected: even though a data URI can be self-contained, this version accepts only BIN-embedded resources. You can submit a reference image without an initial scene.
 
+## Switch scenes and start a new reconstruction task
+
+Click the scene name at the top to open the scene list. Return to an existing scene, or enter a name and choose a model, reasoning effort, and permissions to create **a new scene and a new Codex Desktop task**. Import reference images or video, then send your reconstruction instructions from the prompt box. An initial GLB is optional.
+
+Each scene keeps its own references, cameras, dynamic views, reconstruction, feedback history, and receiving task. Switching saves the current draft; returning restores it. Separate tabs can view different scenes while previous tasks and queued feedback stay with their original scene. Finish an in-progress submission or import before switching.
+
+New working directories live under `projects/<project_id>/workspace` in the service data directory, using the same LAN address and port. Each new task gets MCP configured for its own directory; existing MCP clients keep their original scene. If task creation is uncertain or binding fails, the scene stays in the list for recovery. Repeating the same creation request does not create another task.
+
+Creating Desktop tasks requires a workbench connected to Codex Desktop (`--external-review --shared-thread-id`); the browser may run on another LAN device. The existing task panel still switches or creates tasks **within the current scene**.
+
 ## Align to a reference camera
 
 Selecting a reference with camera metadata automatically moves the 3D view to its capture pose. The overlay is shown by default; adjust its opacity directly, or set it to 0% to hide it. After orbiting manually, click `对齐` (“Align”) to return to that camera. When an undistorted copy is supplied, the overlay uses it to match the pinhole camera projection; the original reference remains separate for viewing and feedback. References without calibration can still be compared manually. Approximate intrinsics can leave residual alignment error near the image edges.

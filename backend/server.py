@@ -12,7 +12,9 @@ import logging
 import mimetypes
 import os
 import re
+import sys
 import traceback
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
@@ -24,6 +26,7 @@ except ImportError:  # pragma: no cover - this server requires Unix file locking
 
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
+from projects import ProjectContext, ProjectRegistry
 
 
 HERE = Path(__file__).resolve().parent
@@ -35,6 +38,7 @@ MEDIA_ROUTE = re.compile(r"^/(assets|screenshots|media)/([0-9a-f]{32}\.(?:glb|pn
 WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confirm$")
 WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
+PROJECT_ROUTE = re.compile(r"^/p/([0-9a-f]{32})(/.*)?$")
 
 
 class _DataDirLock:
@@ -123,12 +127,21 @@ def _make_server_unlocked(
             },
         )
 
-    def browser_url(session_id: str, port_number: int) -> str:
+    workspace = store.state.get("workspace", {})
+    registry_path = store.data_dir / "project_registry.json"
+    root_project_id = workspace.get("project_id")
+    if root_project_id is None and registry_path.exists():
+        root_project_id = json.loads(registry_path.read_text(encoding="utf-8")).get("default_project_id")
+    root_project_id = root_project_id or uuid.uuid4().hex
+    root_context = ProjectContext(root_project_id, store.scene().get("name") or project_root.name, store, gateway)
+
+    def browser_url(session_id: str, port_number: int, context: ProjectContext = root_context, *, prefixed: bool = False) -> str:
         base = public_base_url or f"http://127.0.0.1:{port_number}"
+        prefix = f"/p/{context.project_id}" if prefixed or context is not root_context else ""
         query = {"session_id": session_id}
         if lan_mode:
             query["access_token"] = store.browser_token
-        return f"{base}/?{urlencode(query)}"
+        return f"{base}{prefix}/?{urlencode(query)}"
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "SceneFeedbackHarness/0.1"
@@ -148,10 +161,28 @@ def _make_server_unlocked(
                 raise APIError(403, "cross-origin request refused")
 
         def _browser_url(self, session_id: str) -> str:
-            return browser_url(session_id, self.server.server_port)
+            return browser_url(session_id, self.server.server_port, self.context, prefixed=bool(self.project_prefix))
+
+        def _select_context(self, path: str) -> str:
+            match = PROJECT_ROUTE.fullmatch(path)
+            context = registry.get(match.group(1) if match else root_context.project_id)
+            if path.startswith("/p/") and match is None:
+                raise APIError(404, "reconstruction project not found")
+            key = self.headers.get("X-Scene-Harness-Key")
+            if key is not None:
+                token_context = registry.by_control_token(key)
+                if match and token_context is not context:
+                    raise APIError(403, "MCP control key belongs to another reconstruction project")
+                context = token_context
+            self.context = context
+            self.project_prefix = f"/p/{match.group(1)}" if match else ""
+            context.gateway.desktop_seed_thread_id = (
+                (store.state.get("workspace") or {}).get("thread_id") or getattr(gateway.adapter, "thread_id", None)
+            )
+            return (match.group(2) or "/") if match else path
 
         def _has_lan_access(self) -> bool:
-            if hmac.compare_digest(self.headers.get("X-Scene-Harness-Key", ""), store.control_token):
+            if hmac.compare_digest(self.headers.get("X-Scene-Harness-Key", ""), self.context.store.control_token):
                 return True
             try:
                 cookies = SimpleCookie()
@@ -176,9 +207,9 @@ def _make_server_unlocked(
             if not lan_mode or self.command != "GET" or path != "/" or "access_token" not in query:
                 return False
             submitted = query.pop("access_token")
-            if len(submitted) != 1 or not hmac.compare_digest(submitted[0], store.browser_token):
+            if len(submitted) != 1 or not registry.accepts_browser_token(submitted[0]):
                 raise APIError(403, "invalid workbench access link")
-            location = "/" + (f"?{urlencode(query, doseq=True)}" if query else "")
+            location = self.project_prefix + "/" + (f"?{urlencode(query, doseq=True)}" if query else "")
             cookie = f"scene_feedback_{self.server.server_port}_access={store.browser_token}; HttpOnly; SameSite=Lax; Path=/"
             if urlsplit(public_base_url).scheme == "https":
                 cookie += "; Secure"
@@ -193,12 +224,12 @@ def _make_server_unlocked(
 
         def _require_control_key(self) -> None:
             key = self.headers.get("X-Scene-Harness-Key", "")
-            if not hmac.compare_digest(key, store.control_token):
+            if not hmac.compare_digest(key, self.context.store.control_token):
                 raise APIError(403, "this operation requires the local MCP control key")
 
         def _require_browser_capability(self) -> None:
             key = self.headers.get("X-Workspace-Capability", "")
-            if not hmac.compare_digest(key, store.browser_token):
+            if not hmac.compare_digest(key, self.context.store.browser_token):
                 raise APIError(403, "this operation requires the workspace browser capability")
 
         def _read_json(self) -> dict:
@@ -248,15 +279,24 @@ def _make_server_unlocked(
         def _dispatch(self) -> None:
             self._check_request_origin()
             parsed = urlsplit(self.path)
-            path = unquote(parsed.path)
+            path = self._select_context(unquote(parsed.path))
             query = parse_qs(parsed.query)
             if self._bootstrap_lan_access(path, query):
                 return
             if self._needs_lan_access() and not self._has_lan_access():
                 raise APIError(403, "open a workbench access link first")
 
+            store = self.context.store
+            gateway = self.context.gateway
+            project_root = self.context.project_dir
+            if self.command == "GET" and path == "/api/projects":
+                return self._send_json(200, registry.list(self.context.project_id))
+            if self.command == "POST" and path == "/api/projects":
+                self._require_browser_capability()
+                return self._send_json(201, registry.create(self._read_json()))
+
             if self.command == "GET" and path == "/api/health":
-                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if external_review else "appserver"})
+                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "projects_supported": True, "project_id": self.context.project_id, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if gateway.external_review else "appserver"})
             if self.command == "GET" and path == "/api/workspace/state":
                 state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
                 state["browser_url"] = self._browser_url(state["session_id"])
@@ -332,7 +372,7 @@ def _make_server_unlocked(
                 gateway.ensure()
                 if "expected_revision" not in payload:
                     raise APIError(400, "expected_revision is required")
-                if external_review:
+                if gateway.external_review:
                     gateway._project_file(payload.get("local_path"))
                 scene = store.set_scene_preview(payload.get("local_path"), expected_revision=payload["expected_revision"])
                 return self._send_json(200, scene)
@@ -455,17 +495,88 @@ def _make_server_unlocked(
             logging.info("%s - %s", self.address_string(), message)
 
     server = ThreadingHTTPServer((listen_host, port), Handler)
-    server.daemon_threads = True
+    server.daemon_threads = False
     server.workspace_gateway = gateway
     server.scene_store = store
-    server.browser_url = lambda session_id: browser_url(session_id, server.server_port)
-    if enable_codex or external_review:
+    server.browser_url = lambda session_id, project_id=None: browser_url(
+        session_id, server.server_port, registry.get(project_id) if project_id else root_context
+    )
+
+    def configure_context(context: ProjectContext) -> None:
+        context.gateway.registry_project_id = context.project_id
+        context.gateway.project_name = context.name
+        context.gateway.desktop_seed_thread_id = (
+            (store.state.get("workspace") or {}).get("thread_id") or getattr(gateway.adapter, "thread_id", None)
+        )
+        context.gateway.thread_config = {"mcp_servers": {"scene_feedback": {
+            "command": sys.executable, "args": [str(HERE / "mcp_server.py")],
+            "env": {"SCENE_FEEDBACK_PORT": str(server.server_port),
+                    "SCENE_FEEDBACK_DATA_DIR": str(context.store.data_dir),
+                    "SCENE_FEEDBACK_PROJECT_DIR": str(context.project_dir),
+                    "SCENE_FEEDBACK_WEB_DIR": str(web_root)},
+            "tool_timeout_sec": 120, "required": True,
+        }}}
+        context.gateway.browser_url = lambda session_id: browser_url(session_id, server.server_port, context, prefixed=True)
+        if hasattr(context.gateway.adapter, "thread_config"):
+            context.gateway.adapter.thread_config = context.gateway.thread_config
+        if context is root_context and enable_codex and hasattr(context.gateway.adapter, "env_overrides"):
+            context.gateway.adapter.env_overrides["SCENE_FEEDBACK_PORT"] = str(server.server_port)
+            context.gateway.adapter._thread_config = context.gateway.adapter._project_mcp_config()
+
+    def create_context(record: dict, newly_created: bool) -> ProjectContext:
+        child_project = Path(record["project_dir"])
+        child_data = Path(record["data_dir"])
+        established = record.get("creation_status") == "ready" or any(
+            record.get(key) for key in ("session_id", "thread_id", "created_thread_id")
+        )
+        if not newly_created and established and (
+            not child_project.is_dir() or not (child_data / "state.json").is_file()
+        ):
+            raise RuntimeError("saved reconstruction project is missing its workspace or state; restore its files")
+        child_project.parent.parent.mkdir(mode=0o700, exist_ok=True)
+        child_project.parent.mkdir(mode=0o700, exist_ok=True)
+        child_project.mkdir(mode=0o700, exist_ok=True)
+        child_lock = _DataDirLock(child_data)
+        child_gateway = None
         try:
-            gateway.start()
+            child_store = SceneStore(child_data)
+            if newly_created:
+                with child_store.lock:
+                    child_store.state["scene"]["name"] = record["name"]
+                    child_store._save()
+            child_gateway = WorkspaceGateway(child_store, child_project, external_review=external_review)
+            context = ProjectContext(record["project_id"], record["name"], child_store, child_gateway, child_lock)
+            configure_context(context)
+            child_workspace = child_gateway.ensure()
+            if child_workspace["project_id"] != context.project_id:
+                raise RuntimeError("managed project ID does not match its stored workspace")
+            target_id = child_workspace.get("thread_id")
+            if external_review and target_id:
+                from shared_thread_adapter import SharedDesktopAdapter
+                kwargs = {"allow_owned_resume": True, "thread_config": child_gateway.thread_config} if target_id in child_workspace.get("created_thread_ids", []) else {}
+                child_gateway.adapter = SharedDesktopAdapter(target_id, on_event=child_gateway.scoped_adapter_callback(), **kwargs)
+            return context
         except BaseException:
-            gateway.close()
-            server.server_close()
+            try:
+                if child_gateway is not None:
+                    child_gateway.close()
+            finally:
+                child_lock.close()
             raise
+
+    registry = None
+    try:
+        registry = ProjectRegistry(root_context, context_factory=create_context, configure_context=configure_context)
+        server.project_registry = registry
+        if enable_codex or external_review:
+            gateway.start()
+    except BaseException:
+        if registry is not None:
+            registry.close()
+        else:
+            gateway.close()
+        server.server_close()
+        raise
     return server
 
 
@@ -507,10 +618,10 @@ def make_server(
 
     def close_with_data_lock() -> None:
         try:
-            server.workspace_gateway.close()
+            original_close()
         finally:
             try:
-                original_close()
+                server.project_registry.close()
             finally:
                 data_lock.close()
 

@@ -144,6 +144,7 @@ class SharedThreadBridge:
         require_idle: bool = True,
         subscribe: bool = False,
         allow_owned_resume: bool = False,
+        thread_config: dict[str, Any] | None = None,
         connector: Callable[[Path, float], Any] = _connect,
     ) -> "SharedThreadBridge":
         """Select the single daemon where ``thread_id`` is already loaded.
@@ -182,7 +183,10 @@ class SharedThreadBridge:
         if not loaded and allow_owned_resume and len(unloaded) == 1 and len(candidates) == 1:
             bridge = unloaded.pop()
             try:
-                resumed = bridge._rpc("thread/resume", {"threadId": thread_id}).get("thread")
+                params = {"threadId": thread_id}
+                if thread_config is not None:
+                    params["config"] = thread_config
+                resumed = bridge._rpc("thread/resume", params).get("thread")
                 if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
                     raise SharedThreadBridgeError("thread/resume returned the wrong owned task")
                 thread = bridge.read_thread()
@@ -213,7 +217,10 @@ class SharedThreadBridge:
             raise SharedThreadNotIdle(f"Codex task status is {thread.get('status')!r}")
         if subscribe:
             try:
-                resumed = bridge._rpc("thread/resume", {"threadId": thread_id}).get("thread")
+                params = {"threadId": thread_id}
+                if thread_config is not None:
+                    params["config"] = thread_config
+                resumed = bridge._rpc("thread/resume", params).get("thread")
                 if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
                     raise SharedThreadBridgeError("thread/resume returned the wrong task")
             except Exception:
@@ -281,6 +288,7 @@ class SharedThreadBridge:
         reasoning_effort: str | None = None,
         title: str | None = None,
         permission_mode: str = "workspace_write",
+        config: dict[str, Any] | None = None,
     ) -> str:
         """Create one persistent blank task on this exact Desktop daemon."""
         try:
@@ -296,8 +304,10 @@ class SharedThreadBridge:
             "sandbox": sandbox,
             "approvalsReviewer": "user",
         }
+        if config is not None:
+            params["config"] = dict(config)
         if reasoning_effort is not None:
-            params["config"] = {"model_reasoning_effort": reasoning_effort}
+            params.setdefault("config", {})["model_reasoning_effort"] = reasoning_effort
         result = self._rpc("thread/start", params)
         thread = result.get("thread")
         thread_id = thread.get("id") if isinstance(thread, dict) else None

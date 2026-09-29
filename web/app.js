@@ -5,10 +5,13 @@ import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMo
 import { setupMinimalLayout } from './layout.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { createFrameImageCache } from './frame-image-cache.js';
+import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const array = (value) => [value.x, value.y, value.z].map((n) => Number(n.toFixed(5)));
+const workspacePrefix = projectPrefix(location.pathname);
+const resourceURL = (url) => scopedURL(url, workspacePrefix);
 function newId() {
   if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
   if (typeof globalThis.crypto?.getRandomValues !== 'function') throw new Error('浏览器无法生成安全随机 ID');
@@ -22,6 +25,12 @@ const labels = {point:'点', rectangle:'方框', line:'线段', arrow:'箭头', 
 const glyphs = {point:'●', rectangle:'▢', line:'╱', arrow:'↗', text:'T', freehand:'〰'};
 const circled = ['','①','②','③','④','⑤','⑥','⑦','⑧','⑨'];
 const ui = {
+  sceneName:id('scene-name'), projectsButton:id('projects-dialog-button'), projectsDialog:id('projects-dialog'),
+  projectsList:id('project-list'), projectsStatus:id('project-list-status'), refreshProjects:id('refresh-projects'),
+  createProjectPanel:id('create-project-panel'), createProjectForm:id('create-project-form'),
+  projectName:id('project-name'), projectModel:id('project-model'), projectEffort:id('project-effort'),
+  projectPermissions:id('project-permissions'), createProject:id('create-project'),
+  openCreatedProject:id('open-created-project'), createProjectHelp:id('create-project-help'),
   viewport:id('viewport'), sceneStage:id('scene-stage'), sceneCanvas:id('scene-annotations'),
   referenceStage:id('reference-stage'), referenceMedia:id('reference-media'),
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
@@ -61,9 +70,13 @@ const ui = {
   approvals:id('approval-list'), queue:id('queue-list'), conversation:id('conversation')
 };
 const state = {
+  projectId:null, projectName:null, sceneDisplayName:null, projects:null, loadingProjects:false,
+  projectLoadError:null, projectListSignature:null, projectModelChoice:null, projectEffortChoice:'',
+  projectModelSignature:null, projectEffortSignature:null, creatingProject:false, navigatingProject:false,
+  pendingProjectCreate:null, projectCreationResult:null, projectCreationError:null,
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
-  boundThreadId:null, queue:[], approvals:[], targets:null, targetChoice:null,
+  boundThreadId:null, desktopAvailable:false, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
   canSetPermissions:false,
@@ -86,7 +99,13 @@ Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:fals
   animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
   seekGeneration:0, seeking:false, timelineTarget:null, scrubRequest:null, timelineSaveTimer:null});
 
-const frameImages = createFrameImageCache();
+const rawFrameImages = createFrameImageCache();
+const frameImages = {
+  prepare:(urls) => rawFrameImages.prepare(urls.map(resourceURL)),
+  prefetch:(urls) => rawFrameImages.prefetch(urls.map(resourceURL)),
+  retain:(urls) => rawFrameImages.retain(urls.map(resourceURL)),
+  clear:() => rawFrameImages.clear()
+};
 
 let minimalLayout = null;
 const annotationHistory = createAnnotationHistory();
@@ -152,14 +171,14 @@ function announce(message, error=false) {
 async function api(path, options={}) {
   const request = {...options};
   if (state.browserCapability && /^(POST|PUT|PATCH|DELETE)$/i.test(request.method || '') &&
-      (path.startsWith('/api/workspace/') || path.startsWith('/api/sessions/'))) {
+      (path.startsWith('/api/workspace/') || path.startsWith('/api/sessions/') || path === '/api/projects')) {
     request.headers = {...(request.headers || {}), 'X-Workspace-Capability':state.browserCapability};
   }
   if (options.body && typeof options.body !== 'string') {
     request.body = JSON.stringify(options.body);
     request.headers = {'Content-Type':'application/json', ...(request.headers || {})};
   }
-  const response = await fetch(path, request);
+  const response = await fetch(resourceURL(path), request);
   let body;
   try { body = await response.json(); } catch { body = {}; }
   if (!response.ok) {
@@ -254,7 +273,7 @@ function restoreDraft() {
   } catch { /* Ignore a stale or corrupt local draft. */ }
 }
 
-function editable() { return state.workspaceReady && Number.isInteger(state.sceneRevision) && state.sessionStatus === 'open' && !state.sceneLoading && !state.submitting && !state.uploading && !state.pendingSubmission; }
+function editable() { return state.workspaceReady && Number.isInteger(state.sceneRevision) && state.sessionStatus === 'open' && !state.sceneLoading && !state.submitting && !state.uploading && !state.pendingSubmission && !state.creatingProject && !state.navigatingProject; }
 function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
@@ -357,12 +376,13 @@ async function ensureSession() {
   renderTimeline(); updateMode();
   renderWorkspace(workspace);
   await fetchEvents(true);
-  if (state.deliveryMode === 'external' && state.boundThreadId) loadTargets().catch((error) => {
+  if (state.deliveryMode === 'external' && state.desktopAvailable) loadTargets().catch((error) => {
     ui.targetHelp.textContent = '无法读取任务列表：' + error.message;
   });
-  if (state.deliveryMode === 'external' && state.boundThreadId) loadModels().catch(() => {
+  if (state.deliveryMode === 'external' && state.desktopAvailable) loadModels().catch(() => {
     /* The new-task form shows the connection error. */
   });
+  loadProjects().catch(() => { /* The scene picker shows catalog errors. */ });
 }
 
 function outboxKey() { return 'visual-outbox:' + state.sessionId; }
@@ -427,9 +447,9 @@ function updateSubmitLabel() {
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
       : bound ? '发送反馈' : '保存反馈';
     ui.submit.querySelector('span:first-child').textContent = label;
-    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
-    ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+    ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
     ui.caption.textContent = state.pendingSubmission
       ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status)
@@ -447,9 +467,9 @@ function updateSubmitLabel() {
     : status === 'disconnected' || status === 'error' ? '保存反馈'
     : '发送反馈';
   ui.submit.querySelector('span:first-child').textContent = label;
-  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
+  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
-  ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
+  ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
   if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
   else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
   else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
@@ -478,6 +498,251 @@ function targetModelLabel(item) {
 function targetName(threadId) {
   const target = state.targets?.find((item) => item.thread_id === threadId);
   return target?.title || shortTaskId(threadId);
+}
+function updateProjectTitle() {
+  const catalogName = state.projects?.find((item) => item.project_id === state.projectId)?.name;
+  const name = catalogName || state.projectName || state.sceneDisplayName || '当前场景';
+  ui.sceneName.textContent = name;
+  ui.projectsButton.title = name + ' · 切换或新建场景';
+  ui.projectsButton.setAttribute('aria-label', '场景：' + name + '，切换或新建场景');
+}
+function projectBusyReason({allowCreation=false}={}) {
+  if (state.submitting) return '正在保存反馈，请稍后切换场景。';
+  if (state.uploading) return '正在导入文件，请稍后切换场景。';
+  if (state.creatingTarget || state.switchingTarget) return '正在连接 Codex 任务，请稍后切换场景。';
+  if (state.creatingProject && !allowCreation) return '正在创建场景，请等待创建结果。';
+  if (state.navigatingProject) return '正在切换场景…';
+  if (state.sceneLoading) return '正在加载场景，请稍后切换。';
+  return null;
+}
+const projectRequestKey = 'visual-project-create-request';
+function persistProjectRequest(request) {
+  try { localStorage.setItem(projectRequestKey, JSON.stringify(request)); }
+  catch { throw new Error('浏览器无法保存创建请求，请允许本地存储后再试。'); }
+  state.pendingProjectCreate = request;
+}
+function clearProjectRequest() {
+  try { localStorage.removeItem(projectRequestKey); } catch { /* A completed request remains safe to recover. */ }
+  state.pendingProjectCreate = null;
+  state.projectCreationResult = null;
+}
+function restoreProjectRequest() {
+  try {
+    const request = JSON.parse(localStorage.getItem(projectRequestKey) || 'null');
+    if (!request || !/^[0-9a-f]{32}$/i.test(request.request_id || '') ||
+        request.body?.request_id !== request.request_id || typeof request.body.name !== 'string' ||
+        typeof request.body.model !== 'string' || !['workspace_write','full_access','read_only'].includes(request.body.permission_mode)) return;
+    state.pendingProjectCreate = request;
+    state.projectModelChoice = request.body.model;
+    state.projectEffortChoice = request.body.reasoning_effort || '';
+    ui.projectName.value = request.body.name;
+    ui.projectPermissions.value = request.body.permission_mode;
+    if (projectNavigationURL(request.project, location.origin)) state.projectCreationResult = request.project;
+    state.projectCreationError = request.error || null;
+    ui.createProjectPanel.open = true;
+  } catch { /* A malformed saved request cannot be submitted. */ }
+}
+function rememberCreatedProject(project, error=null) {
+  if (!projectNavigationURL(project, location.origin)) return false;
+  state.projectCreationResult = project;
+  state.projectCreationError = error;
+  const request = state.pendingProjectCreate;
+  if (request) {
+    try { persistProjectRequest({...request, project, status:'created', error}); }
+    catch { /* The original request ID is already persisted before submission. */ }
+  }
+  return true;
+}
+function renderProjectPicker() {
+  updateProjectTitle();
+  if (!ui.projectsDialog.open) return;
+  const projects = Array.isArray(state.projects) ? state.projects : [];
+  const busy = projectBusyReason();
+  const signature = JSON.stringify([projects, state.projectId, busy, state.loadingProjects]);
+  if (signature !== state.projectListSignature) {
+    state.projectListSignature = signature;
+    ui.projectsList.replaceChildren();
+    for (const project of projects) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'project-item';
+      const heading = document.createElement('div'); heading.className = 'project-name';
+      const name = document.createElement('strong'); name.textContent = project.name || '未命名场景';
+      const current = project.project_id === state.projectId;
+      const unavailable = project.creation_status === 'unavailable';
+      const label = document.createElement('span'); label.textContent = unavailable ? '不可用' : current ? '当前' : '打开 ↗';
+      heading.append(name, label);
+      const detail = document.createElement('div'); detail.className = 'project-detail';
+      detail.textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
+        (project.thread_id ? ' · 已连接 Codex 任务' : ' · 尚未连接任务');
+      button.append(heading, detail);
+      if (project.creation_error) {
+        const error = document.createElement('div'); error.className = 'project-detail project-error';
+        error.textContent = (unavailable ? '场景不可用：' : '任务创建未完成：') + String(project.creation_error).slice(0, 200);
+        button.append(error);
+      } else if (['creating','pending','in_progress'].includes(project.creation_status)) {
+        detail.textContent += ' · 正在创建任务';
+      }
+      button.disabled = unavailable || current || !!busy || !projectNavigationURL(project, location.origin);
+      button.addEventListener('click', () => navigateProject(project));
+      ui.projectsList.append(button);
+    }
+    if (!projects.length) {
+      const empty = document.createElement('p'); empty.className = 'muted';
+      empty.textContent = state.loadingProjects ? '正在读取场景…' : '还没有可切换的场景。';
+      ui.projectsList.append(empty);
+    }
+  }
+  ui.refreshProjects.disabled = state.loadingProjects || state.creatingProject || state.navigatingProject;
+  ui.projectsStatus.textContent = busy || (state.projectLoadError ? '场景列表读取失败：' + state.projectLoadError : '');
+  renderCreateProject();
+}
+function renderCreateProject() {
+  const pending = state.pendingProjectCreate;
+  const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
+  if (pending) {
+    state.projectModelChoice = pending.body.model;
+    state.projectEffortChoice = pending.body.reasoning_effort || '';
+    ui.projectName.value = pending.body.name;
+    ui.projectPermissions.value = pending.body.permission_mode;
+  } else if (!models.some((item) => item.model === state.projectModelChoice)) {
+    state.projectModelChoice = models.find((item) => item.model === state.defaultModel)?.model ||
+      models.find((item) => item.is_default)?.model || models[0]?.model || null;
+    state.projectEffortChoice = '';
+  }
+  const choices = [...models];
+  if (pending && !choices.some((item) => item.model === pending.body.model)) choices.push({model:pending.body.model});
+  const modelSignature = JSON.stringify([choices.map((item) => [item.model,item.display_name]), state.loadingModels]);
+  if (modelSignature !== state.projectModelSignature) {
+    state.projectModelSignature = modelSignature;
+    ui.projectModel.replaceChildren();
+    if (!choices.length) {
+      const option = document.createElement('option'); option.value = '';
+      option.textContent = state.loadingModels ? '正在读取可用模型…' : '暂无可用模型'; ui.projectModel.append(option);
+    }
+    for (const item of choices) {
+      const option = document.createElement('option'); option.value = item.model;
+      option.textContent = item.display_name || item.model; ui.projectModel.append(option);
+    }
+  }
+  ui.projectModel.value = state.projectModelChoice || '';
+  const model = choices.find((item) => item.model === state.projectModelChoice);
+  const efforts = Array.isArray(model?.supported_reasoning_efforts) ? [...model.supported_reasoning_efforts] : [];
+  if (pending?.body.reasoning_effort && !efforts.includes(pending.body.reasoning_effort)) efforts.push(pending.body.reasoning_effort);
+  if (!pending && state.projectEffortChoice && !efforts.includes(state.projectEffortChoice)) state.projectEffortChoice = '';
+  const effortSignature = JSON.stringify([model?.model, model?.default_reasoning_effort, efforts]);
+  if (effortSignature !== state.projectEffortSignature) {
+    state.projectEffortSignature = effortSignature; ui.projectEffort.replaceChildren();
+    const defaultOption = document.createElement('option'); defaultOption.value = '';
+    defaultOption.textContent = model?.default_reasoning_effort ? '模型默认（' + model.default_reasoning_effort + '）' : '模型默认';
+    ui.projectEffort.append(defaultOption);
+    for (const effort of efforts) {
+      const option = document.createElement('option'); option.value = effort; option.textContent = effort; ui.projectEffort.append(option);
+    }
+  }
+  ui.projectEffort.value = state.projectEffortChoice;
+  const busy = projectBusyReason();
+  const locked = !!pending || !!busy;
+  ui.projectName.disabled = locked;
+  ui.projectModel.disabled = locked || !models.length;
+  ui.projectEffort.disabled = locked || !efforts.length;
+  ui.projectPermissions.disabled = locked || !state.canSetPermissions;
+  ui.createProject.classList.toggle('hidden', !!state.projectCreationResult);
+  ui.createProject.disabled = !state.workspaceReady || !state.desktopAvailable || !!busy ||
+    (!pending && (!ui.projectName.value.trim() || !state.projectModelChoice || !state.canSetPermissions));
+  ui.createProject.textContent = state.creatingProject ? '正在创建…' : pending ? '重试同一次创建' : '新建场景 + Codex 任务';
+  ui.openCreatedProject.classList.toggle('hidden', !state.projectCreationResult);
+  ui.openCreatedProject.disabled = !!busy || state.projectCreationResult?.creation_status === 'unavailable';
+  if (state.creatingProject) ui.createProjectHelp.textContent = '正在创建新场景与独立 Codex 任务…';
+  else if (state.projectCreationResult?.creation_status === 'unavailable') ui.createProjectHelp.textContent =
+    '场景文件不可用：' + (state.projectCreationResult.creation_error || state.projectCreationError || '请恢复场景目录后刷新列表。');
+  else if (state.projectCreationResult) ui.createProjectHelp.textContent = state.projectCreationError
+    ? '场景已建立，任务未完成：' + state.projectCreationError + '。打开该场景后可在「任务」中继续连接。'
+    : '场景已建立，可以打开。';
+  else if (pending) ui.createProjectHelp.textContent = '上次创建的结果尚未确认。可刷新场景列表找回，或使用同一请求重试；不会重复创建任务。';
+  else if (state.projectCreationError) ui.createProjectHelp.textContent = state.projectCreationError;
+  else if (state.modelLoadError) ui.createProjectHelp.textContent = '无法读取可用模型：' + state.modelLoadError;
+  else if (!state.desktopAvailable) ui.createProjectHelp.textContent = '请先将工作台连接到 Codex Desktop，才能创建新场景和任务。';
+  else if (!state.canSetPermissions) ui.createProjectHelp.textContent = '正在读取创建任务所需的模型和权限选项。';
+  else ui.createProjectHelp.textContent = '创建空白场景和独立的 Codex 任务，然后进入新场景。';
+}
+async function loadProjects() {
+  if (state.loadingProjects) return;
+  state.loadingProjects = true; renderProjectPicker();
+  try {
+    const result = await api('/api/projects');
+    state.projects = Array.isArray(result.projects) ? result.projects : [];
+    state.projectId = result.current_project_id || state.projectId;
+    state.projectLoadError = null;
+    const pending = state.pendingProjectCreate;
+    const recoveryId = pending?.project?.project_id || pending?.project_id;
+    const recovered = pending && state.projects.find((project) => project.request_id === pending.request_id ||
+      (recoveryId && project.project_id === recoveryId));
+    if (recovered) rememberCreatedProject(recovered, recovered.creation_error || null);
+  } catch (error) { state.projectLoadError = error.message; throw error; }
+  finally { state.loadingProjects = false; renderProjectPicker(); }
+}
+async function navigateProject(project, {allowCreation=false}={}) {
+  if (project?.creation_status === 'unavailable') {
+    announce('场景文件不可用，请恢复场景目录后刷新列表。', true); return false;
+  }
+  const busy = projectBusyReason({allowCreation});
+  if (busy) { announce(busy, true); renderProjectPicker(); return false; }
+  const url = projectNavigationURL(project, location.origin);
+  if (!url) { announce('场景地址无效，请刷新场景列表。', true); return false; }
+  state.navigatingProject = true; renderProjectPicker(); updateSubmitLabel(); updateMode();
+  pauseTimeline(); hideTextEditor(); state.drag = null;
+  saveDraft();
+  await saveMomentDraft.pending;
+  try {
+    location.assign(url);
+    if (state.projectCreationResult?.project_id === project.project_id) clearProjectRequest();
+    return true;
+  } catch (error) {
+    state.navigatingProject = false; renderProjectPicker(); updateSubmitLabel(); updateMode();
+    announce('无法打开场景：' + error.message, true); return false;
+  }
+}
+async function createSceneProject() {
+  if (!state.workspaceReady || !state.desktopAvailable || projectBusyReason() || state.projectCreationResult) return;
+  let request = state.pendingProjectCreate;
+  if (!request) {
+    const name = ui.projectName.value.trim();
+    if (!name || !state.projectModelChoice || !state.canSetPermissions) return;
+    const requestId = newId().replace(/-/g, '');
+    const body = {name, model:state.projectModelChoice, permission_mode:ui.projectPermissions.value, request_id:requestId};
+    if (state.projectEffortChoice) body.reasoning_effort = state.projectEffortChoice;
+    request = {request_id:requestId, body, status:'pending'};
+    try { persistProjectRequest(request); }
+    catch (error) { state.projectCreationError = error.message; renderCreateProject(); return; }
+  }
+  state.creatingProject = true; state.projectCreationError = null; renderProjectPicker(); updateSubmitLabel(); updateMode(); renderTimeline();
+  try {
+    const result = await api('/api/projects', {method:'POST', body:request.body});
+    if (!rememberCreatedProject(result.project)) throw new Error('服务未返回可打开的新场景地址');
+    await navigateProject(result.project, {allowCreation:true});
+  } catch (error) {
+    const detail = error.detail?.detail || error.detail || {};
+    const created = detail.project || error.detail?.project;
+    if (created && rememberCreatedProject(created, created.creation_error || error.message)) {
+      await loadProjects().catch(() => {});
+    } else {
+      state.projectCreationError = '创建结果未确认：' + error.message;
+      const recoveryId = created?.project_id || detail.project_id;
+      try { persistProjectRequest({...request, ...(recoveryId ? {project_id:recoveryId} : {}), status:'unknown', error:state.projectCreationError}); } catch { /* Keep the saved request ID. */ }
+      await loadProjects().catch(() => {});
+      if (!state.projectCreationResult && !recoveryId && [400, 422].includes(error.status)) {
+        clearProjectRequest();
+        state.projectCreationError = '创建请求被拒绝：' + error.message + '。请调整选项后重新提交。';
+      }
+    }
+  } finally { state.creatingProject = false; renderProjectPicker(); updateSubmitLabel(); updateMode(); renderTimeline(); }
+}
+function openProjectsDialog() {
+  for (const dialog of document.querySelectorAll('dialog[open]')) if (dialog !== ui.projectsDialog) dialog.close();
+  if (!ui.projectsDialog.open) ui.projectsDialog.showModal();
+  ui.projectsButton.setAttribute('aria-expanded', 'true'); renderProjectPicker();
+  loadProjects().catch(() => {});
+  loadModels({forProjects:true}).catch(() => {});
 }
 function renderCreateTarget() {
   const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
@@ -525,7 +790,7 @@ function renderCreateTarget() {
     }
   }
   ui.createEffort.value = state.effortChoice;
-  const busy = state.creatingTarget || state.switchingTarget || state.submitting || !!state.pendingSubmission;
+  const busy = state.creatingTarget || state.switchingTarget || state.submitting || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
   ui.createModel.disabled = !models.length || busy;
   ui.createEffort.disabled = !models.length || !efforts.length || busy;
   ui.createPermissions.disabled = busy || !state.canSetPermissions;
@@ -539,14 +804,14 @@ function renderCreateTarget() {
 }
 function renderTargetPicker() {
   minimalLayout?.refresh();
-  ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.boundThreadId);
-  if (state.deliveryMode !== 'external' || !state.boundThreadId) return;
+  ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.desktopAvailable);
+  if (state.deliveryMode !== 'external' || !state.desktopAvailable) return;
   const bound = state.boundThreadId;
   const selected = state.targets?.find((item) => item.thread_id === bound);
   ui.currentTarget.textContent = bound
     ? '当前：' + targetName(bound) + (targetModelLabel(selected) ? ' · ' + targetModelLabel(selected) : '') +
       (selected?.status ? ' · ' + targetStatusLabel(selected.status) : '')
-    : '当前未绑定 Codex 任务；反馈会等待 MCP 读取。';
+    : '当前场景尚未连接 Codex 任务；可选择下方任务或新建。';
   ui.currentTarget.title = bound || '';
   const targets = Array.isArray(state.targets) ? state.targets.filter((item) => typeof item?.thread_id === 'string') : [];
   if (bound && !targets.some((item) => item.thread_id === bound)) {
@@ -598,7 +863,7 @@ function renderTargetPicker() {
   renderCreateTarget();
 }
 async function loadTargets() {
-  if (state.deliveryMode !== 'external' || !state.boundThreadId || state.loadingTargets) return;
+  if (state.deliveryMode !== 'external' || !state.desktopAvailable || state.loadingTargets) return;
   state.loadingTargets = true;
   renderTargetPicker();
   try {
@@ -613,10 +878,11 @@ async function loadTargets() {
     renderTargetPicker();
   }
 }
-async function loadModels() {
-  if (state.deliveryMode !== 'external' || !state.boundThreadId || state.loadingModels) return;
+async function loadModels({forProjects=false}={}) {
+  if (!state.desktopAvailable || (!forProjects && state.deliveryMode !== 'external') || state.loadingModels) return;
   state.loadingModels = true;
   renderTargetPicker();
+  renderCreateProject();
   try {
     const result = await api('/api/workspace/models');
     state.models = Array.isArray(result.models) ? result.models : [];
@@ -630,10 +896,11 @@ async function loadModels() {
   } finally {
     state.loadingModels = false;
     renderTargetPicker();
+    renderCreateProject();
   }
 }
 async function createTask() {
-  if (!state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission) return;
+  if (!state.desktopAvailable || !state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
   const oldThreadId = state.boundThreadId;
   const body = {model:state.modelChoice, permission_mode:ui.createPermissions.value};
   const title = ui.createTitle.value.trim();
@@ -669,7 +936,7 @@ async function createTask() {
   }
 }
 async function switchTask(threadId) {
-  if (!threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.pendingSubmission) return;
+  if (!state.desktopAvailable || !threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
   const target = state.targets?.find((item) => item.thread_id === threadId);
   if (targetIsBusy(target)) return;
   state.switchingTarget = true;
@@ -688,10 +955,14 @@ async function switchTask(threadId) {
   }
 }
 function renderWorkspace(workspace) {
+  state.projectId = workspace.project_id || state.projectId;
+  if (typeof workspace.project_name === 'string' && workspace.project_name.trim()) state.projectName = workspace.project_name;
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
+  state.desktopAvailable = workspace.desktop_available ?? !!workspace.thread_id;
   const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
+  renderProjectPicker();
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
   state.approvals = Array.isArray(workspace.approvals) ? workspace.approvals : [];
@@ -1402,7 +1673,7 @@ async function addObject(item) {
   root.add(placeholder);
   try {
     if (!item.url) throw new Error('缺少 GLB 地址');
-    const gltf = await gltfLoader.loadAsync(item.url);
+    const gltf = await gltfLoader.loadAsync(resourceURL(item.url));
     if (state.objectNodes.get(item.id) !== root) return;
     root.remove(placeholder);
     root.scale.set(...(item.size || [1,1,1]));
@@ -1745,7 +2016,8 @@ async function loadScene(sceneData) {
     renderAnnotations();
     drawOverlays();
     id('revision-label').textContent = '版本 ' + scene.revision;
-    id('scene-name').textContent = scene.name || '当前场景';
+    state.sceneDisplayName = scene.name || '当前场景';
+    updateProjectTitle();
     id('scene-title').textContent = scene.name || 'Codex 的当前结果';
     if (priorRevision !== null) {
       announce('场景已更新到版本 ' + scene.revision + '。已有标注仍绑定原截图。');
@@ -1755,6 +2027,7 @@ async function loadScene(sceneData) {
   } finally {
     state.sceneLoading = false;
     updateSubmitLabel(); updateMode(); renderTimeline();
+    renderProjectPicker();
   }
 }
 
@@ -1888,7 +2161,7 @@ function renderReferenceStrip() {
     button.title = ref.name || '参考图';
     button.setAttribute('aria-label', '查看 ' + (ref.name || '参考图'));
     const image = document.createElement('img');
-    image.src = ref.url;
+    image.src = resourceURL(ref.url);
     image.alt = '';
     button.append(image);
     if (referenceCamera(ref)) {
@@ -1944,19 +2217,20 @@ function showActiveReference() {
   }
   if (!imageMatchesUrl(ui.referenceImage, ref.url)) {
     delete ui.referenceImage.dataset.sourceUrl;
-    ui.referenceImage.src = ref.url;
+    ui.referenceImage.src = resourceURL(ref.url);
   }
   const compareUrl = alignmentOverlayUrl(ref);
   if (!imageMatchesUrl(ui.compareImage, compareUrl)) {
     delete ui.compareImage.dataset.sourceUrl;
-    ui.compareImage.src = compareUrl;
+    ui.compareImage.src = resourceURL(compareUrl);
   }
   ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
   if (ui.referenceImage.complete) updateReferenceGeometry();
 }
 function imageMatchesUrl(image, url) {
   const source = image.getAttribute('src');
-  return source === url || (source?.startsWith('blob:') && image.dataset.sourceUrl === url);
+  const resolved = resourceURL(url);
+  return source === resolved || (source?.startsWith('blob:') && image.dataset.sourceUrl === resolved);
 }
 function imageReadyAtUrl(image, url) {
   return image.complete && image.naturalWidth > 0 && imageMatchesUrl(image, url);
@@ -2015,7 +2289,7 @@ function readFile(file) {
   });
 }
 async function uploadReferences(files) {
-  if (!state.sessionId || state.sessionStatus !== 'open') return;
+  if (!state.sessionId || state.sessionStatus !== 'open' || state.creatingProject || state.navigatingProject) return;
   const images = [...files];
   if (!images.length) return;
   state.uploading = true;
@@ -2988,7 +3262,7 @@ function renderAnnotations() {
 async function loadImage(url) {
   const image = new Image();
   image.crossOrigin = 'anonymous';
-  image.src = url;
+  image.src = resourceURL(url);
   if (image.decode) await image.decode();
   else await new Promise((resolve, reject) => {
     image.onload = resolve;
@@ -3242,7 +3516,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
   };
 }
 async function submitFeedback() {
-  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading) return;
+  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject) return;
   const promptText = ui.note.value;
   let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
@@ -3418,7 +3692,7 @@ function animate(timestamp) {
   if (state.sceneView === 'live') renderer.render(threeScene, camera);
 }
 async function poll() {
-  if (!state.sessionId || state.submitting || state.uploading || poll.running) return;
+  if (!state.sessionId || state.submitting || state.uploading || state.navigatingProject || poll.running) return;
   poll.running = true;
   try {
     const [scene, session] = await Promise.all([
@@ -3427,7 +3701,7 @@ async function poll() {
     ]);
     // A send may have started while these reads were in flight. Keep its
     // captured scene and version together until the packet has been saved.
-    if (state.submitting || state.uploading) return;
+    if (state.submitting || state.uploading || state.navigatingProject) return;
     if (scene.revision !== state.sceneRevision) await loadScene(scene);
     setReferenceClip(session.reference_clip || null);
     if (session.reference_images) setReferences(session.reference_images);
@@ -3441,6 +3715,32 @@ async function poll() {
 }
 function bindEvents() {
   minimalLayout = setupMinimalLayout({getState:() => state});
+  restoreProjectRequest();
+  ui.projectsButton.addEventListener('click', openProjectsDialog);
+  id('close-projects').addEventListener('click', () => ui.projectsDialog.close());
+  ui.projectsDialog.addEventListener('close', () => {
+    ui.projectsButton.setAttribute('aria-expanded', 'false');
+    ui.projectsButton.focus({preventScroll:true});
+  });
+  ui.projectsDialog.addEventListener('click', (event) => {
+    if (event.target !== ui.projectsDialog) return;
+    const bounds = ui.projectsDialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) ui.projectsDialog.close();
+  });
+  ui.refreshProjects.addEventListener('click', () => {
+    loadProjects().catch(() => {});
+    if (state.modelLoadError) loadModels({forProjects:true}).catch(() => {});
+  });
+  ui.createProjectPanel.addEventListener('toggle', () => {
+    if (ui.createProjectPanel.open && (!state.models || state.modelLoadError)) loadModels({forProjects:true}).catch(() => {});
+  });
+  ui.projectName.addEventListener('input', renderCreateProject);
+  ui.projectModel.addEventListener('change', () => {
+    state.projectModelChoice = ui.projectModel.value || null; state.projectEffortChoice = ''; renderCreateProject();
+  });
+  ui.projectEffort.addEventListener('change', () => { state.projectEffortChoice = ui.projectEffort.value || ''; renderCreateProject(); });
+  ui.createProjectForm.addEventListener('submit', (event) => { event.preventDefault(); createSceneProject(); });
+  ui.openCreatedProject.addEventListener('click', () => navigateProject(state.projectCreationResult));
   ui.targetSelect.addEventListener('change', () => {
     state.targetChoice = ui.targetSelect.value || null;
     renderTargetPicker();
@@ -3661,7 +3961,7 @@ try {
 }
 setInterval(poll, 1500);
 setInterval(() => {
-  if (state.workspaceReady && state.deliveryMode === 'external' && state.boundThreadId && !state.loadingTargets && !state.switchingTarget) {
+  if (state.workspaceReady && state.deliveryMode === 'external' && state.desktopAvailable && !state.loadingTargets && !state.switchingTarget) {
     loadTargets().catch(() => { /* The picker shows the connection error. */ });
   }
 }, 20000);

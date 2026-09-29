@@ -28,6 +28,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 1px
 .brand h1 { margin: 0; font-family: Georgia, "Noto Serif SC", "Songti SC", serif; font-size: 29px; font-weight: 400; letter-spacing: -.03em; }
 .brand > span { color: var(--muted); font-size: 11px; }
 .scene-meta { display: flex; gap: 12px; align-items: center; min-width: 0; color: var(--muted); font-size: 11px; }
+.scene-nav { min-width: 0; color: var(--ink); }
 #scene-name { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #revision-label { white-space: nowrap; }
 .top-actions { display: flex; align-items: center; gap: 20px; min-width: 0; margin-left: auto; }
@@ -187,6 +188,17 @@ dialog::backdrop { background: #17171522; }
 .target-create-form label { color: var(--muted); font-size: 11px; }
 .target-create-form input, .target-create-form select { width: 100%; min-width: 0; font-size: 12px; }
 .target-create-form .create-target-button { background: var(--ink); color: var(--paper); margin: 8px 0; }
+.project-list-heading { display: flex; align-items: flex-start; gap: 10px; }
+.project-list-heading .dialog-intro { flex: 1; margin: 0 0 16px; }
+.project-list { display: grid; gap: 0; border-top: 1px solid var(--line); }
+.project-item { width: 100%; display: grid; gap: 5px; padding: 14px 0; text-align: left; border-bottom: 1px solid var(--line); }
+.project-item:hover:not(:disabled) .project-name { text-decoration: underline; text-underline-offset: 4px; }
+.project-name { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.project-name strong { font-weight: 400; overflow-wrap: anywhere; }
+.project-name span, .project-detail { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.project-error { color: #923f32; }
+#project-list-status, #create-project-help { font-size: 10px; line-height: 1.7; }
+#create-project-help { margin: 0; color: var(--muted); }
 .activity-meta { color: var(--muted); font-size: 11px; }
 .agent-status { font-size: 12px; line-height: 1.6; padding: 14px 0; border-bottom: 1px solid var(--line); }
 .agent-status.error { color: #923f32; }
@@ -246,14 +258,17 @@ dialog::backdrop { background: #17171522; }
 @media (max-width: 1200px) {
   .app-shell { padding: 0 24px; }
   .toolbar-hint { display: none; }
-  .scene-meta #scene-name { display: none; }
+  .scene-meta #scene-name { max-width: 120px; }
+  .scene-meta #revision-label { display: none; }
   .top-actions { gap: 14px; }
   .pane-heading h2 { max-width: 130px; }
   .pane-heading { gap: 8px; }
 }
 @media (max-width: 900px) {
   .app-shell { padding: 0 20px; grid-template-rows: 88px auto minmax(0,1fr) 166px; }
-  .scene-meta { display: none; }
+  .scene-meta { display: flex; }
+  .scene-meta #scene-name { max-width: 90px; }
+  .brand > span { display: none; }
   .brand h1 { font-size: 26px; }
   .top-actions { gap: 10px; }
   .task-nav { max-width: 120px; }
@@ -273,6 +288,8 @@ dialog::backdrop { background: #17171522; }
   .app-shell { height: auto; min-height: 100dvh; padding: 0 16px; grid-template-rows: auto auto auto auto; }
   .topbar { padding: 20px 0 16px; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
   .brand { width: 100%; }
+  .scene-meta { width: 100%; }
+  .scene-meta #scene-name { max-width: calc(100vw - 66px); }
   .brand h1 { font-size: 27px; }
   .top-actions { width: 100%; margin: 0; gap: 16px; }
   .session-pill { margin-left: auto; max-width: 105px; overflow: hidden; text-overflow: ellipsis; }

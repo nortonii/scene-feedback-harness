@@ -38,7 +38,7 @@ class FakeBridge:
             {"model": "hidden", "hidden": True, "supportedReasoningEfforts": None},
         ]
 
-    def create_thread(self, model, cwd, *, reasoning_effort=None, title=None, permission_mode="workspace_write"):
+    def create_thread(self, model, cwd, *, reasoning_effort=None, title=None, permission_mode="workspace_write", config=None):
         self.created.append((model, cwd, reasoning_effort, title, permission_mode))
         return NEW
 
@@ -53,7 +53,7 @@ class FakeBridge:
 
 
 class FakeAdapter:
-    def __init__(self, thread_id, on_event=None, *, allow_owned_resume=False, initial_bridge=None):
+    def __init__(self, thread_id, on_event=None, *, allow_owned_resume=False, initial_bridge=None, thread_config=None):
         self.thread_id = thread_id
         self.on_event = on_event
         self.allow_owned_resume = allow_owned_resume
@@ -151,6 +151,49 @@ class CreateTargetTests(unittest.TestCase):
         self.assertIs(catalog["permission_modes_supported"], True)
         self.assertEqual([item["model"] for item in catalog["models"]], ["gpt-6-astra"])
         self.assertEqual(catalog["models"][0]["supported_reasoning_efforts"], ["high", "ultra"])
+
+    def test_first_task_uses_new_project_and_scoped_mcp_without_binding_seed(self):
+        class ScopedBridge(FakeBridge):
+            def create_thread(self, *args, config=None, **kwargs):
+                self.config = config
+                return super().create_thread(*args, **kwargs)
+
+        class ScopedAdapter(FakeAdapter):
+            def __init__(self, *args, thread_config=None, **kwargs):
+                self.thread_config = thread_config
+                super().__init__(*args, **kwargs)
+
+        project = self.root / "new-scene"
+        project.mkdir()
+        store = SceneStore(self.root / "new-data")
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": str(store.data_dir)}}}}
+        gateway = WorkspaceGateway(store, project, external_review=True, desktop_seed_thread_id=OLD, thread_config=config)
+        gateway.ensure()
+        bridge = ScopedBridge()
+        self.assertIsNone(gateway.state()["thread_id"])
+        with patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=bridge) as connect, patch("gateway.SharedDesktopAdapter", ScopedAdapter), patch.object(gateway, "wake"):
+            created = gateway.create_target("gpt-6-astra", reasoning_effort="ultra", title="New room")
+        connect.assert_called_once_with(OLD)
+        self.assertEqual(bridge.created[0][1], project)
+        self.assertEqual(bridge.config, config)
+        self.assertEqual(gateway.adapter.thread_config, config)
+        self.assertEqual(created["workspace"]["thread_id"], NEW)
+        self.assertEqual(gateway.state()["created_thread_ids"], [NEW])
+        self.assertEqual(self.gateway.state()["thread_id"], OLD)
+        self.assertFalse(self.original.closed)
+        gateway.close()
+
+    def test_registry_guard_rejects_cross_scene_target_at_binding(self):
+        def guard(thread_id):
+            if thread_id == NEW:
+                raise APIError(409, "task belongs to another scene")
+
+        self.gateway.target_validator = guard
+        with patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=self.bridge), patch("gateway.SharedDesktopAdapter", FakeAdapter):
+            with self.assertRaisesRegex(APIError, "another scene"):
+                self.gateway.create_target("gpt-6-astra")
+        self.assertEqual(self.gateway.state()["thread_id"], OLD)
+        self.assertFalse(self.original.closed)
 
     def test_restart_recreates_only_a_owned_task_with_no_delivery_attempt(self):
         with self.store.lock:

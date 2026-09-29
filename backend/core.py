@@ -728,7 +728,7 @@ class SceneStore:
         with self.lock:
             return copy.deepcopy(self.state["feedback"])
 
-    def ensure_workspace(self, project_dir: str | Path, *, preferred_session_id: str | None = None) -> dict[str, Any]:
+    def ensure_workspace(self, project_dir: str | Path, *, preferred_session_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
         """Bind this data directory to one project and one persistent browser session."""
         project = Path(project_dir).expanduser().resolve()
         if not project.is_dir():
@@ -738,6 +738,8 @@ class SceneStore:
             if workspace is not None:
                 if workspace["project_dir"] != str(project):
                     raise APIError(409, "workspace is already bound to another project directory")
+                if project_id is not None and workspace["project_id"] != project_id:
+                    raise APIError(409, "workspace belongs to another registered scene")
                 workspace.setdefault("created_thread_ids", [])
                 workspace.setdefault("created_thread_specs", {})
                 return copy.deepcopy(workspace)
@@ -751,7 +753,7 @@ class SceneStore:
                 open_sessions = [item for item in sessions.values() if item["status"] == "open"]
                 session_id = open_sessions[-1]["session_id"] if open_sessions else self.create_session()["session_id"]
             workspace = {
-                "project_id": uuid.uuid4().hex,
+                "project_id": project_id or uuid.uuid4().hex,
                 "project_dir": str(project),
                 "session_id": session_id,
                 "thread_id": None,

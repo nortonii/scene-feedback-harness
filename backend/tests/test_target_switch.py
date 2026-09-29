@@ -23,9 +23,10 @@ NEW = "01a0de73-9763-7432-8ca4-5892c0904234"
 
 
 class TargetAdapter:
-    def __init__(self, thread_id: str, on_event=None):
+    def __init__(self, thread_id: str, on_event=None, *, thread_config=None):
         self.thread_id = thread_id
         self.on_event = on_event
+        self.thread_config = thread_config
         self.connected = False
         self.sent: list[str] = []
         self.lookups: list[str] = []
@@ -82,8 +83,8 @@ class TargetSwitchTests(unittest.TestCase):
         old = {"id": OLD, "cwd": str(self.root), "status": {"type": "idle"}, "name": "Previous Astra", "model": "gpt-6-sol"}
         return [(old_socket, old), (new_socket, target)]
 
-    def replacement(self, thread_id: str, on_event) -> TargetAdapter:
-        adapter = TargetAdapter(thread_id, on_event)
+    def replacement(self, thread_id: str, on_event, *, thread_config=None) -> TargetAdapter:
+        adapter = TargetAdapter(thread_id, on_event, thread_config=thread_config)
         self.created.append(adapter)
         return adapter
 
@@ -254,6 +255,9 @@ class TargetSwitchTests(unittest.TestCase):
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
                 self.assertEqual(json.loads(response.read())["thread_id"], NEW)
+                env = self.created[-1].thread_config["mcp_servers"]["scene_feedback"]["env"]
+                self.assertEqual(env["SCENE_FEEDBACK_PROJECT_DIR"], str(self.project))
+                self.assertEqual(env["SCENE_FEEDBACK_DATA_DIR"], str(server.scene_store.data_dir))
                 connection.close()
             finally:
                 server.shutdown()
