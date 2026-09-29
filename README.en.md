@@ -1,5 +1,7 @@
 **语言 / Languages:** [简体中文](README.md) · **English** · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
+[Changelog (Chinese)](CHANGELOG.md) · [Maintenance guide (Chinese)](CONTRIBUTING.md)
+
 # Codex Visual Reconstruction Workbench
 
 In the default mode, mark the reference image and the current 3D scene, write one prompt, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same workbench-owned Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read. An existing Codex desktop task can use the same review UI through the external MCP mode below.

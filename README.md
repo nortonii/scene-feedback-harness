@@ -1,5 +1,7 @@
 **语言 / Languages:** **简体中文** · [English](README.en.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
+[更新日志](CHANGELOG.md) · [维护规则](CONTRIBUTING.md)
+
 # Codex 视觉重建工作台
 
 默认模式下，在参考图片和当前 3D 场景上圈画，写一段提示，点击「发送反馈」。工作台把文字、原图、标注图和场景快照作为**工作台所管理的同一条 Codex 会话中的用户消息**送出；Codex 修改项目并发布 GLB 后，结果回到这个页面。你不需要去终端再触发一次读取。已有 Codex 桌面任务也可以通过下文的外部 MCP 模式使用同一套审图界面。
