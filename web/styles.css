@@ -142,7 +142,7 @@ input[type=range] { accent-color: #292925; }
 .feedback-panel { position: fixed; z-index: 30; left: 50%; bottom: 44px; transform: translateX(-50%); width: min(820px, calc(100vw - 48px)); min-width: 0; max-height: calc(100dvh - 154px); display: flex; flex-direction: column; border-radius: 24px; }
 /* A warm glass surface: diffuse backdrop, broad highlights and a fine lit edge.
    The opaque base also works when backdrop filters are unavailable. */
-.feedback-panel, .chat-launcher { --glass-fill: #f5f4eff5; --muted: #404039; isolation: isolate; border: 1px solid #ffffffc7; background: linear-gradient(135deg, #ffffff8c 0%, #ffffff24 42%, #ffffff47 100%), var(--glass-fill); box-shadow: 0 14px 48px #17171514, 0 3px 12px #1717150a, 0 0 0 1px #1717150a, inset 0 1px 0 #fffffff2, inset 0 -1px 0 #ffffff66; }
+.feedback-panel, .chat-launcher { --glass-fill: #f5f4eff5; --muted: #404039; isolation: isolate; border: 1px solid #ffffffc7; background: var(--glass-sheen, linear-gradient(135deg, #ffffff8c 0%, #ffffff24 42%, #ffffff47 100%)), var(--glass-fill); box-shadow: 0 14px 48px #17171514, 0 3px 12px #1717150a, 0 0 0 1px #1717150a, inset 0 1px 0 #fffffff2, inset 0 -1px 0 #ffffff66; }
 .feedback-panel::before, .chat-launcher::before { content: ""; position: absolute; z-index: -1; inset: 0; border-radius: inherit; pointer-events: none; background: radial-gradient(ellipse at 10% 0%, #ffffff66, transparent 52%), radial-gradient(ellipse at 100% 100%, #ffffff2b, transparent 48%); }
 .chat-dock-header { display: flex; align-items: center; gap: 12px; flex: none; min-height: 38px; padding: 4px 12px; border-bottom: 1px solid #1717150a; }
 .chat-history-toggle, .chat-collapse { display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 3px 8px; border-radius: 14px; font-size: 11px; white-space: nowrap; transition: background .16s, box-shadow .16s; }
@@ -166,6 +166,9 @@ input[type=range] { accent-color: #292925; }
 .app-shell:has(.timeline-panel:not(.hidden)) .chat-launcher { bottom: 110px; }
 @supports ((backdrop-filter: blur(18px)) or (-webkit-backdrop-filter: blur(18px))) {
   .feedback-panel, .chat-launcher { --glass-fill: #f5f4efa3; -webkit-backdrop-filter: blur(30px) saturate(1.25); backdrop-filter: blur(30px) saturate(1.25); }
+  /* Keep the center clear; concentrate reflected light along the edges. */
+  .feedback-panel { --glass-fill: #f5f4ef61; --glass-sheen: linear-gradient(135deg, #ffffff66 0%, #ffffff05 30%, transparent 68%, #ffffff33 100%); --muted: #363630; -webkit-backdrop-filter: blur(22px) saturate(1.2); backdrop-filter: blur(22px) saturate(1.2); }
+  .feedback-panel::before { background: radial-gradient(ellipse at 0% 0%, #ffffff40, transparent 32%), radial-gradient(ellipse at 100% 100%, #ffffff1f, transparent 32%); }
 }
 @media (prefers-reduced-transparency: reduce) {
   .feedback-panel, .chat-launcher { background: var(--paper); border-color: var(--line); -webkit-backdrop-filter: none; backdrop-filter: none; }
