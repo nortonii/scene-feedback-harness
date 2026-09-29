@@ -6,7 +6,7 @@
 
 In the default mode, mark the reference image and the current 3D scene, write one prompt, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same workbench-owned Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read. An existing Codex desktop task can use the same review UI through the external MCP mode below.
 
-![Side-by-side annotations on a reference image and scene](preview.png)
+![Reference and scene with a collapsible glass conversation dock](preview.png)
 
 ## How it works
 
@@ -29,32 +29,38 @@ This interface helps people point out problems. It does not define a reconstruct
 
 ## Page layout and navigation
 
-The page uses a warm off-white background and black or gray controls. On wide screens the reference and scene sit side by side, with a horizontal toolbar above and one prompt box below. Task, activity, and reference panels open when needed.
+The page retains its warm off-white background and black or gray controls, with a consistent system sans-serif typeface and distinct sizes for headings, body text, controls, and metadata. Repeated helper copy is omitted; actionable queue, connection, and delivery states appear when needed. Compact headers and margins give the side-by-side reference and scene more room. A translucent glass conversation dock with soft highlights and rounded edges floats at the bottom; task, activity, and reference panels open when needed.
 
 | Control | Purpose |
 | --- | --- |
 | Toolbar | `选择` (select), point, box, line, and arrow; `更多` (more) contains text, freehand, and optional correspondence numbers. `物品 / 部件` switches item / part selection |
-| Current task name at the top | Open the task panel to switch recipients or create a task with a name, model, reasoning effort, and permissions |
-| `记录` at the top | Execution, approvals, feedback queue, and message history. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
+| Scene name at the top | Switch independent scenes; with Codex Desktop connected, create a new scene and reconstruction task |
+| Current task name at the top | With Codex Desktop connected, switch the current scene's recipient or create a task with a name, model, reasoning effort, and permissions |
+| Conversation dock | History appears above the prompt. `收起记录` hides history only; `收起会话` hides the entire dock, and `展开会话` at the lower right brings it back |
+| `记录` at the top | Execution, approvals, and feedback queue. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
 | `物体与标记` below the canvases | Object and mark references. Clicking `引用` inserts at the prompt cursor, closes the panel, and returns focus to the prompt |
-| Reference pane’s `导入` menu | Import reference images, a video, or a frame sequence, and set the sequence FPS |
+| Reference pane’s `导入` menu | Import reference images, videos, or a frame sequence, and set the sequence FPS; dynamic imports append independent views |
+| Reference view selector | Switch dynamic reference views on the shared timeline |
+| Reference pane’s `人体追踪` control | Box one person, estimate the current image or track the current view, then inspect and cite completed 2D skeleton results |
 | Timeline’s `选项` menu | Feedback scope, time interval, and GLB animation action selection |
 
-The bottom button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The old snapshot and marks remain available.
+Collapsing the dock keeps the current unsent draft, marks, camera, and frozen evidence intact, so you can keep selecting and annotating. Inserting an object, mark, or human-pose reference opens the prompt automatically. Collapse preferences are saved per workspace session in this browser and restored on reload. New messages show an unread count without opening the dock. Reading older messages preserves your scroll position; use the latest-message button to catch up. The dock replays recent persisted workspace messages, displaying up to 100 entries. In unbound external MCP mode, later model replies still appear in the original Codex task.
+
+The bottom button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). You can also send with `Ctrl/Cmd + Enter`; confirming an IME composition does not submit. When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The current round’s unsent snapshot and marks remain available. Once the server confirms that it saved feedback, they are cleared from the editor; the submitted packet retains the complete evidence.
 
 ## What you can do on the page
 
 - Switch between reference images and pan or zoom them on the left; rotate, zoom, and select nodes in a GLB scene on the right.
 - Switch between item and part selection. Item selection picks a top-level GLB scene node (one whole physical item in the current asset); part selection picks the detailed named node you click. Primitive scene objects are always selected as a whole. Either level can be referenced in the same prompt.
 - Draw points, rectangles, lines, arrows, freehand strokes, and text on either side. Related marks can share a number; a missing object can be marked only on the reference image.
-- Use the toolbar's `撤销 / 重做` (undo / redo) to reverse or restore adding, deleting, or clearing marks. Shortcuts are `Ctrl/Cmd + Z` and `Ctrl/Cmd + Shift + Z`. `清空` (clear) removes all marks, fixed snapshots, and saved dynamic moments in one click, returns to the live 3D scene, and can be undone; it keeps the prompt and reference images. The prompt field keeps native text undo. Annotation history lasts only for the current page and starts fresh after a reload.
+- Use the toolbar's `撤销 / 重做` (undo / redo) to reverse or restore adding, deleting, or clearing marks. Shortcuts are `Ctrl/Cmd + Z` and `Ctrl/Cmd + Shift + Z`. `清空` (clear) removes all marks, fixed snapshots, and saved dynamic moments in one click, returns to the live 3D scene, and can be undone; it keeps the prompt and reference images. The prompt field keeps native text undo. Annotation history starts fresh after a reload or a successfully saved submission. Undo does not restore a submitted round’s marks into the next draft.
 - Write one freeform prompt to Codex. Put the cursor in your text and click “引用” (“Insert reference”) beside an object, a selected GLB node, or a visual mark to insert multiple references into that same prompt. Their forms are `[[object:ID]]`, `[[node:MODEL_ID:0/2]]`, and `[[annotation:ID]]`. For example, ask Codex to move a cabinet toward a marked spot and align its top with a marked line, then send the prompt once. You can mark and reference something that has not been modeled yet on the reference image; the scene still highlights only one selected object at a time. In the `物体与标记` (objects and marks) panel, click `引用全部标记` (reference all marks) to insert all missing mark references at the caret, including saved dynamic moments. Existing references are not repeated; the panel closes so you can continue writing.
 - Select a drawing tool and click or drag directly in the right pane to annotate. The workbench automatically saves **the screenshot, camera, selected object, and scene revision at that moment**. You can also click `标注` (“Annotate”) to freeze the view beforehand. A static scene reuses its screenshot when you continue drawing at the same view and revision. Replacing an annotated static screenshot asks before clearing its old scene marks. Cancel keeps it unchanged, and a confirmed replacement can be undone. Dynamic scenes keep snapshots for each saved moment. Rotating the live 3D view will not move old marks onto other objects, and a newly published scene will not overwrite a snapshot being annotated.
-- Inserting a mark reference, choosing `选择` (“Select”), or clicking `返回 3D` returns to live 3D selection. The frozen screenshot and existing marks remain; click `标注截图` (“Annotation snapshot”) to return to the saved view and continue marking it. Scene arrows and other marks stay attached to their original screenshot. Rotating the live view or refreshing the page does not overwrite it: sending includes the marked screenshot and its original camera, rather than placing those arrows over the newly rotated view.
+- Inserting a mark reference, choosing `选择` (“Select”), or clicking `返回 3D` returns to live 3D selection. The current round’s unsent frozen screenshot and existing marks remain; click `标注截图` (“Annotation snapshot”) to return to the saved view and continue marking it. Scene arrows and other marks stay attached to their original screenshot. Rotating the live view or refreshing the page does not overwrite it: sending includes the marked screenshot and its original camera, rather than placing those arrows over the newly rotated view.
 - Sending saves an immutable feedback packet: your exact words, original and annotated reference images, clean and annotated scene screenshots, selected nodes, camera, and scene revision. Marks are your hints; the original image is kept separately.
 - Once the server confirms that it saved feedback over HTTP, it automatically clears the prompt, all marks, fixed snapshots, saved dynamic moments, object/node selection, and this round's references. The view returns to live 3D and an empty draft is saved for the next round, even if delivery to Codex is queued or uncertain. Submitted feedback evidence, reference images, and the current animation time remain; when a new scene result arrives, any draft already started for the next round remains. If the HTTP save fails or is unconfirmed, the local draft and outbox entry remain for correction and retry.
 - New feedback submitted while Codex is running joins a queue for the next turn. Saved feedback is delivered automatically even if the scene changes while it waits. The model receives both the original snapshot revision and the current revision at delivery, so it can interpret your prompt against the older evidence. Even if the snapshot is already old when you send, clicking Send submits it directly without another confirmation; the model still receives its actual revision. Approval requests and stop actions are also handled on the page.
-- Refreshing restores your project, thread, draft, and original snapshots; it does not turn an old screenshot into a new revision. “View latest” switches to the live scene while retaining old evidence. To annotate the current result afresh, use `清空` (clear), then draw again; accidental clearing can be undone. Snapshot and saved feedback revisions are never rewritten.
+- Refreshing restores your project, thread, and the current unsent draft and original snapshots; it does not turn an old screenshot into a new revision or restore a successfully saved round to the editor. “View latest” switches to the live scene while retaining unsent evidence. To annotate the current result afresh, use `清空` (clear), then draw again; accidental clearing can be undone. Snapshot and saved feedback revisions are never rewritten.
 
 Scene input currently uses a self-contained `.glb` file. Publishing requires geometry and texture resources to be embedded in the GLB's BIN chunk. Both external URIs and data URIs are rejected: even though a data URI can be self-contained, this version accepts only BIN-embedded resources. You can submit a reference image without an initial scene.
 
@@ -263,6 +269,16 @@ The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruct
 ```bash
 .venv/bin/python -m unittest discover -s backend/tests -v
 ```
+
+The floating-dock browser regression uses temporary data and an ephemeral loopback port, with Codex disabled and no access to real sessions. Install the optional Playwright and Chromium dependencies to run it:
+
+```bash
+.venv/bin/python -m pip install playwright
+.venv/bin/python -m playwright install chromium
+.venv/bin/python tests/focus_workspace_smoke.py
+```
+
+It covers independent collapse controls, unread messages, replay, restoration of unsent drafts and frozen evidence, reference insertion, duplicate-send protection, the timeline, and narrow screens.
 
 The real App Server integration was tested with two different local images: Codex recognized a red image in the first turn, then recognized a blue image in the **same thread** after stdio was closed and restarted. The `thread/read` history contains `localImage` items for both turns. This verifies that the images reached the model, rather than merely sending their file paths.
 

@@ -25,6 +25,7 @@ function newId() {
 const labels = {point:'点', rectangle:'方框', line:'线段', arrow:'箭头', text:'文字', freehand:'自由画笔'};
 const glyphs = {point:'●', rectangle:'▢', line:'╱', arrow:'↗', text:'T', freehand:'〰'};
 const circled = ['','①','②','③','④','⑤','⑥','⑦','⑧','⑨'];
+const annotationFontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
 const ui = {
   sceneName:id('scene-name'), projectsButton:id('projects-dialog-button'), projectsDialog:id('projects-dialog'),
   projectsList:id('project-list'), projectsStatus:id('project-list-status'), refreshProjects:id('refresh-projects'),
@@ -361,12 +362,13 @@ function setSession(session) {
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   ui.clipInput.disabled = !editable();
   if (state.sessionStatus !== 'open') {
-    ui.caption.textContent = '这个会话已结束。已保存的标记仍可查看。';
+    ui.caption.textContent = '会话已结束，标记仍可查看。';
   } else {
     updateSubmitLabel();
   }
   renderTimeline();
   updateAnnotationHistory();
+  minimalLayout?.refresh();
 }
 
 async function ensureSession() {
@@ -469,16 +471,17 @@ function updateSubmitLabel() {
     ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
-    ui.caption.textContent = state.pendingSubmission
-      ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
+    ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
+      ? '会话已结束，标记仍可查看。'
+      : state.pendingSubmission
+        ? '送达未确认，重试不会重复创建反馈。'
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status)
-        ? '目标任务正在执行；这条图文反馈会加入下一轮。'
+        ? '发送后排队，目标任务空闲时自动处理。'
       : bound && status === 'delivery_uncertain'
-        ? '请先核对目标 Codex 任务中的送达情况；新反馈会先保存。'
-      : bound
-        ? '原图、标注图和场景截图会送入当前选择的 Codex 任务。'
-      : '反馈会保存在工作台，待 MCP 工具读取后交回 Codex。';
-    appendSceneSnapshotHint();
+        ? '请先在目标任务核对送达情况；新反馈会先保存。'
+      : bound && ['disconnected', 'error'].includes(status)
+        ? '暂未连接；反馈先保存，恢复后自动发送。'
+      : bound ? '' : '反馈先保存，等待 MCP 工具读取。';
     return;
   }
   const label = state.pendingSubmission ? '重试发送'
@@ -489,16 +492,12 @@ function updateSubmitLabel() {
   ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
-  if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
-  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
-  else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
-  else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
-  appendSceneSnapshotHint();
-}
-function appendSceneSnapshotHint() {
-  if (state.annotations.some((mark) => mark.pane === 'scene')) {
-    ui.caption.textContent += ' 场景标记使用已保存的原截图，旋转不会改变其视角。';
-  }
+  if (['submitted', 'cancelled'].includes(state.sessionStatus)) ui.caption.textContent = '会话已结束，标记仍可查看。';
+  else if (state.pendingSubmission) ui.caption.textContent = '送达未确认，重试不会重复创建反馈。';
+  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '发送后排队，Codex 空闲时自动处理。';
+  else if (status === 'delivery_uncertain') ui.caption.textContent = '送达状态待核实，请先查看执行记录。';
+  else if (status === 'disconnected' || status === 'error') ui.caption.textContent = '暂未连接；反馈先保存，恢复后自动发送。';
+  else ui.caption.textContent = '';
 }
 function shortTaskId(threadId) {
   return typeof threadId === 'string' && threadId.length > 12
@@ -975,6 +974,7 @@ async function switchTask(threadId) {
   }
 }
 function renderWorkspace(workspace) {
+  state.networkError = null;
   state.projectId = workspace.project_id || state.projectId;
   if (typeof workspace.project_name === 'string' && workspace.project_name.trim()) state.projectName = workspace.project_name;
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
@@ -1595,8 +1595,9 @@ function renderApprovals() {
     if (!rendered.has(approval.approval_id)) ui.approvals.append(createApprovalCard(approval));
   }
 }
-function addConversation(type, message, time) {
+function addConversation(type, message, time, {historical=false}={}) {
   if (!message) return;
+  const previous = minimalLayout?.beforeConversationAppend();
   if (ui.conversation.firstElementChild?.classList.contains('muted')) ui.conversation.replaceChildren();
   const card = document.createElement('div');
   card.className = 'conversation-item' + (type === 'user' ? ' user' : type === 'error' ? ' error' : '');
@@ -1607,7 +1608,7 @@ function addConversation(type, message, time) {
   card.append(label, content);
   ui.conversation.append(card);
   while (ui.conversation.childElementCount > 100) ui.conversation.firstElementChild.remove();
-  ui.conversation.scrollTop = ui.conversation.scrollHeight;
+  minimalLayout?.conversationAppended(previous, {historical});
 }
 function feedbackEventText(payload) {
   return [payload.object_prompts_summary, payload.note].filter((value) => typeof value === 'string' && value.trim()).join('\n') ||
@@ -1616,6 +1617,7 @@ function feedbackEventText(payload) {
 async function fetchEvents(initial=false) {
   const events = await api('/api/workspace/events?after=' + (initial ? 0 : state.eventCursor));
   const items = Array.isArray(events.items) ? events.items : [];
+  const appendConversation = (type, message, time) => addConversation(type, message, time, {historical:initial});
   for (const event of items) {
     if (!event || state.seenEventIds.has(event.id)) continue;
     state.seenEventIds.add(event.id);
@@ -1623,32 +1625,32 @@ async function fetchEvents(initial=false) {
     const message = payload.text || payload.message || payload.summary || payload.prompt;
     if (state.deliveryMode === 'external' && !state.boundThreadId) {
       if (event.type === 'feedback_queued' || event.type === 'external_feedback_submitted' || event.type === 'feedback_submitted') {
-        addConversation('user', feedbackEventText(payload), event.at);
+        appendConversation('user', feedbackEventText(payload), event.at);
       } else if (event.type === 'feedback_returned_to_mcp' || event.type === 'mcp_feedback_returned') {
-        addConversation('status', 'MCP 已读取视觉反馈；请在原 Codex 任务中查看后续。', event.at);
+        appendConversation('status', 'MCP 已读取视觉反馈；请在原 Codex 任务中查看后续。', event.at);
       } else if (event.type === 'scene_published') {
-        addConversation('status', message || '新场景已发布。', event.at);
+        appendConversation('status', message || '新场景已发布。', event.at);
       } else if (event.type === 'feedback_requested' || event.type === 'external_feedback_requested') {
-        addConversation('assistant', message || 'Codex 正在请求视觉反馈。', event.at);
+        appendConversation('assistant', message || 'Codex 正在请求视觉反馈。', event.at);
       }
       continue;
     }
     if (event.type === 'assistant_message' || event.type === 'assistant_text' || event.type === 'agent_message') {
-      addConversation('assistant', message, event.at);
+      appendConversation('assistant', message, event.at);
     } else if (event.type === 'feedback_queued') {
-      addConversation('user', feedbackEventText(payload), event.at);
+      appendConversation('user', feedbackEventText(payload), event.at);
     } else if (event.type === 'turn_started') {
-      addConversation('status', 'Codex 开始处理这一轮。', event.at);
+      appendConversation('status', 'Codex 开始处理这一轮。', event.at);
     } else if (event.type === 'turn_completed') {
-      addConversation('status', message || '这一轮已完成。', event.at);
+      appendConversation('status', message || '这一轮已完成。', event.at);
     } else if (event.type === 'turn_failed' || event.type === 'disconnected') {
-      addConversation('error', message || '执行中断，请检查连接。', event.at);
+      appendConversation('error', message || '执行中断，请检查连接。', event.at);
     } else if (event.type === 'scene_published') {
-      addConversation('status', message || '新场景已发布。', event.at);
+      appendConversation('status', message || '新场景已发布。', event.at);
     } else if (event.type === 'feedback_requested') {
-      addConversation('assistant', message || '请查看当前场景并给出反馈。', event.at);
+      appendConversation('assistant', message || '请查看当前场景并给出反馈。', event.at);
     } else if (event.type === 'approval_requested') {
-      addConversation('status', 'Codex 正在等待审批。', event.at);
+      appendConversation('status', 'Codex 正在等待审批。', event.at);
     }
   }
   state.eventCursor = Number.isInteger(events.next_cursor) ? events.next_cursor : state.eventCursor;
@@ -2038,7 +2040,7 @@ async function loadScene(sceneData) {
     id('revision-label').textContent = '版本 ' + scene.revision;
     state.sceneDisplayName = scene.name || '当前场景';
     updateProjectTitle();
-    id('scene-title').textContent = scene.name || 'Codex 的当前结果';
+    id('scene-title').textContent = scene.name || '';
     if (priorRevision !== null) {
       announce('场景已更新到版本 ' + scene.revision + '。已有标注仍绑定原截图。');
     }
@@ -2400,7 +2402,7 @@ function drawHumanPoseOverlay() {
       const frame=humanCurrentFrame(job), detail=state.humanDetails.get(job.job_id);
       if (!frame) continue;
       const color=POSE_COLORS[(Number(humanJobName(job).slice(2))-1)%POSE_COLORS.length];
-      drawPoseSkeleton(surface.context,frame,surface.width,surface.height,{color,threshold:job.confidence_threshold ?? 0.3,
+      drawPoseSkeleton(surface.context,frame,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
         edges:detail.skeleton_edges, label:humanJobName(job) + (frame.reference_id !== ref?.id ? ' · 近邻 ' : ' · ') + poseFrameLabel(frame,job.reference_name)});
     }
   }
@@ -3468,7 +3470,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
     ctx.stroke();
   } else if (annotation.type === 'text' && annotation.text) {
     ctx.setLineDash([]);
-    ctx.font = 'bold ' + Math.round(13 * scale) + 'px sans-serif';
+    ctx.font = 'bold ' + Math.round(13 * scale) + 'px ' + annotationFontFamily;
     const text = String(annotation.text).slice(0, 100);
     const textWidth = Math.min(ctx.measureText(text).width, width - 12);
     ctx.fillStyle = '#f5f4efed';
@@ -3478,7 +3480,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   }
   if (annotation.group_id && circled[Number(annotation.group_id)]) {
     ctx.setLineDash([]);
-    ctx.font = 'bold ' + Math.round(20 * scale) + 'px sans-serif';
+    ctx.font = 'bold ' + Math.round(20 * scale) + 'px ' + annotationFontFamily;
     ctx.fillStyle = '#f5f4ef';
     ctx.fillRect(x - 5 * scale, y - 30 * scale, 26 * scale, 23 * scale);
     ctx.fillStyle = color;
@@ -3686,6 +3688,7 @@ function insertNoteText(text, {replaceSelection=true}={}) {
     return false;
   }
   minimalLayout?.closeReferences();
+  minimalLayout?.openChat();
   ui.note.setRangeText(insertion, start, end, 'end');
   // Return to live picking after inserting a reference. The frozen annotated
   // image remains available through the Back to annotation button.
@@ -3709,7 +3712,7 @@ function insertAllAnnotationReferences() {
     return [`标记${number}（${pane}·${kind}${timeLabel ? ' · ' + timeLabel : ''}） [[annotation:${annotation.id}]]`];
   });
   if (!references.length) {
-    minimalLayout?.closeReferences(); ui.note.focus();
+    minimalLayout?.closeReferences(); minimalLayout?.openChat({focus:true});
     announce('全部标记已在提示中引用。');
     return;
   }
@@ -3872,6 +3875,7 @@ async function submitFeedback() {
   pauseTimeline();
   hideTextEditor(); state.drag = null; settleOrbit();
   state.submitting = true;
+  minimalLayout?.refresh();
   updateMode();
   renderTimeline();
   ui.submit.disabled = true;
@@ -3899,7 +3903,7 @@ async function submitFeedback() {
     state.feedbackCount += 1;
     id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
     const delivery = result.delivery?.status || (state.deliveryMode === 'external' ? 'submitted' : 'queued');
-    ui.caption.textContent = draftCleared ? '本轮提示、标记和选中项已清空，可以继续下一轮。' : '新草稿已保留，可以继续编辑。';
+    ui.caption.textContent = draftCleared ? '' : '新草稿已保留，可以继续编辑。';
     saveDraft();
     if (state.deliveryMode === 'external') {
       announce(delivery === 'running' ? '图文反馈已送入原 Codex 任务。'
@@ -3935,6 +3939,7 @@ async function submitFeedback() {
     }
   } finally {
     state.submitting = false;
+    minimalLayout?.refresh();
     renderTimeline();
     updateSubmitLabel();
     renderAnnotations();
@@ -4041,8 +4046,10 @@ async function poll() {
     if (session.status !== state.sessionStatus || Number(session.feedback_count) !== state.feedbackCount) setSession(session);
     await refreshWorkspace();
   } catch {
+    state.networkError = '工作台连接中断，正在重试…';
     ui.agentStatus.textContent = '工作台连接中断，正在重试…';
     ui.agentStatus.className = 'agent-status error';
+    minimalLayout?.refresh();
   }
   finally { poll.running = false; }
 }
@@ -4166,6 +4173,12 @@ function bindEvents() {
     });
   }
   ui.note.addEventListener('input', saveDraft);
+  ui.note.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.altKey ||
+        event.isComposing || event.keyCode === 229 || ui.submit.disabled) return;
+    event.preventDefault();
+    submitFeedback();
+  });
   ui.submit.addEventListener('click', submitFeedback);
   ui.stop.addEventListener('click', async () => {
     ui.stop.disabled = true;
@@ -4288,9 +4301,11 @@ try {
   drawOverlays();
 } catch (error) {
   state.sessionStatus = 'error';
+  state.networkError = '工作台启动失败：' + error.message;
   ui.pill.textContent = '连接失败';
   ui.pill.className = 'session-pill error';
   ui.submit.disabled = true;
+  minimalLayout?.refresh();
   announce('工作台启动失败：' + error.message, true);
 }
 setInterval(poll, 1500);

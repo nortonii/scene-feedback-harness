@@ -71,7 +71,7 @@ export function poseFrameLabel(frame, fallback='参考图') {
   if (Number.isFinite(frame.time_sec)) parts.push(frame.time_sec.toFixed(3) + ' s');
   return parts.join(' · ');
 }
-export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLORS[0], threshold=0.3, edges=COCO_EDGES, label=''}={}) {
+export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLORS[0], threshold=0.3, edges=COCO_EDGES, label='', fontFamily='sans-serif'}={}) {
   context.save();
   context.strokeStyle=color; context.fillStyle=color; context.lineWidth=2;
   const bbox = validBBox(frame.bbox) ? frame.bbox : null;
@@ -98,7 +98,7 @@ export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLO
     const x = Math.max(4, Math.min(width-4,(bbox?.[0] || 0)*width));
     const y = Math.max(17,(bbox?.[1] || 0)*height-5);
     const text = label + (lost ? ' · 未找到人物' : '');
-    context.font='11px sans-serif';
+    context.font='11px ' + fontFamily;
     const textWidth=Math.min(width-8,context.measureText(text).width+8);
     const left=Math.min(x,Math.max(4,width-textWidth-4));
     context.fillStyle='#f5f4efed'; context.fillRect(left-3,y-13,textWidth,17);
