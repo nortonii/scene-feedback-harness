@@ -136,15 +136,6 @@ export function setupChatDock({getState}) {
     });
   }
 
-  function expandHistoryForResize() {
-    rememberScroll();
-    if (historyCollapsed) {
-      historyCollapsed = false;
-      applyLayout();
-      persist();
-    }
-  }
-
   function setHeight(height) {
     rememberScroll();
     const bounds = heightBounds();
@@ -169,6 +160,12 @@ export function setupChatDock({getState}) {
     history?.classList.toggle('hidden', historyCollapsed);
     historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed));
     dock?.classList.toggle('history-collapsed', historyCollapsed);
+    if (resizeHandle) {
+      const enabled = historyVisible();
+      resizeHandle.classList.toggle('hidden', !enabled);
+      resizeHandle.tabIndex = enabled ? 0 : -1;
+      resizeHandle.setAttribute('aria-disabled', String(!enabled));
+    }
     applyHeight({restoreScroll:false});
     updateCounts();
     if (historyVisible()) {
@@ -234,9 +231,9 @@ export function setupChatDock({getState}) {
   }
 
   resizeHandle?.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || event.isPrimary === false || resizeDrag || collapsed) return;
+    if (event.button !== 0 || event.isPrimary === false || resizeDrag || !historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    expandHistoryForResize();
+    rememberScroll();
     resizeHandle.focus({preventScroll:true});
     resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:dock.getBoundingClientRect().height};
     dock.classList.add('resizing');
@@ -260,6 +257,7 @@ export function setupChatDock({getState}) {
     event.preventDefault(); event.stopPropagation();
   });
   resizeHandle?.addEventListener('dblclick', (event) => {
+    if (!historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
     finishResize(); rememberScroll();
     dockHeight = null;
@@ -267,10 +265,9 @@ export function setupChatDock({getState}) {
     persist();
   });
   resizeHandle?.addEventListener('keydown', (event) => {
-    if (event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
+    if (!historyVisible() || event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
     if (event.key === 'Escape') { finishResize(); return; }
     event.preventDefault(); event.stopPropagation();
-    expandHistoryForResize();
     const bounds = heightBounds();
     const step = event.shiftKey ? 64 : 24;
     const next = event.key === 'Home' ? bounds.min : event.key === 'End' ? bounds.max

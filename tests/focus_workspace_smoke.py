@@ -111,12 +111,58 @@ def verify_chat_resize(page, store, submissions, screenshots):
     if screenshots:
         page.screenshot(path=str(screenshots / "resized-expanded.png"))
 
+    def saved_height():
+        return page.evaluate("""() => {
+          const session = new URL(location.href).searchParams.get('session_id');
+          return JSON.parse(localStorage.getItem('astra-visual-layout:' + session) || '{}').dockHeight;
+        }""")
+
+    preferred_height = saved_height()
     page.locator("#chat-history-toggle").click()
     expect(page.locator("#chat-history")).to_be_hidden()
-    assert dock.bounding_box()["height"] < enlarged["height"] - 80
+    expect(handle).to_be_hidden()
+    assert handle.evaluate("el => el.tabIndex") == -1
+    page.locator("#chat-history-toggle").press("Shift+Tab")
+    expect(handle).not_to_be_focused()
+    compact = dock.bounding_box()
+    assert compact["height"] < enlarged["height"] - 80
     expect(page.locator("#feedback-note")).to_be_visible()
+    # The former grip overlapped the dock's top edge. Drag that exact area,
+    # rather than dragging the now-hidden element programmatically.
+    edge_x, edge_y = compact["x"] + compact["width"] / 2, compact["y"] + 1
+    page.mouse.move(edge_x, edge_y)
+    page.mouse.down()
+    page.mouse.move(edge_x, edge_y - 120, steps=8)
+    page.mouse.up()
+    # Hidden controls also ignore stale keyboard/double-click events.
+    handle.dispatch_event("keydown", {"key": "Home"})
+    handle.dispatch_event("dblclick")
+    expect(page.locator("#chat-history")).to_be_hidden()
+    assert abs(dock.bounding_box()["height"] - compact["height"]) < 2
+    assert saved_height() == preferred_height
+    for field in ("note", "annotations", "snapshot", "camera"):
+        assert draft(page).get(field) == original.get(field), field
+    assert len(submissions) == original_submissions
+    page.reload()
+    wait_ready(page)
+    expect(page.locator("#chat-history")).to_be_hidden()
+    expect(handle).to_be_hidden()
+    assert saved_height() == preferred_height
+    if screenshots:
+        page.screenshot(path=str(screenshots / "history-collapsed-no-handle.png"))
     page.locator("#chat-history-toggle").click()
+    expect(handle).to_be_visible()
+    assert handle.evaluate("el => el.tabIndex") == 0
     assert abs(dock.bounding_box()["height"] - enlarged["height"]) < 2
+    restored_handle = handle.bounding_box()
+    restored_x = restored_handle["x"] + restored_handle["width"] / 2
+    restored_y = restored_handle["y"] + restored_handle["height"] / 2
+    page.mouse.move(restored_x, restored_y)
+    page.mouse.down()
+    page.mouse.move(restored_x, restored_y - 24, steps=4)
+    page.mouse.up()
+    assert dock.bounding_box()["height"] >= enlarged["height"] + 20
+    enlarged = dock.bounding_box()
     page.locator("#chat-collapse").click()
     page.reload()
     wait_ready(page)
@@ -445,7 +491,7 @@ def main():
                 assert after["annotations"] == annotated["annotations"]
                 passed("scene annotations and frozen evidence survive collapse; reference insertion restores composer focus")
                 verify_chat_resize(page, store, submissions, screenshots)
-                passed("pointer and keyboard resizing enlarge readable history, preserve bottom anchor and visual draft, restore after collapse/reload, clamp to viewport and reset by double click")
+                passed("pointer and keyboard resizing preserve draft and height; collapsed history disables resize until explicitly reopened, including after reload")
 
                 page.locator("#chat-collapse").click()
                 store.workspace_event("assistant_message", {"text": "收起时的新回复：标记已收到。"})
