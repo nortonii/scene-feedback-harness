@@ -4,7 +4,7 @@
 
 In the default mode, mark the reference image and the current 3D scene, write one prompt, and click “Send.” The workbench sends your text, original image, annotated image, and scene snapshot as **a user message in the same workbench-owned Codex thread**. Once Codex edits the project and publishes a GLB, the result appears on this page. You do not need to return to a terminal to trigger another read. An existing Codex desktop task can use the same review UI through the external MCP mode below.
 
-![Side-by-side annotations on a reference image and scene](preview.png)
+![Reference and scene with a collapsible glass conversation dock](preview.png)
 
 ## How it works
 
@@ -27,18 +27,21 @@ This interface helps people point out problems. It does not define a reconstruct
 
 ## Page layout and navigation
 
-The page uses a warm off-white background and black or gray controls. On wide screens the reference and scene sit side by side, with a horizontal toolbar above and one prompt box below. Task, activity, and reference panels open when needed.
+The page retains its warm off-white background and black or gray controls. Compact headers and margins give the side-by-side reference and scene more room. A translucent glass conversation dock floats at the bottom; task, activity, and reference panels open when needed.
 
 | Control | Purpose |
 | --- | --- |
 | Toolbar | `选择` (select), point, box, line, and arrow; `更多` (more) contains text, freehand, and optional correspondence numbers. `物品 / 部件` switches item / part selection |
 | Current task name at the top | Open the task panel to switch recipients or create a task with a name, model, reasoning effort, and permissions |
-| `记录` at the top | Execution, approvals, feedback queue, and message history. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
+| Conversation dock | History appears above the prompt. `收起记录` hides history only; `收起会话` hides the entire dock, and `展开会话` at the lower right brings it back |
+| `记录` at the top | Execution, approvals, and feedback queue. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
 | `物体与标记` below the canvases | Object and mark references. Clicking `引用` inserts at the prompt cursor, closes the panel, and returns focus to the prompt |
 | Reference pane’s `导入` menu | Import reference images, a video, or a frame sequence, and set the sequence FPS |
 | Timeline’s `选项` menu | Feedback scope, time interval, and GLB animation action selection |
 
-The bottom button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The old snapshot and marks remain available.
+Collapsing the dock keeps the draft, marks, camera, and frozen evidence intact, so you can keep selecting and annotating. Inserting a reference opens the prompt automatically. Collapse preferences are saved per workspace session in this browser and restored on reload. New messages show an unread count without opening the dock. Reading older messages preserves your scroll position; use the latest-message button to catch up. The dock replays recent persisted workspace messages, displaying up to 100 entries. In unbound external MCP mode, later model replies still appear in the original Codex task.
+
+The bottom button normally reads `发送反馈` (send feedback). While the task is running it reads `加入下一轮` (queue for the next turn). You can also send with `Ctrl/Cmd + Enter`; confirming an IME composition does not submit. When viewing an older scene snapshot, a button such as `标注 v13 · 查看最新 v15 ↗` appears below the overlay controls; click it to view the latest live scene. The old snapshot and marks remain available.
 
 ## What you can do on the page
 
@@ -216,6 +219,16 @@ The repository's [Visual Reconstruction Skill](.agents/skills/visual-reconstruct
 ```bash
 .venv/bin/python -m unittest discover -s backend/tests -v
 ```
+
+The floating-dock browser regression uses temporary data and an ephemeral loopback port, with Codex disabled and no access to real sessions. Install the optional Playwright and Chromium dependencies to run it:
+
+```bash
+.venv/bin/python -m pip install playwright
+.venv/bin/python -m playwright install chromium
+.venv/bin/python tests/focus_workspace_smoke.py
+```
+
+It covers independent collapse controls, unread messages, replay, draft and frozen-evidence preservation, reference insertion, duplicate-send protection, the timeline, and narrow screens.
 
 The real App Server integration was tested with two different local images: Codex recognized a red image in the first turn, then recognized a blue image in the **same thread** after stdio was closed and restarted. The `thread/read` history contains `localImage` items for both turns. This verifies that the images reached the model, rather than merely sending their file paths.
 

@@ -1,5 +1,8 @@
+import { setupChatDock } from './chat-dock.js';
+
 export function setupMinimalLayout({getState}) {
   const byId = (id) => document.getElementById(id);
+  const chat = setupChatDock({getState});
   const dialogs = ['tasks-dialog', 'activity-dialog', 'references-dialog']
     .map(byId).filter(Boolean);
   const previousFocus = new WeakMap();
@@ -58,6 +61,7 @@ export function setupMinimalLayout({getState}) {
   }
 
   function refresh() {
+    chat.refresh();
     const state = getState() || {};
     const bound = state.boundThreadId;
     const target = Array.isArray(state.targets)
@@ -158,6 +162,9 @@ export function setupMinimalLayout({getState}) {
 
   return {
     refresh,
+    openChat(options) { chat.open(options); },
+    beforeConversationAppend() { return chat.beforeConversationAppend(); },
+    conversationAppended(previous, options) { chat.conversationAppended(previous, options); },
     closeReferences() { closeDialog(byId('references-dialog'), {restoreFocus:false}); }
   };
 }
