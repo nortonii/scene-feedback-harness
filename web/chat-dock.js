@@ -6,12 +6,17 @@ export function setupChatDock({getState}) {
   const conversation = byId('conversation');
   const historyToggle = byId('chat-history-toggle');
   const latest = byId('chat-latest');
+  const resizeHandle = byId('chat-resize-handle');
   let sessionId = null;
   let collapsed = false;
   let historyCollapsed = false;
   let followingLatest = true;
   let savedScrollTop = 0;
   let unread = 0;
+  let dockHeight = null;
+  let resizeDrag = null;
+  let resizeFrame = 0;
+  let lastHeightBounds = {min:1, max:window.innerHeight};
 
   const historyVisible = () => !!dock && !collapsed && !historyCollapsed;
   const atLatest = () => !conversation ||
@@ -21,7 +26,7 @@ export function setupChatDock({getState}) {
   function persist() {
     if (!sessionId) return;
     try {
-      localStorage.setItem(storageKey(), JSON.stringify({collapsed, historyCollapsed}));
+      localStorage.setItem(storageKey(), JSON.stringify({collapsed, historyCollapsed, dockHeight}));
     } catch { /* Layout controls remain usable when browser storage is unavailable. */ }
   }
 
@@ -71,6 +76,91 @@ export function setupChatDock({getState}) {
     followingLatest = atLatest();
   }
 
+  function heightBounds() {
+    if (!dock || collapsed) return lastHeightBounds;
+    const rect = dock.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const top = viewport?.offsetTop || 0;
+    const bottom = Math.min(rect.bottom, top + (viewport?.height || window.innerHeight));
+    const cssMaximum = parseFloat(getComputedStyle(dock).maxHeight);
+    const maximum = Math.max(1, Math.floor(Math.min(bottom - top - 12,
+      Number.isFinite(cssMaximum) ? cssMaximum : Infinity)));
+    // Everything outside history (header, input, actions and spacing) keeps its
+    // natural size; leave enough history to read a message even at the minimum.
+    const chrome = rect.height - (history?.getBoundingClientRect().height || 0);
+    const minimumHistory = Math.min(64, Math.max(24, conversation?.scrollHeight || 0));
+    const minimum = historyCollapsed ? lastHeightBounds.min : Math.ceil(chrome + minimumHistory);
+    return lastHeightBounds = {min:Math.min(maximum, minimum), max:maximum};
+  }
+
+  function updateHeightAria(bounds) {
+    if (!resizeHandle || !dock || collapsed) return;
+    const height = historyCollapsed && dockHeight !== null
+      ? Math.min(bounds.max, Math.max(bounds.min, dockHeight)) : dock.getBoundingClientRect().height;
+    resizeHandle.setAttribute('aria-valuemin', String(Math.min(bounds.min, Math.round(height))));
+    resizeHandle.setAttribute('aria-valuemax', String(bounds.max));
+    resizeHandle.setAttribute('aria-valuenow', String(Math.round(height)));
+    resizeHandle.setAttribute('aria-valuetext', Math.round(height) + ' 像素');
+  }
+
+  function restoreHistoryScroll() {
+    if (!historyVisible() || !conversation) return;
+    if (followingLatest) scrollToLatest();
+    else {
+      conversation.scrollTop = savedScrollTop;
+      savedScrollTop = conversation.scrollTop;
+    }
+  }
+
+  function applyHeight({restoreScroll=true}={}) {
+    if (!dock) return;
+    dock.classList.toggle('is-resized', dockHeight !== null);
+    if (dockHeight === null) dock.style.removeProperty('--chat-height');
+    if (collapsed) return;
+    const bounds = heightBounds();
+    if (dockHeight !== null) {
+      // Viewport limits are temporary. Keep the user's preferred height so it
+      // returns when a small window or the mobile keyboard opens up again.
+      const value = Math.min(bounds.max, Math.max(bounds.min, dockHeight)) + 'px';
+      if (dock.style.getPropertyValue('--chat-height') !== value) dock.style.setProperty('--chat-height', value);
+    }
+    if (restoreScroll) restoreHistoryScroll();
+    updateHeightAria(bounds);
+  }
+
+  function scheduleHeightUpdate() {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      applyHeight();
+    });
+  }
+
+  function expandHistoryForResize() {
+    rememberScroll();
+    if (historyCollapsed) {
+      historyCollapsed = false;
+      applyLayout();
+      persist();
+    }
+  }
+
+  function setHeight(height) {
+    rememberScroll();
+    const bounds = heightBounds();
+    dockHeight = Math.round(Math.min(bounds.max, Math.max(bounds.min, height)));
+    applyHeight();
+  }
+
+  function finishResize(event) {
+    if (!resizeDrag || (event?.pointerId !== undefined && event.pointerId !== resizeDrag.pointerId)) return;
+    const pointerId = resizeDrag.pointerId;
+    resizeDrag = null;
+    dock?.classList.remove('resizing');
+    if (resizeHandle?.hasPointerCapture(pointerId)) resizeHandle.releasePointerCapture(pointerId);
+    persist();
+  }
+
   function applyLayout() {
     dock?.classList.toggle('hidden', collapsed);
     launcher?.classList.toggle('hidden', !collapsed);
@@ -79,6 +169,7 @@ export function setupChatDock({getState}) {
     history?.classList.toggle('hidden', historyCollapsed);
     historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed));
     dock?.classList.toggle('history-collapsed', historyCollapsed);
+    applyHeight({restoreScroll:false});
     updateCounts();
     if (historyVisible()) {
       // Let the restored history acquire its height before restoring its position.
@@ -102,16 +193,19 @@ export function setupChatDock({getState}) {
   function refresh() {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
+      finishResize();
       sessionId = state.sessionId;
       collapsed = false;
       historyCollapsed = false;
       followingLatest = true;
       savedScrollTop = 0;
       unread = 0;
+      dockHeight = null;
       try {
         const stored = JSON.parse(localStorage.getItem(storageKey()) || 'null');
         collapsed = stored?.collapsed === true;
         historyCollapsed = stored?.historyCollapsed === true;
+        if (Number.isFinite(stored?.dockHeight) && stored.dockHeight > 0) dockHeight = stored.dockHeight;
       } catch { /* Ignore an unavailable or invalid saved preference. */ }
       applyLayout();
     }
@@ -139,7 +233,65 @@ export function setupChatDock({getState}) {
     updateCounts();
   }
 
+  resizeHandle?.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.isPrimary === false || resizeDrag || collapsed) return;
+    event.preventDefault(); event.stopPropagation();
+    expandHistoryForResize();
+    resizeHandle.focus({preventScroll:true});
+    resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:dock.getBoundingClientRect().height};
+    dock.classList.add('resizing');
+    try { resizeHandle.setPointerCapture(event.pointerId); }
+    catch { finishResize(); }
+  });
+  resizeHandle?.addEventListener('pointermove', (event) => {
+    if (!resizeDrag || event.pointerId !== resizeDrag.pointerId) return;
+    event.preventDefault(); event.stopPropagation();
+    if (event.pointerType === 'mouse' && !event.buttons) { finishResize(event); return; }
+    setHeight(resizeDrag.height + resizeDrag.y - event.clientY);
+  });
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    resizeHandle?.addEventListener(name, (event) => {
+      if (!resizeDrag || event.pointerId !== resizeDrag.pointerId) return;
+      event.preventDefault(); event.stopPropagation();
+      finishResize(event);
+    });
+  }
+  resizeHandle?.addEventListener('click', (event) => {
+    event.preventDefault(); event.stopPropagation();
+  });
+  resizeHandle?.addEventListener('dblclick', (event) => {
+    event.preventDefault(); event.stopPropagation();
+    finishResize(); rememberScroll();
+    dockHeight = null;
+    applyHeight();
+    persist();
+  });
+  resizeHandle?.addEventListener('keydown', (event) => {
+    if (event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
+    if (event.key === 'Escape') { finishResize(); return; }
+    event.preventDefault(); event.stopPropagation();
+    expandHistoryForResize();
+    const bounds = heightBounds();
+    const step = event.shiftKey ? 64 : 24;
+    const next = event.key === 'Home' ? bounds.min : event.key === 'End' ? bounds.max
+      : dock.getBoundingClientRect().height + (event.key === 'ArrowUp' ? step : -step);
+    setHeight(next);
+    persist();
+  });
+  window.addEventListener('blur', () => finishResize());
+  window.addEventListener('resize', scheduleHeightUpdate);
+  window.visualViewport?.addEventListener('resize', scheduleHeightUpdate);
+  window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
+  if (typeof ResizeObserver === 'function') {
+    const observer = new ResizeObserver(scheduleHeightUpdate);
+    for (const element of [dock, dock?.querySelector('.chat-dock-header'), dock?.querySelector('.feedback-heading'),
+      dock?.querySelector('.composer'), byId('timeline-panel')]) {
+      if (element) observer.observe(element);
+    }
+  }
+
   byId('chat-collapse')?.addEventListener('click', () => {
+    finishResize();
     rememberScroll();
     collapsed = true;
     applyLayout();
@@ -148,6 +300,7 @@ export function setupChatDock({getState}) {
   });
   launcher?.addEventListener('click', () => open({focus:true}));
   historyToggle?.addEventListener('click', () => {
+    finishResize();
     rememberScroll();
     historyCollapsed = !historyCollapsed;
     applyLayout();

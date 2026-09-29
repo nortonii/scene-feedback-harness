@@ -79,6 +79,132 @@ def wait_ready(page):
     page.wait_for_timeout(250)
 
 
+def verify_chat_resize(page, store, submissions, screenshots):
+    """Resize with real pointer/keyboard input while a visual draft is pending."""
+    for index in range(7):
+        store.workspace_event("assistant_message", {"text": f"尺寸检查 {index + 1}：" + "保留原截图和柜子标注，继续核对位置。" * 3})
+    expect(page.locator("#conversation")).to_contain_text("尺寸检查 7", timeout=10000)
+    handle = page.locator("#chat-resize-handle")
+    expect(handle).to_be_visible()
+    dock = page.locator("#chat-dock")
+    conversation = page.locator("#conversation")
+    initial = dock.bounding_box()
+    initial_history = conversation.evaluate("el => el.clientHeight")
+    original = draft(page)
+    original_geometry = geometry(page)
+    original_submissions = len(submissions)
+    handle_box = handle.bounding_box()
+    x, y = handle_box["x"] + handle_box["width"] / 2, handle_box["y"] + handle_box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x, y - 160, steps=12)
+    page.mouse.up()
+    page.wait_for_timeout(100)
+    enlarged = dock.bounding_box()
+    assert enlarged["height"] >= initial["height"] + 120, (initial, enlarged)
+    assert conversation.evaluate("el => el.clientHeight") >= initial_history + 100
+    assert abs(enlarged["y"] + enlarged["height"] - initial["y"] - initial["height"]) < 2
+    assert geometry(page) == original_geometry
+    for field in ("note", "annotations", "snapshot", "camera", "selectedId", "referencedSceneNodes"):
+        assert draft(page).get(field) == original.get(field), field
+    assert len(submissions) == original_submissions
+    if screenshots:
+        page.screenshot(path=str(screenshots / "resized-expanded.png"))
+
+    page.locator("#chat-history-toggle").click()
+    expect(page.locator("#chat-history")).to_be_hidden()
+    assert dock.bounding_box()["height"] < enlarged["height"] - 80
+    expect(page.locator("#feedback-note")).to_be_visible()
+    page.locator("#chat-history-toggle").click()
+    assert abs(dock.bounding_box()["height"] - enlarged["height"]) < 2
+    page.locator("#chat-collapse").click()
+    page.reload()
+    wait_ready(page)
+    expect(dock).to_be_hidden()
+    page.locator("#chat-launcher").click()
+    page.wait_for_timeout(100)
+    assert abs(dock.bounding_box()["height"] - enlarged["height"]) < 2
+    expect(page.locator("#feedback-note")).to_have_value(original["note"])
+    assert draft(page)["annotations"] == original["annotations"]
+    assert draft(page)["snapshot"] == original["snapshot"]
+
+    handle.focus()
+    before_key = dock.bounding_box()["height"]
+    handle.press("ArrowUp")
+    assert dock.bounding_box()["height"] > before_key
+    handle.press("ArrowDown")
+    assert abs(dock.bounding_box()["height"] - before_key) < 2
+    handle.press("End")
+    maximum = dock.bounding_box()
+    assert maximum["y"] >= 0 and maximum["y"] + maximum["height"] <= 900
+    assert maximum["height"] >= enlarged["height"]
+    page.set_viewport_size({"width": 390, "height": 640})
+    page.wait_for_timeout(150)
+    constrained = dock.bounding_box()
+    assert constrained["x"] >= 0 and constrained["x"] + constrained["width"] <= 390
+    assert constrained["y"] >= 0 and constrained["y"] + constrained["height"] <= 640
+    expect(page.locator("#feedback-note")).to_be_visible()
+    expect(page.locator("#submit-button")).to_be_visible()
+    if screenshots:
+        page.screenshot(path=str(screenshots / "resized-mobile-clamped.png"))
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.wait_for_timeout(150)
+    handle.press("Home")
+    minimum = dock.bounding_box()
+    minimum_height = float(handle.get_attribute("aria-valuemin"))
+    assert minimum["height"] >= minimum_height - 2
+    handle.press("ArrowDown")
+    assert abs(dock.bounding_box()["height"] - minimum["height"]) < 2
+    minimum_handle = handle.bounding_box()
+    min_x = minimum_handle["x"] + minimum_handle["width"] / 2
+    min_y = minimum_handle["y"] + minimum_handle["height"] / 2
+    page.mouse.move(min_x, min_y)
+    page.mouse.down()
+    page.mouse.move(min_x, min(890, min_y + 120), steps=8)
+    page.mouse.up()
+    assert abs(dock.bounding_box()["height"] - minimum["height"]) < 2
+    note_box = page.locator("#feedback-note").bounding_box()
+    assert note_box["y"] >= minimum["y"] and note_box["y"] + note_box["height"] <= minimum["y"] + minimum["height"]
+    handle.dblclick()
+    page.wait_for_timeout(150)
+    assert abs(dock.bounding_box()["height"] - initial["height"]) < 2
+    for field in ("note", "annotations", "snapshot", "camera", "selectedId", "referencedSceneNodes"):
+        assert draft(page).get(field) == original.get(field), field
+    assert geometry(page) == original_geometry
+    assert len(submissions) == original_submissions
+    if screenshots:
+        page.screenshot(path=str(screenshots / "resized-reset.png"))
+
+
+def verify_compact_header(page, store, screenshots):
+    if page.locator("#chat-launcher").is_visible():
+        page.locator("#chat-launcher").click()
+    if page.locator("#chat-history").is_visible():
+        page.locator("#chat-history-toggle").click()
+    for index in range(123):
+        store.workspace_event("assistant_message", {"text": f"窄屏计数检查 {index + 1}"})
+    expect(page.locator("#conversation")).to_contain_text("窄屏计数检查 123", timeout=10000)
+    expect(page.locator("#chat-message-count")).to_contain_text("123")
+    for width in (340, 390, 768, 1440):
+        page.set_viewport_size({"width": width, "height": 900 if width > 640 else 844})
+        page.wait_for_timeout(100)
+        assert page.locator(".chat-dock-header").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
+        for selector in ("#chat-history-toggle", "#references-dialog-button", "#chat-collapse"):
+            assert page.locator(selector).evaluate("""el => {
+              const r=el.getBoundingClientRect(), h=el.closest('.chat-dock-header').getBoundingClientRect();
+              const hit=document.elementFromPoint(r.x+r.width/2,r.y+2);
+              return r.left>=h.left && r.right<=h.right && r.top>=h.top && r.bottom<=h.bottom && hit?.closest('button')===el;
+            }"""), (width, selector)
+        if width == 340:
+            if screenshots:
+                page.screenshot(path=str(screenshots / "mobile-long-count.png"))
+            references = page.locator("#references-dialog-button")
+            references.click(position={"x": references.bounding_box()["width"] / 2, "y": 2})
+            expect(page.locator("#references-dialog")).to_be_visible()
+            page.locator('[data-close-dialog="references-dialog"]').click()
+    page.locator("#chat-history-toggle").click()
+
+
 def verify_project_isolation(page, server, screenshots):
     """Use real project routing/stores while stubbing only Codex Desktop I/O."""
     original_state = WorkspaceGateway.state
@@ -112,11 +238,15 @@ def verify_project_isolation(page, server, screenshots):
     root = server.project_registry.root
     root_note, child_note = "原场景的独立未发送草稿", "新场景 B 的独立未发送草稿"
     original_feedback = root.store.list_all_feedback()
+    root_event_marker = "原场景项目切换前专属消息"
+    root.store.workspace_event("assistant_message", {"text": root_event_marker})
     page.set_viewport_size({"width": 1440, "height": 900})
     page.evaluate("scrollTo(0,0)")
     if page.locator("#chat-launcher").is_visible():
         page.locator("#chat-launcher").click()
     page.locator("#feedback-note").fill(root_note)
+    page.locator("#chat-resize-handle").press("ArrowUp")
+    root_dock_height = page.locator("#chat-dock").bounding_box()["height"]
 
     with patch.object(WorkspaceGateway, "state", fixture_state), \
          patch.object(WorkspaceGateway, "start", fixture_start), \
@@ -142,7 +272,7 @@ def verify_project_isolation(page, server, screenshots):
         expect(page.locator("#reference-empty")).to_be_visible()
         expect(page.locator("#timeline-panel")).to_be_hidden()
         expect(page.locator("#feedback-note")).to_have_value("")
-        expect(page.locator("#conversation")).not_to_contain_text("请把柜子向左移动一点。")
+        expect(page.locator("#conversation")).not_to_contain_text(root_event_marker)
         page.locator("#feedback-note").fill(child_note)
         page.locator("#chat-collapse").click()
         if screenshots:
@@ -159,15 +289,21 @@ def verify_project_isolation(page, server, screenshots):
         switch_project(root.name)
         wait_ready(page)
         expect(page.locator("#feedback-note")).to_have_value(root_note)
+        assert abs(page.locator("#chat-dock").bounding_box()["height"] - root_dock_height) < 2
         expect(page.locator("#reference-view-select")).to_be_visible()
-        expect(page.locator("#conversation")).to_contain_text("请把柜子向左移动一点。")
+        expect(page.locator("#conversation")).to_contain_text(root_event_marker)
         assert root.store.list_all_feedback() == original_feedback
         assert child.store.list_all_feedback() == []
         switch_project("隔离新场景 B")
         expect(page.locator("#chat-dock")).to_be_hidden()
         page.locator("#chat-launcher").click()
         expect(page.locator("#feedback-note")).to_have_value(child_note)
-        expect(page.locator("#conversation")).not_to_contain_text("请把柜子向左移动一点。")
+        child_height = page.evaluate("""() => {
+          const session = new URL(location.href).searchParams.get('session_id');
+          return JSON.parse(localStorage.getItem('astra-visual-layout:' + session) || '{}').dockHeight ?? null;
+        }""")
+        assert child_height is None
+        expect(page.locator("#conversation")).not_to_contain_text(root_event_marker)
         assert child.store.get_session(child.store.workspace()["session_id"])["reference_images"] == []
         assert len(server.project_registry.contexts()) == 2 and len(created_tasks) == 1
 
@@ -238,6 +374,12 @@ def main():
                 expect(page.locator("#chat-history")).to_be_visible()
                 expect(page.locator("#conversation")).to_contain_text("请把柜子向左移动一点。")
                 expect(page.locator("#conversation")).to_contain_text("已调整柜子位置")
+                expect(page.locator(".feedback-heading")).to_be_hidden()
+                references = page.locator("#references-dialog-button")
+                assert references.evaluate("el => !!el.closest('.chat-dock-header')")
+                reference_box = references.bounding_box()
+                header_box = page.locator(".chat-dock-header").bounding_box()
+                assert reference_box["y"] >= header_box["y"] and reference_box["y"] + reference_box["height"] <= header_box["y"] + header_box["height"]
                 assert geometry(page)["scene-stage"]["height"] >= 650, geometry(page)
                 print(json.dumps({"workspace_geometry": geometry(page)}, ensure_ascii=False), flush=True)
                 if screenshots:
@@ -302,6 +444,8 @@ def main():
                 assert after["snapshot"] == annotated["snapshot"]
                 assert after["annotations"] == annotated["annotations"]
                 passed("scene annotations and frozen evidence survive collapse; reference insertion restores composer focus")
+                verify_chat_resize(page, store, submissions, screenshots)
+                passed("pointer and keyboard resizing enlarge readable history, preserve bottom anchor and visual draft, restore after collapse/reload, clamp to viewport and reset by double click")
 
                 page.locator("#chat-collapse").click()
                 store.workspace_event("assistant_message", {"text": "收起时的新回复：标记已收到。"})
@@ -510,6 +654,8 @@ def main():
                     page.locator("#chat-collapse").click()
                     assert_launcher(page)
                 passed("desktop, tablet and narrow mobile retain project switch, pose popover, multiview and dock controls without overflow")
+                verify_compact_header(page, store, screenshots)
+                passed("long unread counts fit the shared header at narrow widths and resize grip leaves header buttons clickable")
                 verify_project_isolation(page, server, screenshots)
                 passed("real project creation and switching isolate scene assets, saved feedback, chat, drafts and collapsed preferences with mocked Codex I/O")
                 assert not pose_requests and not pose_start.called
