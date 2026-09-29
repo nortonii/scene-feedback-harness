@@ -3055,6 +3055,34 @@ function clearSubmittedPrompt(submission) {
   state.referencedSceneNodes = [];
   return true;
 }
+async function clearSubmittedDraft(submission) {
+  // Controls remain locked until the save is acknowledged. If a newer prompt
+  // was restored or changed meanwhile, preserve its associated visual draft.
+  if (!clearSubmittedPrompt(submission)) return false;
+  hideTextEditor(); state.drag = null;
+  state.annotations = [];
+  state.dynamicSnapshots = [];
+  state.snapshot = null;
+  state.sceneView = 'live';
+  state.selectedId = null;
+  state.selectedSceneNode = null;
+  state.lastPickedDetailNode = null;
+  state.groupId = ''; ui.groupSelect.value = '';
+  state.mode = 'select';
+  // A submitted round is a fresh undo boundary. Its evidence lives in the
+  // saved feedback packet, rather than being restored into a later round.
+  annotationHistory.clear();
+  ui.snapshotImage.removeAttribute('src');
+  renderSelection();
+  renderSceneView({persist:false});
+  renderAnnotations(); renderTimeline(); drawOverlays();
+  state.draftMomentSignature = null;
+  saveDraft();
+  // Drain the serialized moment writes before unlocking the next round, so an
+  // immediate reload cannot recover the old dynamic screenshots.
+  await saveMomentDraft.pending;
+  return true;
+}
 async function feedbackPayload(referencedSceneNodes, promptText) {
   const snapshot = snapshotForFeedback();
   const submittedCamera = snapshot?.camera || cameraData();
@@ -3139,11 +3167,11 @@ async function submitFeedback() {
     const submitted = state.pendingSubmission;
     await clearOutbox();
     state.pendingSubmission = null;
-    clearSubmittedPrompt(submitted);
+    const draftCleared = await clearSubmittedDraft(submitted);
     state.feedbackCount += 1;
     id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
     const delivery = result.delivery?.status || (state.deliveryMode === 'external' ? 'submitted' : 'queued');
-    ui.caption.textContent = '标记仍保留；再次发送前可删除或清空。';
+    ui.caption.textContent = draftCleared ? '本轮提示、标记和选中项已清空，可以继续下一轮。' : '新草稿已保留，可以继续编辑。';
     saveDraft();
     if (state.deliveryMode === 'external') {
       announce(delivery === 'running' ? '图文反馈已送入原 Codex 任务。'
