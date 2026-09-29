@@ -459,15 +459,23 @@ async function clearOutbox() {
   try { localStorage.removeItem(outboxKey()); } catch { /* Ignore unavailable local storage. */ }
 }
 
+function setSubmitLabel(label) {
+  const text = ui.submit.querySelector('[data-submit-label]');
+  if (text) text.textContent = label;
+  ui.submit.setAttribute('aria-label', label);
+  ui.submit.setAttribute('aria-busy', String(state.submitting));
+  ui.submit.title = label;
+}
+
 function updateSubmitLabel() {
   updateAnnotationHistory();
   const status = state.agent?.status || 'disconnected';
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
-    const label = state.pendingSubmission ? '重试发送'
+    const label = state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送'
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
       : bound ? '发送反馈' : '保存反馈';
-    ui.submit.querySelector('span:first-child').textContent = label;
+    setSubmitLabel(label);
     ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
@@ -484,11 +492,11 @@ function updateSubmitLabel() {
       : bound ? '' : '反馈先保存，等待 MCP 工具读取。';
     return;
   }
-  const label = state.pendingSubmission ? '重试发送'
+  const label = state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送'
     : ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
     : status === 'disconnected' || status === 'error' ? '保存反馈'
     : '发送反馈';
-  ui.submit.querySelector('span:first-child').textContent = label;
+  setSubmitLabel(label);
   ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
@@ -3880,7 +3888,7 @@ async function submitFeedback() {
   renderTimeline();
   ui.submit.disabled = true;
   ui.note.disabled = true;
-  ui.submit.querySelector('span:first-child').textContent = '准备图片…';
+  setSubmitLabel('准备图片…');
   try {
     if (!state.pendingSubmission) {
       const payload = await feedbackPayload(referencedSceneNodes, promptText);
@@ -3892,7 +3900,7 @@ async function submitFeedback() {
       try { await writeOutbox(state.pendingSubmission); }
       catch (error) { state.pendingSubmission = null; throw error; }
     }
-    ui.submit.querySelector('span:first-child').textContent = '正在发送…';
+    setSubmitLabel('正在发送…');
     const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/feedback', {
       method:'POST', body:state.pendingSubmission.payload
     });

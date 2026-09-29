@@ -234,12 +234,14 @@ input[type=range] { accent-color: #292925; }
 .text-button, .reference-insert { padding: 3px 0; color: var(--muted); background: transparent; font-size: var(--text-control); white-space: nowrap; font-weight: 500; }
 .text-button:hover, .reference-insert:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
 .selected-reference-insert { font-size: var(--text-caption); text-decoration: underline; text-underline-offset: 3px; }
-.composer { flex: none; display: flex; align-items: flex-start; gap: 12px; }
-.prompt-field { min-width: 0; flex: 1; }
-#feedback-note { display: block; width: 100%; height: 72px; min-height: 72px; max-height: 192px; padding: 10px 12px; border: 1px solid #ffffffb3; border-radius: 15px; resize: vertical; font-size: var(--text-body); line-height: 1.55; background: #faf9f570; box-shadow: inset 0 1px 3px #17171505, 0 0 0 1px #1717150a; transition: background .16s, box-shadow .16s; }
+.composer { flex: none; min-width: 0; }
+.prompt-field { min-width: 0; }
+.prompt-input { position: relative; }
+#feedback-note { display: block; width: 100%; height: 72px; min-height: 72px; max-height: 192px; padding: 12px 60px 12px 14px; border: 1px solid #ffffffb3; border-radius: 15px; resize: vertical; font-size: var(--text-body); line-height: 1.55; background: #faf9f570; box-shadow: inset 0 1px 3px #17171505, 0 0 0 1px #1717150a; transition: background .16s, box-shadow .16s; }
 #feedback-note::placeholder { color: #56564e; }
 #feedback-note:focus { border-color: #ffffffed; background: #faf9f5a6; box-shadow: 0 0 0 2px #17171526, inset 0 1px 0 #fff; outline: none; }
-.submit-button { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-width: 112px; min-height: 72px; padding: 11px 14px; background: linear-gradient(155deg, #42423c, var(--ink) 80%); color: var(--paper); border: 1px solid #17171573; border-radius: 15px; box-shadow: inset 0 1px 0 #ffffff30, 0 3px 10px #17171518; font-size: var(--text-body); font-weight: 600; margin-top: 0; transition: box-shadow .16s; }
+.submit-button { position: absolute; right: 10px; bottom: 10px; display: grid; place-items: center; width: 38px; height: 38px; padding: 0; background: linear-gradient(155deg, #42423c, var(--ink) 80%); color: var(--paper); border: 1px solid #17171573; border-radius: 50%; box-shadow: inset 0 1px 0 #ffffff30, 0 2px 7px #17171518; transition: box-shadow .16s; }
+.submit-button svg { width: 19px; height: 19px; pointer-events: none; }
 .submit-button:hover:not(:disabled) { box-shadow: inset 0 1px 0 #ffffff52, 0 5px 16px #17171526; }
 #submit-caption { margin: 6px 0 0; color: var(--muted); font-size: var(--text-caption); line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 dialog { color: var(--ink); background: var(--paper); border: 1px solid var(--ink); padding: 26px; max-width: min(650px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); scrollbar-width: thin; }
@@ -403,9 +405,7 @@ dialog::backdrop { background: #17171522; }
   .selection-summary { gap: 9px; }
   .selected-name { max-width: 230px; }
   .selected-reference-insert { max-width: 120px; }
-  .composer { gap: 10px; align-items: flex-start; }
   #feedback-note { font-size: 16px; line-height: 1.5; }
-  .submit-button { min-width: 86px; padding: 10px; gap: 8px; font-size: var(--text-control); margin-top: 0; }
   #submit-caption { white-space: normal; font-size: var(--text-caption); }
   .side-dialog { width: 100vw; padding: 22px; }
   .popover-content { max-width: calc(100vw - 40px); }
