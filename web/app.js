@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
+import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { createFrameImageCache } from './frame-image-cache.js';
@@ -1880,9 +1880,11 @@ function renderReferenceStrip() {
     return;
   }
   for (const ref of state.references) {
+    const view = viewForReferenceImage(referenceViews(), ref);
     const button = document.createElement('button');
     button.type = 'button';
-    button.className = 'thumb' + (ref.id === state.activeReferenceId ? ' active' : '');
+    const selected = view && state.clipEnabled ? view.clip_id === (state.pendingViewId || state.activeViewId) : ref.id === state.activeReferenceId;
+    button.className = 'thumb' + (selected ? ' active' : '');
     button.title = ref.name || '参考图';
     button.setAttribute('aria-label', '查看 ' + (ref.name || '参考图'));
     const image = document.createElement('img');
@@ -1892,9 +1894,9 @@ function renderReferenceStrip() {
     if (referenceCamera(ref)) {
       const cameraBadge = document.createElement('span');
       cameraBadge.className = 'thumb-camera';
-      cameraBadge.textContent = '机位';
+      cameraBadge.textContent = view ? '同步' : '机位';
       button.append(cameraBadge);
-      button.title = (ref.name || '参考图') + ' · 有相机位姿';
+      button.title = (ref.name || '参考图') + (view ? ' · 切换同步机位，保持当前时间' : ' · 有相机位姿');
     }
     const count = state.annotations.filter((a) => a.pane === 'reference' && a.reference_image_id === ref.id).length;
     if (count) {
@@ -1905,6 +1907,12 @@ function renderReferenceStrip() {
     }
     button.addEventListener('click', () => {
       if (!editable()) return;
+      if (view) {
+        state.referenceZoom = 1;
+        state.referencePan = {x:0,y:0};
+        seekTimeline(state.timelineTarget ?? state.time, {viewId:view.clip_id, preserveTime:true});
+        return;
+      }
       pauseTimeline();
       state.clipEnabled = false;
       state.activeReferenceId = ref.id;
@@ -2057,6 +2065,10 @@ function referenceView(viewId=state.activeViewId) {
 function referenceViewForMoment(moment) {
   return referenceViews().find((view) => view.clip_id === (moment.view_id || moment.clip_id));
 }
+function timelineViewId() {
+  const staticView = !state.clipEnabled && viewForReferenceImage(referenceViews(), activeReference());
+  return state.pendingViewId || staticView?.clip_id || state.activeViewId;
+}
 function viewFrameAtTime(view, time) {
   return referenceViews().length > 1 ? nearestFrameAtTime(view?.frames, time) : frameAtTime(view?.frames, time);
 }
@@ -2179,6 +2191,7 @@ function setReferenceClip(clip, {restore=false}={}) {
     [clip, ...(clip.views || [])].map((view) => [view.clip_id, view.name, view.fps, view.duration_sec, view.frames.length])]) : null;
   if (state.referenceClipSignature === signature) return;
   const replaced = (state.referenceClip?.clip_id || null) !== (clip?.clip_id || null);
+  const inspectedReference = !state.clipEnabled ? activeReference() : null;
   pauseTimeline();
   cacheMomentFrameIndices();
   if (replaced) annotationHistory.clear();
@@ -2187,6 +2200,8 @@ function setReferenceClip(clip, {restore=false}={}) {
   state.referenceClip = clip;
   state.referenceClipSignature = signature;
   if (!referenceViews().some((view) => view.clip_id === state.activeViewId)) state.activeViewId = clip?.clip_id || null;
+  const inspectedView = !restore && viewForReferenceImage(referenceViews(), inspectedReference);
+  if (inspectedView) state.activeViewId = inspectedView.clip_id;
   cacheMomentFrameIndices();
   // A newly published clip follows the timeline by default. Restore deliberate
   // static inspection on reload until the user next operates the timeline.
@@ -2247,7 +2262,7 @@ function scheduleTimelineDraft() {
 }
 function scrubTimeline(time, {final=false}={}) {
   if (!editable()) return;
-  const viewId = state.pendingViewId || state.activeViewId;
+  const viewId = timelineViewId();
   pauseTimeline();
   state.timelineTarget = clamp(time, 0, timelineDuration());
   state.pendingViewId = viewId !== state.activeViewId ? viewId : null;
@@ -2259,15 +2274,15 @@ function scrubTimeline(time, {final=false}={}) {
   });
 }
 function stepReferenceTimeline(direction) {
-  const view = referenceView();
+  const view = referenceView(timelineViewId());
   if (referenceViews().length > 1 && view?.frames?.length) {
     const index = view.frames.indexOf(viewFrameAtTime(view, state.time));
     const next = index + direction;
     if (next < 0 || next >= view.frames.length) return;
-    seekTimeline(view.frames[next].time_sec);
-  } else seekTimeline(stepTime(view?.frames, state.time, direction, view?.fps || timelineFps(), timelineDuration()));
+    seekTimeline(view.frames[next].time_sec, {viewId:view.clip_id});
+  } else seekTimeline(stepTime(view?.frames, state.time, direction, view?.fps || timelineFps(), timelineDuration()), {viewId:view?.clip_id});
 }
-async function seekTimeline(time, {playback=false, forcePose=false, viewId=state.activeViewId, preserveTime=false}={}) {
+async function seekTimeline(time, {playback=false, forcePose=false, viewId=timelineViewId(), preserveTime=false}={}) {
   if (!playback && !editable()) return false;
   if (playback && state.seeking) return false;
   if (!playback) { pauseTimeline(); hideTextEditor(); state.drag = null; }
@@ -2313,7 +2328,7 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=state
     if (view) state.activeViewId = view.clip_id;
     if (changed || forcePose) applyAnimationTime(next);
     syncTimelineReference({forceAlign:switchingView});
-    if (resumedReference) renderReferenceStrip();
+    if (resumedReference || switchingView) renderReferenceStrip();
     if (leavingSnapshot) { state.sceneView = 'live'; renderSceneView({persist:false}); }
     if (changed || !playback) updateReferenceGeometry();
     state.timelineTarget = null; state.pendingViewId = null;

@@ -1,4 +1,4 @@
-// All evidence uses the displayed reference timestamp, including irregular sequences.
+// Keep shared scene time and the displayed reference sample with each piece of evidence.
 export function frameAtTime(frames, time) {
   if (!frames?.length) return null;
   let low = 0, high = frames.length - 1;
@@ -18,6 +18,37 @@ export function nearestFrameAtTime(frames, time) {
   const index = frames.indexOf(before);
   const after = frames[index + 1];
   return after && Math.abs(after.time_sec - time) < Math.abs(before.time_sec - time) - 1e-7 ? after : before;
+}
+
+function cameraMatches(left, right) {
+  if (!left || !right) return false;
+  const matrix = (camera) => Array.isArray(camera.camera_to_world) && camera.camera_to_world.length === 4 &&
+    camera.camera_to_world.every((row) => Array.isArray(row) && row.length === 4) ? camera.camera_to_world.flat() : null;
+  const a = matrix(left), b = matrix(right);
+  const close = (x,y) => Number.isFinite(x) && Number.isFinite(y) && Math.abs(x-y) <= 1e-6;
+  if (!a || !b || !a.every((value,index) => close(value,b[index]))) return false;
+  const intrinsic = (camera) => {
+    const i = camera.intrinsics;
+    if (!i || !(i.width > 0) || !(i.height > 0)) return null;
+    return [i.width/i.height, i.fx/i.width, i.fy/i.height, i.cx/i.width, i.cy/i.height];
+  };
+  const ai = intrinsic(left), bi = intrinsic(right);
+  if (!ai || !bi || !ai.every((value,index) => close(value,bi[index]))) return false;
+  const ad = left.distortion || [], bd = right.distortion || [];
+  if (!Array.isArray(ad) || !Array.isArray(bd)) return false;
+  for (let index=0; index < Math.max(ad.length,bd.length); index++) {
+    if (!close(ad[index] ?? 0,bd[index] ?? 0)) return false;
+  }
+  return true;
+}
+
+// A calibrated thumbnail can select its corresponding video even when the
+// thumbnail and video frames have different resolutions. Ambiguous cameras
+// remain static references rather than guessing which clip the user intended.
+export function viewForReferenceImage(views, reference) {
+  if (!reference?.camera) return null;
+  const matches = views.filter((view) => view.frames?.some((frame) => cameraMatches(reference.camera,frame.camera)));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 export function stepTime(frames, time, direction, fps, duration) {
