@@ -53,12 +53,16 @@
 
         <section class="visual-pane scene-pane" aria-label="当前三维场景">
           <div class="pane-head"><div class="pane-heading"><span class="eyebrow">场景</span><h2 id="scene-title"></h2></div><div class="pane-actions">
+            <div class="compare-controls" role="group" aria-label="参考图叠加">
+              <button id="compare-toggle" class="compact-button compare-toggle" type="button" aria-pressed="true" aria-controls="compare-image" disabled title="开启或关闭参考图叠加">叠图</button>
+              <details id="compare-panel" class="popover compare-popover" data-keep-open="true"><summary aria-label="调整叠图透明度" title="调整叠图透明度"><span id="compare-summary">45%</span><span aria-hidden="true">⌄</span></summary><div class="popover-content compare-settings"><div class="compare-settings-heading"><label for="compare-opacity">透明度</label><output id="opacity-value" for="compare-opacity">45%</output></div><input id="compare-opacity" type="range" min="0" max="100" value="45" disabled aria-describedby="compare-status" /><div class="compare-presets" role="group" aria-label="常用透明度"><button class="compact-button" type="button" data-compare-opacity="25" disabled>25%</button><button class="compact-button" type="button" data-compare-opacity="45" disabled>45%</button><button class="compact-button" type="button" data-compare-opacity="75" disabled>75%</button></div><p id="compare-status" class="compare-caption" role="status">选择参考图后可叠加对比。</p></div></details>
+            </div>
             <button id="align-reference-button" class="compact-button align-button" type="button" disabled title="当前参考图没有相机位姿">对齐</button>
             <details class="popover view-popover"><summary>视角 </summary><div class="popover-content"><button id="frame-button" class="compact-button" type="button">聚焦选中对象</button><button id="reset-button" class="compact-button" type="button">重置视角</button><span id="camera-alignment-status" class="compare-caption" role="status">有相机位姿时可自动对齐。</span></div></details>
             <button id="freeze-button" class="compact-button emphasis-button" type="button">标注</button><button id="browse-button" class="compact-button hidden" type="button">返回 3D</button><button id="snapshot-button" class="compact-button hidden" type="button" title="打开画标记时保存的原截图；发送时会附带这张截图和原视角。">标注截图</button>
           </div></div>
+          <div class="scene-notice"><button id="new-scene-badge" class="new-scene-badge hidden" type="button" title="标记保留在原截图上，点击查看新结果"></button></div>
           <div id="scene-stage" class="stage scene-stage"><div id="viewport" class="viewport" aria-label="可旋转的 3D 场景"></div><div id="scene-snapshot-media" class="scene-snapshot-media hidden"><img id="scene-snapshot-image" alt="固定的场景标注截图" /><canvas id="scene-annotations" class="scene-annotations" aria-label="场景截图标注层"></canvas></div><img id="compare-image" class="compare-image hidden" alt="参考图叠层，仅用于视觉对比" /><div id="scene-hint" class="stage-hint">拖拽旋转 · 滚轮缩放 · 点击对象</div><div id="selected-chip" class="selected-chip hidden"></div></div>
-          <div class="compare-row"><label class="opacity-control" for="compare-opacity">叠图 <input id="compare-opacity" type="range" min="0" max="100" value="45" disabled /><span id="opacity-value">45%</span></label><button id="new-scene-badge" class="new-scene-badge hidden" type="button" title="标记保留在原截图上，点击查看新结果"></button></div>
         </section>
 
         <section id="timeline-panel" class="timeline-panel hidden" aria-label="动态场景时间轴">

@@ -148,7 +148,8 @@ export function setupMinimalLayout({getState}) {
       return;
     }
     const details = event.target.closest('details.popover, details#more-tools');
-    if (details && event.target.closest('button, label.upload-button')) closePopovers();
+    if (details && event.target.closest('summary')) closePopovers(details);
+    if (details && details.dataset.keepOpen !== 'true' && event.target.closest('button, label.upload-button')) closePopovers();
     if (event.target.closest('.tool-button, .reference-insert, [data-selection-level], #browse-button')) refresh();
   });
   document.addEventListener('pointerdown', (event) => {

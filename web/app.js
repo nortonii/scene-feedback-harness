@@ -50,8 +50,10 @@ const ui = {
   scope:id('feedback-scope'), range:id('feedback-range'), rangeStart:id('range-start'), rangeEnd:id('range-end'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
-  compareImage:id('compare-image'),
+  compareImage:id('compare-image'), compareToggle:id('compare-toggle'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
+  compareSummary:id('compare-summary'), compareStatus:id('compare-status'),
+  comparePresets:[...document.querySelectorAll('[data-compare-opacity]')],
   targetPicker:id('target-picker'), currentTarget:id('current-target'), targetSelect:id('target-select'),
   targetChoiceDetails:id('target-choice-details'),
   switchTarget:id('switch-target'), refreshTargets:id('refresh-targets'), targetHelp:id('target-help'),
@@ -76,6 +78,7 @@ const ui = {
   feedbackIntro:id('feedback-intro'),
   approvals:id('approval-list'), queue:id('queue-list'), conversation:id('conversation')
 };
+const comparePreferences = {sessionId:null, enabled:true, opacity:45, lastPositive:45};
 const state = {
   projectId:null, projectName:null, sceneDisplayName:null, projects:null, loadingProjects:false,
   projectLoadError:null, projectListSignature:null, projectModelChoice:null, projectEffortChoice:'',
@@ -352,6 +355,7 @@ function removeAnnotation(annotationId) {
 function setSession(session) {
   if (state.sessionId !== session.session_id) annotationHistory.clear();
   state.sessionId = session.session_id;
+  restoreComparePreferences();
   state.sessionStatus = session.status || 'open';
   state.feedbackCount = Number(session.feedback_count) || 0;
   id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
@@ -2111,6 +2115,82 @@ function updateSnapshotGeometry() {
   ui.snapshotMedia.style.height = Math.max(1, height * scale) + 'px';
   drawOverlays();
 }
+function restoreComparePreferences() {
+  if (!state.sessionId || comparePreferences.sessionId === state.sessionId) return;
+  Object.assign(comparePreferences, {sessionId:state.sessionId, enabled:true, opacity:45, lastPositive:45});
+  try {
+    const stored = JSON.parse(localStorage.getItem('astra-visual-compare:' + state.sessionId) || 'null');
+    if (typeof stored?.enabled === 'boolean') comparePreferences.enabled = stored.enabled;
+    if (Number.isFinite(stored?.opacity) && stored.opacity >= 0 && stored.opacity <= 100) {
+      comparePreferences.opacity = Math.round(stored.opacity);
+      if (comparePreferences.opacity > 0) comparePreferences.lastPositive = comparePreferences.opacity;
+    }
+    if (Number.isFinite(stored?.lastPositive) && stored.lastPositive > 0 && stored.lastPositive <= 100) {
+      comparePreferences.lastPositive = Math.max(1, Math.round(stored.lastPositive));
+    }
+    if (!comparePreferences.opacity) comparePreferences.enabled = false;
+  } catch { /* View controls still work when browser storage is unavailable. */ }
+  renderCompareControls();
+}
+function saveComparePreferences() {
+  if (!state.sessionId) return;
+  const {enabled, opacity, lastPositive} = comparePreferences;
+  try {
+    localStorage.setItem('astra-visual-compare:' + state.sessionId, JSON.stringify({enabled, opacity, lastPositive}));
+  } catch { /* Keep this browser-only preference independent of feedback evidence. */ }
+}
+function compareAvailable() {
+  return !!activeReference() && state.sceneView !== 'snapshot';
+}
+function renderCompareControls() {
+  const hasReference = !!activeReference();
+  const paused = hasReference && state.sceneView === 'snapshot';
+  const available = hasReference && !paused;
+  const {enabled, opacity} = comparePreferences;
+  const visible = available && enabled && opacity > 0;
+  const summary = !hasReference ? '—' : paused ? '暂停' : visible ? opacity + '%' : '关';
+  const status = !hasReference ? '先添加参考图，再使用叠图对比。'
+    : paused ? '固定截图中暂停叠图；点击「返回 3D」恢复。'
+    : visible ? '调整透明度，对照参考图与实时场景。' : '叠图已关闭，点击「叠图」开启。';
+  ui.compareImage.classList.toggle('hidden', !visible);
+  ui.compareImage.style.opacity = opacity / 100;
+  ui.compareOpacity.disabled = !available;
+  ui.compareOpacity.value = String(opacity);
+  ui.compareOpacity.setAttribute('aria-valuetext', opacity + '%');
+  ui.opacityValue.textContent = opacity + '%';
+  if (ui.compareToggle) {
+    ui.compareToggle.disabled = !available;
+    ui.compareToggle.setAttribute('aria-pressed', String(visible));
+    ui.compareToggle.classList.toggle('active', visible);
+    ui.compareToggle.title = !available ? status : visible ? '关闭叠图' : '开启叠图';
+  }
+  if (ui.compareSummary) ui.compareSummary.textContent = summary;
+  if (ui.compareStatus) ui.compareStatus.textContent = status;
+  for (const button of ui.comparePresets) {
+    const selected = visible && Number(button.dataset.compareOpacity) === opacity;
+    button.disabled = !available;
+    button.setAttribute('aria-pressed', String(selected));
+    button.classList.toggle('active', selected);
+  }
+}
+function setCompareOpacity(value) {
+  if (!compareAvailable() || !Number.isFinite(value)) return;
+  comparePreferences.opacity = Math.round(clamp(value, 0, 100));
+  comparePreferences.enabled = comparePreferences.opacity > 0;
+  if (comparePreferences.enabled) comparePreferences.lastPositive = comparePreferences.opacity;
+  renderCompareControls();
+  saveComparePreferences();
+}
+function toggleCompare() {
+  if (!compareAvailable()) return;
+  comparePreferences.enabled = !(comparePreferences.enabled && comparePreferences.opacity > 0);
+  if (comparePreferences.enabled && comparePreferences.opacity === 0) {
+    comparePreferences.opacity = comparePreferences.lastPositive;
+  }
+  renderCompareControls();
+  saveComparePreferences();
+}
+
 function renderSceneView({persist=true}={}) {
   const hasSnapshot = !!state.snapshot;
   if (!hasSnapshot) state.sceneView = 'live';
@@ -2125,7 +2205,7 @@ function renderSceneView({persist=true}={}) {
     ui.newSceneBadge.textContent = '标注 v' + state.snapshot.scene_revision + ' · 查看最新 v' + state.sceneRevision + ' ↗';
     ui.newSceneBadge.title = '这些标记保留在版本 ' + state.snapshot.scene_revision + ' 的截图上。点击查看版本 ' + state.sceneRevision + '。';
   }
-  ui.compareImage.classList.toggle('hidden', showingSnapshot || !activeReference());
+  renderCompareControls();
   controls.enabled = editable() && state.mode === 'select' && !showingSnapshot;
   updateSnapshotGeometry();
   updateMode();
@@ -2239,8 +2319,7 @@ function showActiveReference() {
   ui.referenceTitle.textContent = ref?.name || '照片里的目标';
   updateAlignmentStatus();
   renderHumanPosePanel();
-  ui.compareImage.classList.toggle('hidden', !hasReference || state.sceneView === 'snapshot');
-  ui.compareOpacity.disabled = !hasReference;
+  renderCompareControls();
   if (!hasReference) {
     ui.referenceImage.removeAttribute('src');
     drawOverlays();
@@ -2255,7 +2334,6 @@ function showActiveReference() {
     delete ui.compareImage.dataset.sourceUrl;
     ui.compareImage.src = resourceURL(compareUrl);
   }
-  ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
   if (ui.referenceImage.complete) updateReferenceGeometry();
 }
 function imageMatchesUrl(image, url) {
@@ -2279,6 +2357,7 @@ function installTimelineImages(image, overlay) {
   overlay.style.cssText = ui.compareImage.style.cssText;
   overlay.onload = resizeScene;
   ui.compareImage.replaceWith(overlay); ui.compareImage = overlay;
+  renderCompareControls();
 }
 function humanJobName(job) {
   const ordered = [...state.humanJobs].sort((a,b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || a.job_id.localeCompare(b.job_id));
@@ -4167,10 +4246,12 @@ function bindEvents() {
   ui.browse.addEventListener('click', () => { if (editable()) setMode('select'); });
   ui.newSceneBadge.addEventListener('click', () => { if (editable()) setMode('select'); });
   ui.snapshotButton.addEventListener('click', () => { if (!editable()) return; if (state.snapshot?.time_sec !== undefined) openMoment(state.snapshot.id); else { state.sceneView = 'snapshot'; renderSceneView(); } });
-  ui.compareOpacity.addEventListener('input', () => {
-    ui.opacityValue.textContent = ui.compareOpacity.value + '%';
-    ui.compareImage.style.opacity = Number(ui.compareOpacity.value) / 100;
-  });
+  ui.compareToggle?.addEventListener('click', toggleCompare);
+  ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
+  for (const button of ui.comparePresets) {
+    button.addEventListener('click', () => setCompareOpacity(Number(button.dataset.compareOpacity)));
+  }
+  renderCompareControls();
   for (const [canvas,pane] of [[ui.referenceCanvas,'reference'],[ui.sceneCanvas,'scene'],[renderer.domElement,'scene']]) {
     canvas.addEventListener('pointerdown', (event) => annotationPointerDown(event, pane));
     canvas.addEventListener('pointermove', annotationPointerMove);

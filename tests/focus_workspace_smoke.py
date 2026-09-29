@@ -222,6 +222,93 @@ def verify_chat_resize(page, store, submissions, screenshots):
         page.screenshot(path=str(screenshots / "resized-reset.png"))
 
 
+def verify_overlay_toolbar(page, store, screenshots):
+    toggle = page.locator("#compare-toggle")
+    panel = page.locator("#compare-panel")
+    slider = page.locator("#compare-opacity")
+    overlay = page.locator("#compare-image")
+    original = draft(page)
+    expect(toggle).to_be_enabled()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(slider).to_have_value("45")
+    panel.locator("summary").click()
+    for opacity in (25, 45, 75):
+        page.locator(f'[data-compare-opacity="{opacity}"]').click()
+        expect(slider).to_have_value(str(opacity))
+        expect(overlay).to_have_css("opacity", str(opacity / 100))
+        assert panel.evaluate("el => el.open"), "Selecting a preset closed the opacity popover"
+    slider.focus()
+    slider.press("ArrowRight")
+    expect(slider).to_have_value("76")
+    expect(overlay).to_have_css("opacity", "0.76")
+    assert panel.evaluate("el => el.open")
+    page.locator('[data-compare-opacity="75"]').click()
+    if screenshots:
+        page.screenshot(path=str(screenshots / "overlay-popover.png"))
+    panel.locator("summary").click()
+    assert draft(page) == original, "Display-only opacity controls changed the visual feedback draft"
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(overlay).to_be_hidden()
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(overlay).to_be_visible()
+    expect(overlay).to_have_css("opacity", "0.75")
+    page.reload()
+    wait_ready(page)
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(slider).to_have_value("75")
+
+    # Reopen the existing marked screenshot, preserving its original evidence.
+    page.locator("#snapshot-button").click()
+    expect(overlay).to_be_hidden()
+    expect(toggle).to_be_disabled()
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(slider).to_be_disabled()
+    for opacity in (25, 45, 75):
+        expect(page.locator(f'[data-compare-opacity="{opacity}"]')).to_be_disabled()
+    preference = page.evaluate("""() => JSON.parse(localStorage.getItem(
+      'astra-visual-compare:' + new URL(location.href).searchParams.get('session_id')) || '{}')""")
+    assert preference["enabled"] is True and preference["opacity"] == 75
+    page.locator("#browse-button").click()
+    expect(toggle).to_be_enabled()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(overlay).to_be_visible()
+    expect(overlay).to_have_css("opacity", "0.75")
+    for field in ("note", "annotations", "snapshot", "camera", "referencedSceneNodes"):
+        assert draft(page).get(field) == original.get(field), field
+
+    panel.locator("summary").click()
+    slider.focus()
+    slider.press("Home")
+    expect(slider).to_have_value("0")
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(overlay).to_be_hidden()
+    page.reload()
+    wait_ready(page)
+    expect(slider).to_have_value("0")
+    toggle.click()
+    expect(slider).to_have_value("75")
+    expect(overlay).to_be_visible()
+    expect(overlay).to_have_css("opacity", "0.75")
+    toggle.click()
+    image_url = "data:image/png;base64," + base64.b64encode(
+        (ROOT / "examples/room_demo/reference.png").read_bytes()).decode()
+    store.add_reference(store.workspace()["session_id"], "alternate-reference.png", image_url)
+    page.reload()
+    wait_ready(page)
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(slider).to_have_value("75")
+    expect(overlay).to_be_hidden()
+    page.get_by_role("button", name="查看 alternate-reference.png", exact=True).click()
+    expect(page.locator("#reference-title")).to_have_text("alternate-reference.png")
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(overlay).to_be_hidden()
+    page.get_by_role("button", name="查看 reference.png", exact=True).click()
+    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(overlay).to_be_hidden()
+
+
 def verify_compact_header(page, store, screenshots):
     if page.locator("#chat-launcher").is_visible():
         page.locator("#chat-launcher").click()
@@ -316,6 +403,10 @@ def verify_project_isolation(page, server, screenshots):
         assert child.gateway.adapter is None and len(created_tasks) == 1
         assert child.store.scene()["objects"] == []
         expect(page.locator("#reference-empty")).to_be_visible()
+        expect(page.locator("#compare-toggle")).to_be_disabled()
+        expect(page.locator("#compare-opacity")).to_be_disabled()
+        expect(page.locator("#compare-opacity")).to_have_value("45")
+        expect(page.locator("#compare-image")).to_be_hidden()
         expect(page.locator("#timeline-panel")).to_be_hidden()
         expect(page.locator("#feedback-note")).to_have_value("")
         expect(page.locator("#conversation")).not_to_contain_text(root_event_marker)
@@ -337,6 +428,9 @@ def verify_project_isolation(page, server, screenshots):
         expect(page.locator("#feedback-note")).to_have_value(root_note)
         assert abs(page.locator("#chat-dock").bounding_box()["height"] - root_dock_height) < 2
         expect(page.locator("#reference-view-select")).to_be_visible()
+        expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
+        expect(page.locator("#compare-opacity")).to_have_value("75")
+        expect(page.locator("#compare-image")).to_be_hidden()
         expect(page.locator("#conversation")).to_contain_text(root_event_marker)
         assert root.store.list_all_feedback() == original_feedback
         assert child.store.list_all_feedback() == []
@@ -492,6 +586,8 @@ def main():
                 passed("scene annotations and frozen evidence survive collapse; reference insertion restores composer focus")
                 verify_chat_resize(page, store, submissions, screenshots)
                 passed("pointer and keyboard resizing preserve draft and height; collapsed history disables resize until explicitly reopened, including after reload")
+                verify_overlay_toolbar(page, store, screenshots)
+                passed("overlay toolbar presets and slider apply immediately, remember opacity, pause on marked screenshots and keep saved off preference across reference changes")
 
                 page.locator("#chat-collapse").click()
                 store.workspace_event("assistant_message", {"text": "收起时的新回复：标记已收到。"})
@@ -666,12 +762,17 @@ def main():
                 page.locator("#reference-view-select").select_option(secondary_id)
                 expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
                 expect(page.locator("#reference-title")).to_have_text("side-002.png")
+                expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
+                expect(page.locator("#compare-image")).to_be_hidden()
                 assert page.locator("#timeline-seek").input_value() == before_view_time
                 page.reload()
                 wait_ready(page)
                 expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
+                expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
+                expect(page.locator("#compare-opacity")).to_have_value("75")
+                expect(page.locator("#compare-image")).to_be_hidden()
                 assert page.locator("#timeline-seek").input_value() == before_view_time
-                passed("synchronized reference views preserve active time and selected camera across reload")
+                passed("synchronized reference views preserve active time, selected camera and disabled overlay across reload")
 
                 for width, height in [(1280, 720), (768, 900), (390, 844), (340, 844)]:
                     page.set_viewport_size({"width": width, "height": height})
