@@ -104,6 +104,10 @@ select { min-width: 0; font-size: 12px; }
 .stage:hover .stage-hint, body[data-tool]:not([data-tool=select]) .stage-hint { opacity: 1; }
 .selected-chip { position: absolute; z-index: 5; top: 12px; left: 12px; max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 6px 8px; border-left: 2px solid var(--ink); color: var(--ink); background: #f5f4efdf; font-size: 10px; pointer-events: none; }
 .reference-strip { display: flex; flex: none; align-items: center; gap: 7px; min-height: 34px; padding-top: 4px; overflow-x: auto; scrollbar-width: thin; }
+.reference-navigation { display: flex; flex: none; align-items: center; gap: 10px; min-width: 0; }
+.reference-navigation .reference-strip { flex: 1; min-width: 0; }
+.reference-view-control { display: flex; align-items: center; gap: 6px; flex: none; font-size: 11px; color: var(--muted); }
+.reference-view-control select { max-width: 170px; padding: 4px 6px; font-size: 11px; color: var(--ink); }
 .reference-strip:not(:has(.thumb + .thumb)):not(:has(.compact-button)) { visibility: hidden; }
 .thumb { flex: none; position: relative; width: 45px; height: 29px; padding: 0; background: var(--stage); border: 1px solid transparent; }
 .thumb.active { border-color: var(--ink); }
@@ -119,6 +123,7 @@ input[type=range] { accent-color: #292925; }
 .compare-caption { font-size: 11px; line-height: 1.6; color: var(--muted); }
 .clip-import { display: grid; gap: 7px; padding-top: 9px; border-top: 1px solid var(--line); font-size: 11px; }
 .clip-import input { width: 65px; }
+.clip-import #clip-name { width: 100%; }
 #clip-import-status { color: var(--muted); font-size: 10px; }
 .timeline-panel { grid-column: 1 / -1; min-width: 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 11px; }
 .timeline-controls { display: flex; align-items: center; gap: 8px; }

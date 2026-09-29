@@ -62,21 +62,26 @@
 
 每张图的相机元数据包含 GLB 世界坐标中的 `camera_to_world`（按行排列的 4×4 矩阵）和以该图像素为单位的 `intrinsics`（`width`、`height`、`fx`、`fy`、`cx`、`cy`）。已有图片可通过受保护的 `POST /api/workspace/reference-cameras` 接口按 `reference_id` 附加 `camera` 与可选的 `alignment_image_data_url`；未来导入的图片可由工作台数据目录中的 `reference_cameras.json` 清单按文件名前缀匹配（[示例](examples/reference_cameras.example.json)）。放入清单后，对已有图片发送 `{"apply_manifest":true}` 即可应用。相机位姿应与发布的 GLB 使用同一世界坐标系。
 
-## 动态场景：共享时间轴与多帧反馈
+## 动态场景：多机位共享时间轴与多帧反馈
 
-参考图序列或视频可以与带动画的 GLB 共用时间轴。播放、暂停、拖动时间轴和逐帧前后跳转，会同时更新参考帧与 3D 动画；静态图片和静态 GLB 的原有流程仍可使用。GLB 支持节点位移、旋转、缩放、骨骼和固定拓扑的 morph 动画；可变拓扑网格缓存、流体与实时物理模拟尚未接入。
+同一片段的多个参考机位（图片序列或视频）可以与带动画的 GLB 共用时间轴。播放、暂停、拖动时间轴和逐帧前后跳转，会同时更新参考帧与 3D 动画；静态图片和静态 GLB 的原有流程仍可使用。GLB 支持节点位移、旋转、缩放、骨骼和固定拓扑的 morph 动画；可变拓扑网格缓存、流体与实时物理模拟尚未接入。
 
+- 切换参考机位时保持当前时间，并自动按新机位当前帧的相机对齐；没有相机数据的机位可手动比较。各机位的 `time_sec` 应使用同一时间起点。一次反馈可引用多个机位的标记；每个标记保留所属机位名称、`view_id`、帧号/时间、原图及相机。
 - 暂停时可查看静态缩略图；播放、拖动时间轴或前后切帧会自动回到动态参考序列，新发布的序列也会恢复同步。已有标记仍保留在原始帧上。
-- 开始圈画时自动暂停，标记记录当时的时间、参考帧、相机和场景版本。可以保留最多 8 个不同时间点的场景快照，切回对应时间点继续查看或标注。
-- 一次提示可以引用多个时间点的标记和物体，并在时间轴「选项」中选择「所标帧」「时间区间」或「整个片段」作为反馈范围。区间只是表达修改范围，不会把画线变成轨迹或几何约束。
-- 单独或批量引用动态标记时，提示中显示「片段第 N 帧 · T s」；帧号按导入或采样序列从 1 开始，保存后的标记不会随时间轴移动而改变帧号和时间。送给模型的 `frame_index` 按保存的参考图 ID 与序列顺序从 0 开始计算；静态参考图或仅 GLB 的标记只附时间。
-- 标记默认只显示在自己的帧上。发送时交付所选时间点的原图、标注图和场景快照，以及时间戳、相机、对象引用与场景版本；不会把整段视频逐帧塞给模型。
+- 开始圈画时自动暂停，标记记录当时的时间、参考帧、相机和场景版本。可以保留所有机位合计最多 8 条时刻快照，切回对应时间点继续查看或标注。
+- 一次提示可以引用多个机位、多个时间点的标记和物体，并在时间轴「选项」中选择「所标帧」「时间区间」或「整个片段」作为反馈范围。区间只是表达修改范围，不会把画线变成轨迹或几何约束。
+- 单独或批量引用动态标记时，提示中显示「片段第 N 帧 · T s」；引用同时标明机位名称，对应结构化反馈保留 `view_id`；帧号按该机位导入或采样的序列从 1 开始，保存后的标记不会随时间轴移动而改变帧号和时间。送给模型的 `frame_index` 按保存的参考图 ID 与该机位的序列顺序从 0 开始计算；静态参考图或仅 GLB 的标记只附时间。
+- 标记默认只显示在所属机位的对应帧上。发送时交付所选时间点的原图、标注图和场景快照，以及时间戳、相机、对象引用与场景版本；不会把整段视频逐帧塞给模型。
 - 每帧可带自己的相机位姿，切帧时按对应相机对齐。更新 GLB 后保留当前播放位置；拖动时间轴不会增加 `scene_revision`。
 - 导出 GLB 时，可在节点的 `extras` 中保留 `semantic_id` 或 `stable_id`，帮助模型跨帧及重新导出识别同一物体。节点路径只定位当前版本内的节点；名称和路径不保证跨版本不变，也不会自动跟踪物体。
 
-在参考图区域的「导入」菜单中，可按指定 FPS 导入有序图片，或导入视频并由服务端抽帧。视频导入需要服务主机安装可执行的 `ffmpeg` 和 `ffprobe`；图片序列不需要它们。视频按公共时间网格采样，默认 10 FPS，每个片段最多 600 帧，超过上限会报错，请降低采样率或先截取所需片段。
+在参考图区域的「导入」菜单中，可多选视频，每个视频分别追加为一个机位，由服务端抽帧；有序图片每次导入组成一个机位，使用指定 FPS。浏览器导入会追加机位，并保留旧机位和已有标记。视频导入需要服务主机安装可执行的 `ffmpeg` 和 `ffprobe`；图片序列不需要它们。视频按公共时间网格采样，默认 10 FPS。最多 8 个机位，每个机位最多 600 帧；超过上限会报错，请降低采样率或先截取所需片段。
 
-Codex 也可调用 `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)` 导入项目内的素材；`manifest_path` 与 `video_path` 二选一。图片序列使用清单自己的 `fps`（省略时为 30），工具参数 `fps` 仅用于视频（默认 10）。每帧可指定 `time_sec`；省略时按从 0 开始的帧序号除以清单 FPS 计算，不从文件名推测帧率。帧路径可相对清单文件指定，但所有素材必须位于项目内。FPS 范围为 0.1–120；浏览器视频上传上限 40 MiB，项目本地视频上限 250 MiB。`clear=True` 移除当前参考片段，不改变场景版本。
+Codex 也可调用 `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False, append_view=False, view_name=None)` 导入项目内的素材；`manifest_path` 与 `video_path` 二选一。`append_view=True` 追加机位并保留旧素材和标记，`view_name` 可指定新机位名称。默认 `append_view=False` 延续旧接口的替换行为，会替换整组旧机位；替换前请先提交依赖旧帧的反馈。`clear=True` 移除整组参考机位，不改变场景版本。
+
+图片序列使用清单自己的 `fps`（省略时为 30），工具参数 `fps` 仅用于视频（默认 10）。每帧可指定 `time_sec`；省略时按从 0 开始的帧序号除以清单 FPS 计算，不从文件名推测帧率。FPS 范围为 0.1–120。容量上限按机位独立检查：浏览器视频文件或图片序列总量为 40 MiB；项目本地视频文件、解码帧总量或图片序列总量为 250 MiB。所有输入文件必须位于项目内。
+
+现有单片段会作为主机位继续使用，原来的 `clip_id`、帧与标记保留。同一 `reference_clip` 顶层保留主机位字段，`views` 数组只存附加机位；追加时主 `clip_id` 保持稳定，各机位自身的 `clip_id` 用作 `view_id`。这项功能组织多机位查看与反馈，几何修改仍由同一 Codex 任务完成。
 
 图片序列清单示例（所有输入文件须位于当前项目内）：
 
@@ -90,6 +95,8 @@ Codex 也可调用 `workspace_set_reference_clip(manifest_path=None, video_path=
   ]
 }
 ```
+
+多机位批量清单见 [reference_multiview.example.json](examples/reference_multiview.example.json)：顶层可设 `name`，`views` 中每项可设机位 `name`、`fps`、`duration_sec`，并从 `frames`、`manifest_path`、`video_path` 中选择一种素材来源。帧条目支持 `path`、可选的 `time_sec`、`name` 和 `camera`；视频可附 `camera_manifest_path`。相对路径基于外层清单，嵌套清单的帧路径基于该清单自身。第一项作为主机位；`append_view=True` 将整批追加到现有组。示例相机数值须替换为实际标定。
 
 要保留相机对齐，请通过清单 / MCP 导入：在序列的每个帧条目内添加前文定义的 `camera`。浏览器只导入图片文件或视频时不会自动获得相机位姿。视频可另传 `camera_manifest_path`；固定相机清单示例如下（须将示例值替换为实际标定）：
 
@@ -108,7 +115,8 @@ Codex 也可调用 `workspace_set_reference_clip(manifest_path=None, video_path=
 
 ```text
 workspace_set_reference_clip(manifest_path="/absolute/path/to/project/clip.json")
-workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json")
+workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_multiview.json", append_view=True)
+workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
 ## 快速试用：房间与柜子
@@ -202,7 +210,7 @@ LAN_IP=192.168.1.10
 | `workspace_get_context` | 读取当前参考图、场景版本和项目上下文 |
 | `workspace_get_feedback` | 读取已提交反馈及其实际图像 |
 | `workspace_publish_scene` | 校验并发布新的 GLB，检查预期版本，通知页面刷新 |
-| `workspace_set_reference_clip` | 导入带时间戳及可选逐帧相机的参考图序列，或用 FFmpeg 对项目内的视频抽帧 |
+| `workspace_set_reference_clip` | 导入单机位或多机位清单，或用 FFmpeg 对项目内的视频抽帧；`append_view=True` 追加机位 |
 | `workspace_request_feedback` | 默认模式：在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |
 | `request_visual_feedback` / `wait_visual_feedback` | 未绑定的外部 MCP 模式：等待提交并把图文作为工具结果交回；绑定桌面任务时，前者返回页面链接，提交自动创建新回合 |
 | `get_visual_feedback` | 外部 MCP 模式：读取已提交的视觉反馈 |

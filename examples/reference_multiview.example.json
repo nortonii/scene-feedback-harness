@@ -1,0 +1,179 @@
+{
+  "name": "assembly-review",
+  "views": [
+    {
+      "name": "camera_A",
+      "fps": 10,
+      "duration_sec": 0.2,
+      "frames": [
+        {
+          "path": "frames/camera_A/0000.png",
+          "time_sec": 0.0,
+          "camera": {
+            "camera_to_world": [
+              [
+                1,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                1,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                1
+              ]
+            ],
+            "intrinsics": {
+              "width": 1920,
+              "height": 1080,
+              "fx": 1200,
+              "fy": 1200,
+              "cx": 960,
+              "cy": 540
+            }
+          }
+        },
+        {
+          "path": "frames/camera_A/0001.png",
+          "time_sec": 0.1,
+          "camera": {
+            "camera_to_world": [
+              [
+                1,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                1,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                1
+              ]
+            ],
+            "intrinsics": {
+              "width": 1920,
+              "height": 1080,
+              "fx": 1200,
+              "fy": 1200,
+              "cx": 960,
+              "cy": 540
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "camera_B",
+      "fps": 10,
+      "duration_sec": 0.2,
+      "frames": [
+        {
+          "path": "frames/camera_B/0000.png",
+          "time_sec": 0.0,
+          "camera": {
+            "camera_to_world": [
+              [
+                1,
+                0,
+                0,
+                1
+              ],
+              [
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                1,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                1
+              ]
+            ],
+            "intrinsics": {
+              "width": 1920,
+              "height": 1080,
+              "fx": 1200,
+              "fy": 1200,
+              "cx": 960,
+              "cy": 540
+            }
+          }
+        },
+        {
+          "path": "frames/camera_B/0001.png",
+          "time_sec": 0.1,
+          "camera": {
+            "camera_to_world": [
+              [
+                1,
+                0,
+                0,
+                1
+              ],
+              [
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                1,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                1
+              ]
+            ],
+            "intrinsics": {
+              "width": 1920,
+              "height": 1080,
+              "fx": 1200,
+              "fy": 1200,
+              "cx": 960,
+              "cy": 540
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

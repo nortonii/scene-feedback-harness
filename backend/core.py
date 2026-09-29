@@ -532,11 +532,48 @@ class SceneStore:
                 payload = {**payload, "fps": fps_value(payload.get("fps", 10)), "duration_sec": duration}
                 source_type = "video"
             clip = prepare_clip(self, payload, local_frames=local_frames, source_type=source_type,
-                                byte_limit=byte_limit or MAX_BROWSER_CLIP_BYTES)
+                                byte_limit=byte_limit or MAX_BROWSER_CLIP_BYTES, write_media=False)
+        return self._set_prepared_reference_views(session_id, payload, [] if clip is None else [clip])
+
+    def _set_prepared_reference_views(self, session_id: str, payload: dict[str, Any], prepared: list[dict[str, Any]]) -> dict[str, Any]:
+        """Publish all validated views together, preserving the old group on failure."""
+        from dynamic import MAX_REFERENCE_VIEWS, clip_name, publish_prepared_clip, reference_views
+        append = payload.get("append_view", False)
+        if type(append) is not bool:
+            raise APIError(400, "append_view must be a boolean")
+        replace_id = payload.get("replace_view_id")
+        if replace_id is not None and (not isinstance(replace_id, str) or not replace_id):
+            raise APIError(400, "replace_view_id must identify a current view")
+        if append and replace_id is not None:
+            raise APIError(400, "choose append_view or replace_view_id")
         with self.lock:
             session = self.state["sessions"].get(session_id)
             if session is None or session["status"] != "open":
                 raise APIError(409, "session changed while importing the clip")
+            previous = session.get("reference_clip")
+            old_views = reference_views(previous)
+            if replace_id is not None and (len(prepared) != 1 or replace_id not in {view["clip_id"] for view in old_views}):
+                raise APIError(400, "replace_view_id must identify one current reference view")
+            count = len(old_views) + len(prepared) if append else len(old_views) if replace_id else len(prepared)
+            if count > MAX_REFERENCE_VIEWS or (not prepared and payload.get("clear") is not True):
+                raise APIError(400, "reference group must contain 1 to 8 views")
+            group_name = payload.get("group_name")
+            if group_name is not None:
+                group_name = clip_name(group_name)
+            published = [publish_prepared_clip(self, view) for view in prepared]
+            if replace_id:
+                published[0]["clip_id"] = replace_id
+                views = [published[0] if view["clip_id"] == replace_id else view for view in old_views]
+            else:
+                views = old_views + published if append else published
+            clip = copy.deepcopy(views[0]) if views else None
+            if clip is not None:
+                clip.pop("views", None)
+                if len(views) > 1:
+                    clip["views"] = copy.deepcopy(views[1:])
+                clip["views_revision"] = (previous or {}).get("views_revision", 0) + 1
+                if group_name is not None:
+                    clip["group_name"] = group_name
             session["reference_clip"] = clip
             self._save()
             return {"session_id": session_id, "reference_clip": copy.deepcopy(clip)}
@@ -619,15 +656,17 @@ class SceneStore:
 
     def set_reference_cameras(self, session_id: str, updates: Any) -> dict[str, Any]:
         """Attach calibrated views without changing reference pixels or scene revision."""
+        from dynamic import MAX_CLIP_FRAMES, MAX_REFERENCE_VIEWS, reference_frames
         with self.lock:
             session = self.state["sessions"].get(session_id)
             if session is None:
                 raise APIError(404, "session not found")
             if session["status"] != "open":
                 raise APIError(409, "session is closed")
-            if not isinstance(updates, list) or not 1 <= len(updates) <= MAX_REFERENCES:
-                raise APIError(400, "cameras must contain 1 to 8 reference updates")
-            references = {reference["id"]: reference for reference in session.get("reference_images", [])}
+            if not isinstance(updates, list) or not 1 <= len(updates) <= MAX_REFERENCES + MAX_CLIP_FRAMES * MAX_REFERENCE_VIEWS:
+                raise APIError(400, "cameras must contain bounded reference updates")
+            dynamic_references = reference_frames(session.get("reference_clip"))
+            references = {reference["id"]: reference for reference in session.get("reference_images", []) + dynamic_references}
             prepared = []
             seen = set()
             for item in updates:
@@ -669,8 +708,10 @@ class SceneStore:
                         old_alignment = self.media_dir / old_alignment_url.rsplit("/", 1)[-1] if isinstance(old_alignment_url, str) else None
                         if old_camera != camera or old_alignment is None or not old_alignment.is_file() or old_alignment.read_bytes() != alignment:
                             reference["alignment_image_url"] = self._write_media(alignment)
+            if session.get("reference_clip") and seen & {frame["id"] for frame in dynamic_references}:
+                session["reference_clip"]["views_revision"] = session["reference_clip"].get("views_revision", 0) + 1
             self._save()
-            return {"session_id": session_id, "reference_images": copy.deepcopy(session["reference_images"])}
+            return {"session_id": session_id, "reference_images": copy.deepcopy(session["reference_images"]), "reference_clip": copy.deepcopy(session.get("reference_clip"))}
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         with self.lock:
@@ -1041,7 +1082,8 @@ class SceneStore:
                     clips = frame.get("animation_clips", [])
                     if isinstance(clips, list):
                         model_ids.update(item.get("object_id") for item in clips if isinstance(item, dict) and isinstance(item.get("object_id"), str) and ID_RE.fullmatch(item["object_id"]))
-            clip_references = (session.get("reference_clip") or {}).get("frames", [])
+            from dynamic import reference_frames, reference_clip_metadata
+            clip_references = reference_frames(session.get("reference_clip"))
             references_by_id = {image["id"]: image for image in session.get("reference_images", []) + clip_references}
             reference_ids = set(references_by_id)
             active_reference_id = payload.get("active_reference_id")
@@ -1142,7 +1184,7 @@ class SceneStore:
                 feedback["timeline"] = timeline
                 feedback["dynamic_frames"] = [{**item["frame"], **{field + "_url": self._write_media(data) for field, data in item["images"].items()}} for item in dynamic_frames]
                 if session.get("reference_clip"):
-                    feedback["reference_clip"] = {key: copy.deepcopy(value) for key, value in session["reference_clip"].items() if key != "frames"}
+                    feedback["reference_clip"] = reference_clip_metadata(session["reference_clip"])
             if active_reference_id is not None:
                 feedback["active_reference_id"] = active_reference_id
             if aligned_reference_id is not None:

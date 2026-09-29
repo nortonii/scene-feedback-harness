@@ -256,7 +256,7 @@ def _make_server_unlocked(
                 raise APIError(403, "open a workbench access link first")
 
             if self.command == "GET" and path == "/api/health":
-                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if external_review else "appserver"})
+                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if external_review else "appserver"})
             if self.command == "GET" and path == "/api/workspace/state":
                 state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
                 state["browser_url"] = self._browser_url(state["session_id"])

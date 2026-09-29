@@ -62,21 +62,26 @@ Selecting a reference with camera metadata automatically moves the 3D view to it
 
 Each reference camera stores `camera_to_world` (a row-major 4×4 matrix in the GLB world) and pixel-based `intrinsics` (`width`, `height`, `fx`, `fy`, `cx`, `cy`). Attach `camera` and optional `alignment_image_data_url` to an existing image by its `reference_id` through the protected `POST /api/workspace/reference-cameras` endpoint. A `reference_cameras.json` manifest in the private workbench data directory matches camera metadata by filename prefix on future imports ([example](examples/reference_cameras.example.json)); send `{"apply_manifest":true}` to the same endpoint to apply it to existing images. Camera poses and the published GLB must use the same world coordinates.
 
-## Dynamic scenes: shared timeline and feedback across frames
+## Dynamic scenes: multiple views on a shared timeline
 
-A reference image sequence or video can share a timeline with an animated GLB. Play, pause, seek, and stepping to the previous or next sampled frame update both the reference and the 3D animation. The existing static-image and static-GLB workflow remains available. GLB animation supports node translation, rotation, scale, skinning, and morph targets with fixed topology. Variable-topology mesh caches, fluids, and live physics simulation are not integrated yet.
+Multiple reference views of one clip, each an image sequence or video, can share a timeline with an animated GLB. Play, pause, seek, and stepping to the previous or next sampled frame update both the reference and the 3D animation. The existing static-image and static-GLB workflow remains available. GLB animation supports node translation, rotation, scale, skinning, and morph targets with fixed topology. Variable-topology mesh caches, fluids, and live physics simulation are not integrated yet.
 
+- Switching reference views keeps the current time and automatically aligns to the new view’s current-frame camera; views without camera metadata can be compared manually. Use the same time origin for each view’s `time_sec`. One submission can reference marks from multiple views; each mark retains its view name, `view_id`, frame/time, original image, and camera.
 - Inspect static thumbnails while paused; playing, seeking, or stepping to the previous or next frame automatically returns to the dynamic reference sequence. A newly published sequence resumes synchronization; saved marks keep their original frames.
-- Starting a mark pauses playback and records its time, reference frame, camera, and scene revision. Keep up to 8 scene snapshots from different moments and return to a moment to review or annotate it.
-- One prompt can reference marks and objects from several moments. Use the timeline’s `选项` menu to choose the marked frames (`所标帧`), a time interval, or the whole clip as the feedback scope. The interval expresses the requested scope; drawn lines are not interpreted as motion paths or geometric constraints.
-- Single and bulk citations of timed marks show `片段第 N 帧 · T s` (clip frame N · T s). The ordinal starts at 1 within the imported or sampled sequence; saved marks keep their own frame and time as the timeline moves. The model receives a zero-based `frame_index` derived from the saved reference ID and sequence order. Static-reference or GLB-only marks show only the time.
-- Marks appear on their own frame. A submission includes original and annotated references and scene snapshots for the selected moments, plus timestamps, cameras, object references, and scene revisions. The whole video is not sent frame by frame to the model.
+- Starting a mark pauses playback and records its time, reference frame, camera, and scene revision. Keep up to 8 saved moments in total across all views and return to a moment to review or annotate it.
+- One prompt can reference marks and objects from several views and moments. Use the timeline’s `选项` menu to choose the marked frames (`所标帧`), a time interval, or the whole clip as the feedback scope. The interval expresses the requested scope; drawn lines are not interpreted as motion paths or geometric constraints.
+- Single and bulk citations of timed marks show `片段第 N 帧 · T s` (clip frame N · T s). Citations also show the view name; structured feedback carries `view_id`. The ordinal starts at 1 within that view’s imported or sampled sequence; saved marks keep their own frame and time as the timeline moves. The model receives a zero-based `frame_index` derived from the saved reference ID and that view’s sequence order. Static-reference or GLB-only marks show only the time.
+- Marks appear on their own view and frame. A submission includes original and annotated references and scene snapshots for the selected moments, plus timestamps, cameras, object references, and scene revisions. The whole video is not sent frame by frame to the model.
 - Each reference frame can carry its own camera pose, used for alignment when that frame is selected. Publishing a new GLB preserves the playback position; seeking does not increase `scene_revision`.
 - Preserve `semantic_id` or `stable_id` in node `extras` when exporting a GLB to help identify the same object across frames and exports. A node path locates a node only within its scene revision. Names and paths are not guaranteed to survive a new export; this does not automatically track objects.
 
-Use the reference pane’s `导入` menu to import an ordered image sequence at a chosen FPS or a video for server-side sampling. Video import requires executable `ffmpeg` and `ffprobe` on the service host; image sequences do not. Video is sampled on a common time grid at 10 FPS by default, with a maximum of 600 frames per clip. Imports exceeding the limit fail; lower the sampling rate or trim the clip first.
+Use the reference pane’s `导入` menu to select several videos; each is appended as a separate view and sampled on the server. Each ordered-image import creates one view at the chosen FPS. Browser imports append views and preserve existing views and marks. Video import requires executable `ffmpeg` and `ffprobe` on the service host; image sequences do not. Video is sampled on a common time grid at 10 FPS by default. There are at most 8 views and 600 frames per view. Imports exceeding the limits fail; lower the sampling rate or trim the clip first.
 
-Codex can also import project-local material with `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False)`. Supply either `manifest_path` or `video_path`. Image sequences use the manifest’s own `fps` (30 when omitted); the tool’s `fps` parameter applies only to video (default 10). A frame can supply `time_sec`; otherwise its zero-based index divided by the manifest FPS is used. Frame rate is not inferred from filenames. Frame paths may be relative to the manifest, but every input must remain inside the project. FPS must be between 0.1 and 120. The video size limit is 40 MiB for browser uploads and 250 MiB for project-local files. `clear=True` removes the reference clip without changing the scene revision.
+Codex can also import project-local material with `workspace_set_reference_clip(manifest_path=None, video_path=None, fps=None, camera_manifest_path=None, clear=False, append_view=False, view_name=None)`. Supply either `manifest_path` or `video_path`. Use `append_view=True` to append views and preserve existing material and marks; `view_name` can name the new view. The default `append_view=False` preserves the old API’s replacement behavior and replaces the entire existing view group. Submit feedback that depends on old frames before replacing them. `clear=True` removes the entire reference view group without changing the scene revision.
+
+Image sequences use the manifest’s own `fps` (30 when omitted); the tool’s `fps` parameter applies only to video (default 10). A frame can supply `time_sec`; otherwise its zero-based index divided by the manifest FPS is used. Frame rate is not inferred from filenames. FPS must be between 0.1 and 120. Size limits apply separately to each view: 40 MiB for a browser video file or an image sequence’s total image data; 250 MiB for a project-local video file, its total decoded frames, or an image sequence’s total image data. Every input file must remain inside the project.
+
+An existing single clip continues as the primary view with its original `clip_id`, frames, and marks. The top-level `reference_clip` fields still describe the primary view; its `views` array contains only additional views. Appending keeps the primary `clip_id` stable, and each view’s own `clip_id` serves as its `view_id`. This feature organizes viewing and feedback across cameras; the same Codex task performs geometry changes.
 
 Example image-sequence manifest (all input files must be inside the current project):
 
@@ -90,6 +95,8 @@ Example image-sequence manifest (all input files must be inside the current proj
   ]
 }
 ```
+
+See [reference_multiview.example.json](examples/reference_multiview.example.json) for a batch manifest. It may have a top-level `name`; each entry in `views` may specify `name`, `fps`, and `duration_sec`, and exactly one source: `frames`, `manifest_path`, or `video_path`. A frame supports `path` and optional `time_sec`, `name`, and `camera`; a video may supply `camera_manifest_path`. Relative paths use the outer manifest directory, while a nested manifest’s frame paths use its own directory. The first entry becomes the primary view; `append_view=True` appends the whole batch to an existing group. Replace the example camera values with actual calibration.
 
 To preserve camera alignment, import through a manifest / MCP: add the `camera` schema defined above to each sequence frame. Importing image or video files in the browser alone does not obtain camera poses. A video can supply a separate `camera_manifest_path`. Example fixed-camera manifest (replace these example values with actual calibration):
 
@@ -108,7 +115,8 @@ Import the manifest, or sample a video at the chosen FPS:
 
 ```text
 workspace_set_reference_clip(manifest_path="/absolute/path/to/project/clip.json")
-workspace_set_reference_clip(video_path="/absolute/path/to/project/reference.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json")
+workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_multiview.json", append_view=True)
+workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
 ## Quick start: room and cabinet
@@ -204,7 +212,7 @@ For the desktop task binding option, also keep `--shared-thread-id "$THREAD_ID"`
 | `workspace_get_context` | Read current reference images, scene revision, and project context |
 | `workspace_get_feedback` | Read submitted feedback and its actual images |
 | `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
-| `workspace_set_reference_clip` | Import timestamped reference frames with optional per-frame cameras, or sample a project-local video with FFmpeg |
+| `workspace_set_reference_clip` | Import a single-view or multi-view manifest, or sample a project-local video with FFmpeg; `append_view=True` appends views |
 | `workspace_request_feedback` | Default mode: ask the user to inspect something on the page and return immediately; their reply becomes the next user message |
 | `request_visual_feedback` / `wait_visual_feedback` | Unbound external MCP mode: wait and return text and images as a tool result; bound desktop mode: the former returns the page URL and submission starts a new turn |
 | `get_visual_feedback` | External MCP mode: reread submitted visual feedback |

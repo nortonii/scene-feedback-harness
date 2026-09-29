@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { frameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
+import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { createFrameImageCache } from './frame-image-cache.js';
@@ -27,7 +27,8 @@ const ui = {
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
-  clipInput:id('clip-input'), clipFps:id('clip-fps'), clipStatus:id('clip-import-status'),
+  clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
+  viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
   timelineSource:id('timeline-source'), moments:id('moment-strip'), animationChoices:id('animation-choices'),
   scope:id('feedback-scope'), range:id('feedback-range'), rangeStart:id('range-start'), rangeEnd:id('range-end'),
@@ -81,6 +82,7 @@ const state = {
   restoredSceneRevision:null, restoredModelUrl:null
 };
 Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
+  activeViewId:null, pendingViewId:null, referenceClipSignature:null, viewOptionsSignature:null,
   animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
   seekGeneration:0, seeking:false, timelineTarget:null, scrubRequest:null, timelineSaveTimer:null});
 
@@ -188,7 +190,7 @@ function saveDraft() {
         alignmentExact:state.alignmentExact,
         referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
       snapshot:state.snapshot, sceneView:state.sceneView,
-      dynamicTime:state.time, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
+      dynamicTime:state.time, activeViewId:state.activeViewId, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
       feedbackScope:ui.scope.value, rangeStart:ui.rangeStart.value, rangeEnd:ui.rangeEnd.value,
       referenceZoom:state.referenceZoom, referencePan:state.referencePan,
       eventCursor:state.eventCursor
@@ -223,6 +225,7 @@ function restoreDraft() {
       state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
     }
     state.time = Number.isFinite(draft.dynamicTime) ? Math.max(0, draft.dynamicTime) : 0;
+    state.activeViewId = typeof draft.activeViewId === 'string' ? draft.activeViewId : null;
     state.clipEnabled = draft.clipEnabled !== false;
     state.animationChoices = draft.animationChoices && typeof draft.animationChoices === 'object' ? draft.animationChoices : {};
     if (['frame','range','clip'].includes(draft.feedbackScope)) ui.scope.value = draft.feedbackScope;
@@ -1856,11 +1859,12 @@ function setReferences(references) {
 }
 function activeReference() { return clipReference() || state.references.find((ref) => ref.id === state.activeReferenceId); }
 function renderReferenceStrip() {
+  renderReferenceViews();
   ui.referenceStrip.replaceChildren();
   if (state.referenceClip) {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'compact-button';
-    button.textContent = (state.clipEnabled ? '✓ ' : '↺ ') + state.referenceClip.name;
+    button.textContent = (state.clipEnabled ? '✓ ' : '↺ ') + (referenceViews().length > 1 ? '同步参考' : state.referenceClip.name);
     button.addEventListener('click', () => {
       if (!editable()) return;
       state.clipEnabled = true; seekTimeline(state.time);
@@ -2044,14 +2048,42 @@ async function uploadReferences(files) {
 }
 
 function dynamicEnabled() { return !!state.referenceClip || state.animations.size > 0 || state.dynamicSnapshots.length > 0; }
+function referenceViews() {
+  return state.referenceClip ? [state.referenceClip, ...(state.referenceClip.views || [])] : [];
+}
+function referenceView(viewId=state.activeViewId) {
+  return referenceViews().find((view) => view.clip_id === viewId) || state.referenceClip;
+}
+function referenceViewForMoment(moment) {
+  return referenceViews().find((view) => view.clip_id === (moment.view_id || moment.clip_id));
+}
+function viewFrameAtTime(view, time) {
+  return referenceViews().length > 1 ? nearestFrameAtTime(view?.frames, time) : frameAtTime(view?.frames, time);
+}
+function renderReferenceViews() {
+  const views = referenceViews();
+  const signature = JSON.stringify(views.map((view) => [view.clip_id, view.name]));
+  if (state.viewOptionsSignature !== signature) {
+    state.viewOptionsSignature = signature;
+    ui.viewSelect.replaceChildren();
+    for (const view of views) {
+      const option = document.createElement('option'); option.value = view.clip_id;
+      option.textContent = view.name; ui.viewSelect.append(option);
+    }
+  }
+  ui.viewControl.classList.toggle('hidden', views.length < 2);
+  ui.viewSelect.value = state.pendingViewId || state.activeViewId || state.referenceClip?.clip_id || '';
+  ui.viewSelect.disabled = !editable();
+}
 function timelineDuration() {
-  return state.referenceClip?.duration_sec || Math.max(0, ...[...state.animations.values()].map((entry) => entry.clip.duration), ...state.dynamicSnapshots.map((entry) => entry.time_sec + 1 / timelineFps()));
+  return state.referenceClip ? Math.max(...referenceViews().map((view) => view.duration_sec))
+    : Math.max(0, ...[...state.animations.values()].map((entry) => entry.clip.duration), ...state.dynamicSnapshots.map((entry) => entry.time_sec + 1 / timelineFps()));
 }
 function timelineFps() { return state.referenceClip?.fps || 30; }
 function momentFrameIndex(moment) {
   if (!moment?.reference_frame_id) return null;
   if (moment.clip_id === state.referenceClip?.clip_id) {
-    const index = state.referenceClip.frames.findIndex((frame) => frame.id === moment.reference_frame_id);
+    const index = referenceViewForMoment(moment)?.frames.findIndex((frame) => frame.id === moment.reference_frame_id) ?? -1;
     if (index >= 0) return index;
   }
   return Number.isInteger(moment.frame_index) && moment.frame_index >= 0 ? moment.frame_index : null;
@@ -2061,20 +2093,23 @@ function annotationFrameIndex(annotation) {
   if (moment) return momentFrameIndex(moment);
   return Number.isInteger(annotation.frame_index) && annotation.frame_index >= 0 ? annotation.frame_index : null;
 }
-function frameTimeLabel(time, index) {
+function frameTimeLabel(time, index, viewName='') {
   if (!Number.isFinite(time)) return '';
-  return (index !== null ? '片段第 ' + (index + 1) + ' 帧 · ' : '') + time.toFixed(3) + ' s';
+  return (viewName ? '机位 ' + viewName + ' · ' : '') + (index !== null ? '片段第 ' + (index + 1) + ' 帧 · ' : '') + time.toFixed(3) + ' s';
 }
 function annotationTimeLabel(annotation) {
-  return frameTimeLabel(annotation.time_sec, annotationFrameIndex(annotation));
+  const moment = state.dynamicSnapshots.find((entry) => entry.id === annotation.frame_id);
+  return frameTimeLabel(annotation.time_sec, annotationFrameIndex(annotation), annotation.view_name || moment?.view_name || referenceViewForMoment(annotation)?.name || '');
 }
 function cacheMomentFrameIndices() {
   let changed = false;
   state.dynamicSnapshots = state.dynamicSnapshots.map((moment) => {
     const index = momentFrameIndex(moment);
-    if (index === null || moment.frame_index === index) return moment;
+    const currentView = moment.reference_frame_id ? referenceViewForMoment(moment) : null;
+    const view = currentView?.frames.some((frame) => frame.id === moment.reference_frame_id) ? currentView : null;
+    if (index === null || (moment.frame_index === index && (!view || moment.view_id === view.clip_id && moment.view_name === view.name))) return moment;
     changed = true;
-    return {...moment, frame_index:index};
+    return {...moment, frame_index:index, ...(view ? {view_id:view.clip_id, view_name:view.name} : {})};
   });
   if (changed) {
     state.snapshot = state.dynamicSnapshots.find((moment) => moment.id === state.snapshot?.id) || state.snapshot;
@@ -2084,7 +2119,7 @@ function cacheMomentFrameIndices() {
   }
 }
 function clipReference() {
-  return state.clipEnabled ? frameAtTime(state.referenceClip?.frames, state.time) : null;
+  return state.clipEnabled ? viewFrameAtTime(referenceView(), state.time) : null;
 }
 function registerAnimations(item, gltf) {
   if (!gltf.animations?.length) return;
@@ -2140,30 +2175,36 @@ function renderAnimationChoices() {
   }
 }
 function setReferenceClip(clip, {restore=false}={}) {
-  if ((state.referenceClip?.clip_id || null) === (clip?.clip_id || null)) return;
+  const signature = clip ? JSON.stringify([clip.clip_id, clip.views_revision || 0,
+    [clip, ...(clip.views || [])].map((view) => [view.clip_id, view.name, view.fps, view.duration_sec, view.frames.length])]) : null;
+  if (state.referenceClipSignature === signature) return;
+  const replaced = (state.referenceClip?.clip_id || null) !== (clip?.clip_id || null);
   pauseTimeline();
   cacheMomentFrameIndices();
-  annotationHistory.clear();
+  if (replaced) annotationHistory.clear();
   updateAnnotationHistory();
   frameImages.clear();
   state.referenceClip = clip;
+  state.referenceClipSignature = signature;
+  if (!referenceViews().some((view) => view.clip_id === state.activeViewId)) state.activeViewId = clip?.clip_id || null;
   cacheMomentFrameIndices();
   // A newly published clip follows the timeline by default. Restore deliberate
   // static inspection on reload until the user next operates the timeline.
   if (clip?.frames?.length && !restore) state.clipEnabled = true;
   state.time = clamp(state.time, 0, timelineDuration());
-  if (state.clipEnabled && clip?.frames.length) state.time = frameAtTime(clip.frames, state.time).time_sec;
+  if (state.clipEnabled && clip?.frames.length && referenceViews().length === 1) state.time = frameAtTime(clip.frames, state.time).time_sec;
   applyAnimationTime(state.time);
-  syncTimelineReference(); renderReferenceStrip(); renderTimeline();
+  syncTimelineReference({forceAlign:!restore && state.alignmentExact});
+  showActiveReference(); resizeScene(); renderReferenceStrip(); renderTimeline();
   prefetchTimelineFrames(state.time);
 }
-function syncTimelineReference() {
+function syncTimelineReference({forceAlign=false}={}) {
   const ref = clipReference();
   if (!ref) return;
   const changed = state.activeReferenceId !== ref.id;
-  const followCamera = state.alignmentExact || !state.alignedReferenceId;
+  const followCamera = forceAlign || state.alignmentExact || !state.alignedReferenceId;
   state.activeReferenceId = ref.id;
-  if (changed) {
+  if (changed || forceAlign) {
     if (referenceCamera(ref) && followCamera) alignActiveReference({showLive:false, persist:false});
     else {
       if (!referenceCamera(ref)) {
@@ -2179,17 +2220,17 @@ function pauseTimeline() {
   state.playing = false; state.playbackStart = null;
   state.seekGeneration++; state.seeking = false;
   if (state.scrubRequest !== null) cancelAnimationFrame(state.scrubRequest);
-  state.scrubRequest = null; state.timelineTarget = null;
+  state.scrubRequest = null; state.timelineTarget = null; state.pendingViewId = null;
   ui.play.textContent = '播放';
 }
-function timelineOverlayUrl(ref) {
-  const willAlign = referenceCamera(ref) && (state.alignmentExact || !state.alignedReferenceId);
+function timelineOverlayUrl(ref, {forceAlign=false}={}) {
+  const willAlign = referenceCamera(ref) && (forceAlign || state.alignmentExact || !state.alignedReferenceId);
   return (willAlign || state.alignedReferenceId === ref.id) && ref.alignment_image_url || ref.url;
 }
 function prefetchTimelineFrames(time, direction=1) {
-  const frames = state.referenceClip?.frames;
+  const frames = referenceView()?.frames;
   if (!frames?.length || !state.clipEnabled) { frameImages.prefetch([]); return; }
-  const center = frames.indexOf(frameAtTime(frames, time));
+  const center = frames.indexOf(viewFrameAtTime(referenceView(), time));
   const urls = [];
   // Read ahead in the direction of travel, while keeping a few reverse steps warm.
   for (let offset = 1; offset <= 8; offset++) {
@@ -2206,36 +2247,51 @@ function scheduleTimelineDraft() {
 }
 function scrubTimeline(time, {final=false}={}) {
   if (!editable()) return;
+  const viewId = state.pendingViewId || state.activeViewId;
   pauseTimeline();
   state.timelineTarget = clamp(time, 0, timelineDuration());
+  state.pendingViewId = viewId !== state.activeViewId ? viewId : null;
   renderTimeline({moments:false});
-  if (final) { seekTimeline(state.timelineTarget); return; }
+  if (final) { seekTimeline(state.timelineTarget, {viewId}); return; }
   state.scrubRequest = requestAnimationFrame(() => {
     state.scrubRequest = null;
-    seekTimeline(state.timelineTarget);
+    seekTimeline(state.timelineTarget, {viewId});
   });
 }
-async function seekTimeline(time, {playback=false, forcePose=false}={}) {
+function stepReferenceTimeline(direction) {
+  const view = referenceView();
+  if (referenceViews().length > 1 && view?.frames?.length) {
+    const index = view.frames.indexOf(viewFrameAtTime(view, state.time));
+    const next = index + direction;
+    if (next < 0 || next >= view.frames.length) return;
+    seekTimeline(view.frames[next].time_sec);
+  } else seekTimeline(stepTime(view?.frames, state.time, direction, view?.fps || timelineFps(), timelineDuration()));
+}
+async function seekTimeline(time, {playback=false, forcePose=false, viewId=state.activeViewId, preserveTime=false}={}) {
   if (!playback && !editable()) return false;
   if (playback && state.seeking) return false;
   if (!playback) { pauseTimeline(); hideTextEditor(); state.drag = null; }
   const generation = ++state.seekGeneration;
   const wanted = clamp(time, 0, timelineDuration());
   // Timeline actions always follow GT, including after inspecting a static image.
-  const ref = frameAtTime(state.referenceClip?.frames, wanted);
-  const next = ref ? ref.time_sec : wanted;
+  const view = referenceView(viewId);
+  const switchingView = !!view && view.clip_id !== state.activeViewId;
+  const ref = viewFrameAtTime(view, wanted);
+  const next = ref && referenceViews().length === 1 && !preserveTime ? ref.time_sec : wanted;
+  const overlayUrl = ref ? timelineOverlayUrl(ref, {forceAlign:switchingView}) : null;
   const imagesReady = !ref || (imageReadyAtUrl(ui.referenceImage, ref.url) &&
-    imageReadyAtUrl(ui.compareImage, timelineOverlayUrl(ref)));
+    imageReadyAtUrl(ui.compareImage, overlayUrl));
   if (playback && Math.abs(state.time - next) < 1e-7 && imagesReady &&
       state.sceneView === 'live' && (!ref || state.clipEnabled)) return true;
   if (!playback) {
     state.timelineTarget = next;
+    state.pendingViewId = switchingView ? view.clip_id : null;
     renderTimeline({moments:false});
   }
   try {
     if (ref && (state.activeReferenceId !== ref.id || !imagesReady)) {
       state.seeking = true;
-      const [sourceImage, sourceOverlay] = await frameImages.prepare([ref.url, timelineOverlayUrl(ref)]);
+      const [sourceImage, sourceOverlay] = await frameImages.prepare([ref.url, overlayUrl]);
       if (generation !== state.seekGeneration) return false;
       // Keep cached images separate from DOM nodes, whose src may later change
       // when the user opens a static reference.
@@ -2246,7 +2302,7 @@ async function seekTimeline(time, {playback=false, forcePose=false}={}) {
       // Commit decoded reference pixels and geometry together, so slow image
       // loading cannot leave a newer pose next to an older reference frame.
       installTimelineImages(image, overlay);
-    }
+    } else if (ref) frameImages.retain([ref.url, overlayUrl]);
     if (generation !== state.seekGeneration) return false;
     const resumedReference = !!ref && !state.clipEnabled;
     if (resumedReference) state.clipEnabled = true;
@@ -2254,12 +2310,13 @@ async function seekTimeline(time, {playback=false, forcePose=false}={}) {
     const changed = Math.abs(state.time - next) > 1e-7;
     const leavingSnapshot = state.sceneView === 'snapshot';
     state.time = next;
+    if (view) state.activeViewId = view.clip_id;
     if (changed || forcePose) applyAnimationTime(next);
-    syncTimelineReference();
+    syncTimelineReference({forceAlign:switchingView});
     if (resumedReference) renderReferenceStrip();
     if (leavingSnapshot) { state.sceneView = 'live'; renderSceneView({persist:false}); }
     if (changed || !playback) updateReferenceGeometry();
-    state.timelineTarget = null;
+    state.timelineTarget = null; state.pendingViewId = null;
     renderTimeline({moments:leavingSnapshot});
     if (!playback) scheduleTimelineDraft();
     if (changed || !playback) prefetchTimelineFrames(next, next < previousTime ? -1 : 1);
@@ -2272,7 +2329,7 @@ async function seekTimeline(time, {playback=false, forcePose=false}={}) {
   } finally {
     if (generation === state.seekGeneration) {
       state.seeking = false;
-      state.timelineTarget = null;
+      state.timelineTarget = null; state.pendingViewId = null;
       renderTimeline({moments:false});
     }
   }
@@ -2294,12 +2351,13 @@ function renderTimeline({moments=true}={}) {
   ui.time.textContent = displayedTime.toFixed(3) + ' / ' + duration.toFixed(3) + ' s' + (state.timelineTarget !== null ? ' · 更新中' : '');
   ui.play.textContent = state.playing ? '暂停' : '播放';
   ui.timelineSource.textContent = state.referenceClip
-    ? state.referenceClip.name + ' · ' + state.referenceClip.frames.length + ' 帧 · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
+    ? referenceView().name + ' · ' + referenceView().frames.length + ' 帧 · ' + referenceView().fps + ' fps · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
     : 'GLB 动画 · ' + timelineFps() + ' fps';
   ui.range.classList.toggle('hidden', ui.scope.value !== 'range');
   for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), id('save-moment'), ui.scope, ui.rangeStart, ui.rangeEnd, ui.clipInput]) {
     element.disabled = !editable() || (element !== ui.clipInput && duration <= 0);
   }
+  renderReferenceViews();
   if (!moments) return;
   ui.moments.replaceChildren();
   if (!state.dynamicSnapshots.length) {
@@ -2311,7 +2369,7 @@ function renderTimeline({moments=true}={}) {
     card.className = 'moment-card' + (state.snapshot?.id === moment.id && state.sceneView === 'snapshot' ? ' active' : '');
     const button = document.createElement('button'); button.type = 'button';
     const count = state.annotations.filter((mark) => markMatchesMoment(mark, moment)).length;
-    button.textContent = frameTimeLabel(moment.time_sec, momentFrameIndex(moment)) + ' · v' + moment.scene_revision + ' · ' + count + ' 标记';
+    button.textContent = frameTimeLabel(moment.time_sec, momentFrameIndex(moment), moment.view_name || referenceViewForMoment(moment)?.name || '') + ' · v' + moment.scene_revision + ' · ' + count + ' 标记';
     button.addEventListener('click', () => openMoment(moment.id));
     const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×';
     remove.title = '移除此刻和它的标记'; remove.disabled = !editable();
@@ -2333,6 +2391,7 @@ function referencePixelsReady() {
 }
 function ensureDynamicMoment({showSnapshot=false}={}) {
   if (!editable()) return null;
+  if (state.seeking || state.pendingViewId) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
   pauseTimeline();
   if (!referencePixelsReady()) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
   const matching = state.dynamicSnapshots.find((entry) => entry.id === state.snapshot?.id &&
@@ -2363,6 +2422,11 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
     selected_object_ids:state.selectedId ? [state.selectedId] : [],
     selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : [],
     animation_clips:[...state.animations].map(([object_id, entry]) => ({object_id, name:entry.clip.name.slice(0,160), index:entry.clips.indexOf(entry.clip)}))};
+  if (clipReference()) {
+    moment.view_id = referenceView().clip_id;
+    moment.view_name = referenceView().name;
+    moment.reference_time_sec = clipReference().time_sec;
+  }
   const frameIndex = momentFrameIndex(moment);
   if (frameIndex !== null) moment.frame_index = frameIndex;
   state.dynamicSnapshots.push(moment); state.snapshot = moment;
@@ -2370,47 +2434,78 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   renderSceneView(); renderTimeline(); saveDraft();
   return moment;
 }
-function openMoment(momentId) {
+async function openMoment(momentId) {
   if (!editable()) return;
   const moment = state.dynamicSnapshots.find((entry) => entry.id === momentId);
   if (!moment) return;
   pauseTimeline(); hideTextEditor(); state.drag = null;
-  state.time = moment.time_sec; applyAnimationTime(state.time);
-  if (moment.clip_id === state.referenceClip?.clip_id) state.clipEnabled = !!moment.reference_frame_id;
-  if (moment.reference_frame_id) syncTimelineReference();
-  else { state.activeReferenceId = moment.reference_id; showActiveReference(); }
+  if (moment.reference_frame_id) {
+    const view = referenceViewForMoment(moment);
+    if (!view?.frames.some((frame) => frame.id === moment.reference_frame_id)) {
+      announce('此截图的机位已替换，请先删除该旧时刻再发送。', true); return;
+    }
+    if (!await seekTimeline(moment.time_sec, {viewId:view.clip_id, preserveTime:true}) || !editable()) return;
+  } else {
+    state.time = moment.time_sec; applyAnimationTime(state.time);
+    state.clipEnabled = false;
+    state.activeReferenceId = moment.reference_id; showActiveReference();
+  }
   state.snapshot = moment; state.sceneView = 'snapshot';
   renderSceneView(); renderTimeline(); drawOverlays(); saveDraft();
 }
 async function uploadClip(files) {
   if (!editable() || !files.length) return;
-  if (state.dynamicSnapshots.length && !window.confirm('替换动态参考会清除已保留的动态时刻及其标记。继续？')) return;
+  if (!state.referenceClip && state.dynamicSnapshots.length) {
+    announce('请先发送或清空当前时刻标注，再添加第一段动态参考。', true); return;
+  }
   const fps = Number(ui.clipFps.value);
   if (!Number.isFinite(fps) || fps < 0.1 || fps > 120) { announce('帧率需在 0.1–120 之间。', true); return; }
   const ordered = [...files].sort((a,b) => a.name.localeCompare(b.name, undefined, {numeric:true}));
-  const video = ordered.length === 1 && (ordered[0].type.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(ordered[0].name));
-  if (ordered.length > 600 || ordered.reduce((sum, file) => sum + file.size, 0) > 40 * 1024 * 1024) {
-    announce('最多 600 帧，一次上传总大小最多 40 MiB。可通过 MCP 导入服务器上的文件。', true); return;
+  const isVideo = (file) => file.type.startsWith('video/') || /\.(mp4|webm|mov)$/i.test(file.name);
+  const videos = ordered.every(isVideo);
+  if (!videos && ordered.some(isVideo)) { announce('视频与图片序列请分开导入。多个视频会各自添加一个机位。', true); return; }
+  const count = videos ? ordered.length : 1;
+  if (referenceViews().length + count > 8) { announce('最多 8 个机位，请减少本次导入的机位数量。', true); return; }
+  if (videos ? ordered.some((file) => file.size > 40 * 1024 * 1024)
+      : ordered.length > 600 || ordered.reduce((sum, file) => sum + file.size, 0) > 40 * 1024 * 1024) {
+    announce('每个机位最多 600 帧；单个视频或一组图片序列最多 40 MiB。', true); return;
   }
+  const name = ui.clipName.value.trim();
   pauseTimeline(); state.uploading = true; renderTimeline(); updateSubmitLabel();
-  ui.clipStatus.textContent = video ? '正在上传并采样视频…' : '正在导入参考帧…';
+  let added = 0, latestViewId = null, failure = null;
   try {
-    const body = video ? {name:ordered[0].name, fps, video_data_url:await readFile(ordered[0])}
-      : {name:ordered[0].name + ' 等 ' + ordered.length + ' 帧', fps, frames:await Promise.all(ordered.map(async (file,index) => {
+    const health = await api('/api/health');
+    if (!health.reference_multiview) throw new Error('机位功能正在更新，请稍后刷新工作台再导入');
+    const imports = videos ? ordered.map((file, index) => ({files:[file], video:true,
+      name:name ? name + (ordered.length > 1 ? ' · ' + (index + 1) : '') : file.name}))
+      : [{files:ordered, video:false, name:name || ordered[0].name + ' · 帧序列'}];
+    for (const entry of imports) {
+      ui.clipStatus.textContent = '正在添加机位 ' + (added + 1) + ' / ' + count + '…';
+      const body = {name:[...entry.name].slice(0,180).join(''), fps, append_view:true};
+      if (entry.video) body.video_data_url = await readFile(entry.files[0]);
+      else body.frames = await Promise.all(entry.files.map(async (file,index) => {
         if (!['image/png','image/jpeg'].includes(file.type)) throw new Error('序列请使用 PNG / JPEG；视频请单独选择。');
         return {name:file.name, time_sec:index / fps, data_url:await readFile(file)};
-      }))};
-    const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/clip', {method:'POST', body});
-    state.annotations = state.annotations.filter((mark) => !mark.frame_id);
-    state.dynamicSnapshots = []; state.snapshot = null; state.sceneView = 'live';
-    state.time = 0; state.clipEnabled = true;
-    setReferenceClip(result.reference_clip || result); applyAnimationTime(state.time);
-    renderSceneView(); renderAnnotations(); saveDraft();
+      }));
+      const known = new Set(referenceViews().map((view) => view.clip_id));
+      const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/clip', {method:'POST', body});
+      setReferenceClip(result.reference_clip || result);
+      latestViewId = referenceViews().find((view) => !known.has(view.clip_id))?.clip_id || latestViewId;
+      added++;
+    }
+    ui.clipName.value = '';
     ui.rangeStart.value = '0'; ui.rangeEnd.value = String(timelineDuration());
-    announce('已导入动态参考，时间轴已同步。');
-  } catch (error) { announce('导入失败：' + error.message, true); }
-  finally { state.uploading = false; ui.clipInput.value = ''; ui.clipStatus.textContent = ''; renderTimeline(); updateSubmitLabel(); }
+  } catch (error) { failure = error.message; }
+  finally {
+    state.uploading = false; ui.clipInput.value = ''; ui.clipStatus.textContent = '';
+    renderTimeline(); updateSubmitLabel();
+  }
+  if (latestViewId && editable()) await seekTimeline(state.time, {viewId:latestViewId, preserveTime:true});
+  saveDraft();
+  if (failure) announce((added ? '已添加 ' + added + ' 个机位。' : '') + '添加失败：' + failure + '；原有机位和标记保留。', true);
+  else announce('已添加 ' + added + ' 个机位，可在左侧切换；当前时间和标记保留。');
 }
+
 function bindTimelineEvents() {
   ui.clipInput.addEventListener('change', () => uploadClip(ui.clipInput.files));
   ui.play.addEventListener('click', async () => {
@@ -2427,8 +2522,9 @@ function bindTimelineEvents() {
   });
   ui.seek.addEventListener('input', () => scrubTimeline(Number(ui.seek.value)));
   ui.seek.addEventListener('change', () => scrubTimeline(Number(ui.seek.value), {final:true}));
-  id('timeline-prev').addEventListener('click', () => seekTimeline(stepTime(state.referenceClip?.frames, state.time, -1, timelineFps(), timelineDuration())));
-  id('timeline-next').addEventListener('click', () => seekTimeline(stepTime(state.referenceClip?.frames, state.time, 1, timelineFps(), timelineDuration())));
+  ui.viewSelect.addEventListener('change', () => seekTimeline(state.timelineTarget ?? state.time, {viewId:ui.viewSelect.value, preserveTime:true}));
+  id('timeline-prev').addEventListener('click', () => stepReferenceTimeline(-1));
+  id('timeline-next').addEventListener('click', () => stepReferenceTimeline(1));
   id('save-moment').addEventListener('click', () => ensureDynamicMoment({showSnapshot:true}));
   ui.scope.addEventListener('change', () => { renderTimeline(); saveDraft(); });
   for (const input of [ui.rangeStart, ui.rangeEnd]) input.addEventListener('change', saveDraft);
@@ -2477,6 +2573,11 @@ async function captureDynamicFrames() {
       reference_frame_id:moment.reference_frame_id, static_reference_id:moment.reference_frame_id ? null : moment.reference_id, camera:moment.camera,
       selected_object_ids:moment.selected_object_ids, selected_scene_nodes:moment.selected_scene_nodes,
       animation_clips:moment.animation_clips, ...sceneBundle};
+    if (moment.reference_frame_id) {
+      entry.view_id = moment.view_id || referenceViewForMoment(moment)?.clip_id;
+      entry.view_name = moment.view_name || referenceViewForMoment(moment)?.name;
+      if (Number.isFinite(moment.reference_time_sec)) entry.reference_time_sec = moment.reference_time_sec;
+    }
     const frameIndex = momentFrameIndex(moment);
     if (frameIndex !== null) entry.frame_index = frameIndex;
     if (moment.reference_url) {
@@ -2605,6 +2706,10 @@ function addAnnotation(annotation) {
     item.frame_id = state.snapshot.id;
     item.time_sec = state.snapshot.time_sec;
     item.clip_id = state.snapshot.clip_id;
+    if (state.snapshot.view_id) {
+      item.view_id = state.snapshot.view_id;
+      item.view_name = state.snapshot.view_name;
+    }
     item.scene_revision = state.snapshot.scene_revision;
     const frameIndex = momentFrameIndex(state.snapshot);
     if (frameIndex !== null) item.frame_index = frameIndex;
@@ -2827,7 +2932,7 @@ function renderAnnotations() {
     const copy = document.createElement('div');
     copy.className = 'annotation-copy';
     const title = document.createElement('strong');
-    const ref = [...state.references, ...(state.referenceClip?.frames || [])].find((item) => item.id === annotation.reference_image_id);
+    const ref = [...state.references, ...referenceViews().flatMap((view) => view.frames)].find((item) => item.id === annotation.reference_image_id);
     title.textContent = (annotation.group_id ? circled[Number(annotation.group_id)] + ' ' : '') +
       (annotation.pane === 'reference' ? '参考图 · ' + (ref?.name || '图片') : '当前场景') +
       ' · ' + (labels[annotation.type] || annotation.type) + (Number.isFinite(annotation.time_sec) ? ' · ' + annotationTimeLabel(annotation) : '');
@@ -3096,7 +3201,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
     active_reference_id:clipReference() ? null : state.activeReferenceId,
     aligned_reference_id:!clipReference() && submittedCamera.alignment_exact && submittedCamera.reference_image_id === state.activeReferenceId
       ? state.activeReferenceId : null,
-    ...(dynamicEnabled() ? {timeline:{clip_id:state.referenceClip?.clip_id || null, time_sec:state.time, duration_sec:timelineDuration(), fps:timelineFps(),
+    ...(dynamicEnabled() ? {timeline:{clip_id:state.referenceClip?.clip_id || null, ...(state.referenceClip ? {view_id:referenceView().clip_id} : {}), time_sec:state.time, duration_sec:timelineDuration(), fps:timelineFps(),
       scope:feedbackScope(ui.scope.value, state.time, Number(ui.rangeStart.value), Number(ui.rangeEnd.value), timelineDuration())}, dynamic_frames:dynamicFrames} : {}),
     note:note || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
     referenced_scene_nodes:referencedSceneNodes,
@@ -3134,7 +3239,8 @@ async function submitFeedback() {
     return;
   }
   if (!state.pendingSubmission && dynamicEnabled()) {
-    const mismatched = state.dynamicSnapshots.some((entry) => entry.clip_id !== (state.referenceClip?.clip_id || null));
+    const mismatched = state.dynamicSnapshots.some((entry) => entry.clip_id !== (state.referenceClip?.clip_id || null) ||
+      entry.reference_frame_id && !referenceViewForMoment(entry)?.frames.some((frame) => frame.id === entry.reference_frame_id));
     if (state.annotations.some((mark) => mark.frame_id && !state.dynamicSnapshots.some((moment) => moment.id === mark.frame_id))) {
       announce('有标记的原截图未能恢复，请移除这条标记并重新圈画。', true); return;
     }

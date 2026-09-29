@@ -946,58 +946,45 @@ class WorkspaceGateway:
             return {"session_id": session_id, "reference_images": copy.deepcopy(self.store.state["sessions"][session_id]["reference_images"])}
 
     def set_reference_clip_paths(self, payload: Any) -> dict[str, Any]:
-        """Import a project-scoped sequence manifest or sample a complete video."""
-        from dynamic import MAX_LOCAL_CLIP_BYTES, clip_name, fps_value, number, sample_video
+        """Validate every project-scoped view before publishing the complete group."""
+        from dynamic import MAX_CLIP_MANIFEST_BYTES, MAX_LOCAL_CLIP_BYTES, MAX_MULTIVIEW_MANIFEST_BYTES, MAX_REFERENCE_VIEWS, clip_name, fps_value, number, prepare_clip, sample_video
 
         workspace = self.ensure()
         if not isinstance(payload, dict):
             raise APIError(400, "clip import must be an object")
         if payload.get("clear") is True:
             return self.store.set_reference_clip(workspace["session_id"], payload)
-        if ("manifest_path" in payload) == ("video_path" in payload):
-            raise APIError(400, "provide manifest_path or video_path")
 
-        def read_document(path: Path) -> dict[str, Any]:
-            if path.stat().st_size > 2 * 1024 * 1024:
-                raise APIError(400, "clip manifest exceeds 2 MB")
+        def project_path(value: Any, base: Path) -> Path:
+            if not isinstance(value, str) or not value:
+                raise APIError(400, "clip source needs a project file path")
+            path = Path(value).expanduser()
+            return self._project_file(str(path if path.is_absolute() else base / path))
+
+        def read_document(path: Path, *, allow_group: bool = False) -> dict[str, Any]:
+            limit = MAX_MULTIVIEW_MANIFEST_BYTES if allow_group else MAX_CLIP_MANIFEST_BYTES
             try:
-                document = json.loads(path.read_text(encoding="utf-8"))
+                with path.open("rb") as source:
+                    data = source.read(limit + 1)
+                if len(data) > limit:
+                    raise APIError(400, f"clip manifest exceeds {limit // (1024 * 1024)} MB")
+                document = json.loads(data.decode("utf-8"))
             except (OSError, UnicodeError, ValueError) as exc:
                 raise APIError(400, "clip manifest cannot be read") from exc
             if not isinstance(document, dict):
                 raise APIError(400, "clip manifest must be an object")
+            if allow_group and "views" not in document and len(data) > MAX_CLIP_MANIFEST_BYTES:
+                raise APIError(400, "single-view clip manifest exceeds 2 MB")
             return document
 
-        if "manifest_path" in payload:
-            manifest_path = self._project_file(payload["manifest_path"])
-            manifest = read_document(manifest_path)
-            entries = manifest.get("frames")
-            if not isinstance(entries, list) or not 1 <= len(entries) <= 600:
-                raise APIError(400, "clip manifest must contain 1 to 600 frames")
-            frames = []
-            for entry in entries:
-                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
-                    raise APIError(400, "each clip frame needs a path")
-                source_path = Path(entry["path"]).expanduser()
-                source = self._project_file(str(source_path if source_path.is_absolute() else manifest_path.parent / source_path))
-                name, data = self.store._read_reference_path(str(source))
-                frame = {"name": entry.get("name", name), "data": data}
-                for key in ("time_sec", "camera"):
-                    if key in entry:
-                        frame[key] = entry[key]
-                frames.append(frame)
-            metadata = {key: manifest[key] for key in ("name", "fps", "duration_sec") if key in manifest}
-            metadata.setdefault("name", manifest_path.stem)
-            return self.store.set_reference_clip(workspace["session_id"], metadata, local_frames=frames, byte_limit=MAX_LOCAL_CLIP_BYTES)
-        source = self._project_file(payload["video_path"])
-        fps = fps_value(payload.get("fps", 10))
-        frames, duration = sample_video(source, fps)
-        if payload.get("camera_manifest_path") is not None:
-            cameras = read_document(self._project_file(payload["camera_manifest_path"]))
+        def attach_cameras(frames: list[dict[str, Any]], spec: dict[str, Any], base: Path, fps: float) -> None:
+            if spec.get("camera_manifest_path") is None:
+                return
+            cameras = read_document(project_path(spec["camera_manifest_path"], base))
             fixed_camera = cameras.get("camera")
             entries = cameras.get("frames", [])
             if fixed_camera is None and (not isinstance(entries, list) or not 1 <= len(entries) <= 600):
-                raise APIError(400, "video camera manifest needs camera or timed frames")
+                raise APIError(400, "camera manifest needs camera or timed frames")
             timed = []
             if fixed_camera is None:
                 for entry in entries:
@@ -1006,27 +993,106 @@ class WorkspaceGateway:
                     timed.append((number(entry.get("time_sec"), "camera time_sec"), self.store._normalize_reference_camera(entry.get("camera"))))
                 if len({time for time, _ in timed}) != len(timed):
                     raise APIError(400, "camera frame timestamps must be unique")
-            for frame in frames:
+            for index, frame in enumerate(frames):
                 if fixed_camera is not None:
                     camera = self.store._normalize_reference_camera(fixed_camera)
                 else:
-                    time, camera = min(timed, key=lambda item: abs(item[0] - frame["time_sec"]))
-                    if abs(time - frame["time_sec"]) > 0.5 / fps + 1e-5:
-                        raise APIError(400, "camera manifest must cover each sampled video timestamp")
-                    camera = copy.deepcopy(camera)
+                    frame_time = number(frame.get("time_sec", index / fps), "frame time_sec")
+                    time, original_camera = min(timed, key=lambda item: abs(item[0] - frame_time))
+                    if abs(time - frame_time) > 0.5 / fps + 1e-5:
+                        raise APIError(400, "camera manifest must cover each sampled timestamp")
+                    camera = copy.deepcopy(original_camera)
                 width, height = self.store._image_dimensions(frame["data"])
                 intrinsics = camera["intrinsics"]
                 scale_x, scale_y = width / intrinsics["width"], height / intrinsics["height"]
                 if abs(scale_x - scale_y) > 0.01:
-                    raise APIError(400, "video camera aspect ratio must match sampled frames")
+                    raise APIError(400, "camera aspect ratio must match sampled frames")
                 for key in ("fx", "cx"):
                     intrinsics[key] *= scale_x
                 for key in ("fy", "cy"):
                     intrinsics[key] *= scale_y
                 intrinsics.update(width=width, height=height)
                 frame["camera"] = camera
-        return self.store.set_reference_clip(workspace["session_id"], {"name": clip_name(payload.get("name", source.name)), "fps": fps, "duration_sec": duration},
-                                             local_frames=frames, source_type="video", byte_limit=MAX_LOCAL_CLIP_BYTES)
+
+        def prepare_view(spec: Any, base: Path, depth: int = 0) -> dict[str, Any]:
+            if not isinstance(spec, dict) or depth > 4:
+                raise APIError(400, "reference view must be a clip source object")
+            if len(json.dumps(spec, ensure_ascii=False).encode("utf-8")) > MAX_CLIP_MANIFEST_BYTES:
+                raise APIError(400, "reference view manifest exceeds 2 MB")
+            sources = [key for key in ("manifest_path", "video_path", "frames") if key in spec]
+            if len(sources) != 1:
+                raise APIError(400, "provide manifest_path or video_path or frames for each view")
+            if sources[0] == "manifest_path":
+                path = project_path(spec["manifest_path"], base)
+                document = read_document(path)
+                if "views" in document:
+                    raise APIError(400, "nested multi-view manifests are not supported")
+                metadata = {key: value for key, value in spec.items() if key in {"name", "fps", "duration_sec", "camera_manifest_path"}}
+                document = {**document, **metadata}
+                document.setdefault("name", path.stem)
+                return prepare_view(document, path.parent, depth + 1)
+            source_type = "sequence"
+            if sources[0] == "video_path":
+                source = project_path(spec["video_path"], base)
+                fps = fps_value(spec.get("fps", 10))
+                frames, duration = sample_video(source, fps)
+                name = spec.get("name", source.name)
+                source_type = "video"
+            else:
+                entries = spec["frames"]
+                if not isinstance(entries, list) or not 1 <= len(entries) <= 600:
+                    raise APIError(400, "clip manifest must contain 1 to 600 frames")
+                frames = []
+                for entry in entries:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                        raise APIError(400, "each clip frame needs a path")
+                    source = project_path(entry["path"], base)
+                    name, data = self.store._read_reference_path(str(source))
+                    frame = {"name": entry.get("name", name), "data": data}
+                    for key in ("time_sec", "camera"):
+                        if key in entry:
+                            frame[key] = entry[key]
+                    frames.append(frame)
+                fps = fps_value(spec.get("fps"))
+                last_time = number(frames[-1].get("time_sec", (len(frames) - 1) / fps), "frame time_sec")
+                duration = spec.get("duration_sec", last_time + 1 / fps)
+                name = spec.get("name", "Reference clip")
+            attach_cameras(frames, spec, base, fps)
+            return prepare_clip(self.store, {"name": clip_name(name), "fps": fps, "duration_sec": duration},
+                                local_frames=frames, source_type=source_type, byte_limit=MAX_LOCAL_CLIP_BYTES, write_media=False)
+
+        sources = [key for key in ("manifest_path", "video_path", "frames") if key in payload]
+        if len(sources) != 1:
+            raise APIError(400, "provide manifest_path or video_path or frames")
+        document = None
+        base = self.project_dir
+        if sources[0] == "manifest_path":
+            source = project_path(payload["manifest_path"], base)
+            document = read_document(source, allow_group=True)
+            base = source.parent
+        controls = {key: payload[key] for key in ("append_view", "replace_view_id") if key in payload}
+        if document is not None and "views" in document:
+            views = document["views"]
+            if not isinstance(views, list) or not 1 <= len(views) <= MAX_REFERENCE_VIEWS:
+                raise APIError(400, "multi-view manifest must contain 1 to 8 views")
+            prepared = [prepare_view(view, base) for view in views]
+            if "name" in document:
+                controls["group_name"] = clip_name(document["name"])
+        else:
+            spec = document if document is not None else payload
+            overrides = {key: payload[key] for key in ("name", "fps", "duration_sec", "camera_manifest_path") if key in payload}
+            # Existing sequence manifests define their own sampling. The MCP
+            # fps argument applies to video, while an explicit nested view fps
+            # may still override the sequence selected by that view.
+            if document is not None and "frames" in document:
+                overrides.pop("fps", None)
+            spec = {**spec, **overrides}
+            if payload.get("view_name") is not None:
+                spec["name"] = payload["view_name"]
+            if document is not None:
+                spec.setdefault("name", source.stem)
+            prepared = [prepare_view(spec, base)]
+        return self.store._set_prepared_reference_views(workspace["session_id"], controls, prepared)
 
     def _reference_camera_manifest(self) -> list[tuple[str, dict[str, Any]]]:
         """Load optional filename-prefix camera mapping from the private data dir.
@@ -1070,6 +1136,7 @@ class WorkspaceGateway:
 
     def apply_reference_camera_manifest(self) -> dict[str, Any]:
         """Attach a project-specific camera manifest to references already imported."""
+        from dynamic import reference_views
         workspace = self.ensure()
         entries = self._reference_camera_manifest()
         if not entries:
@@ -1077,14 +1144,18 @@ class WorkspaceGateway:
         session_id = workspace["session_id"]
         session = self.store.get_session(session_id)
         updates = []
-        for reference in session["reference_images"]:
+        references = [(reference, reference["name"]) for reference in session["reference_images"]]
+        references += [(frame, f"{view['name']}_{frame['name']}") for view in reference_views(session.get("reference_clip")) for frame in view["frames"]]
+        for reference, qualified_name in references:
             data = (self.store.media_dir / reference["url"].rsplit("/", 1)[-1]).read_bytes()
             camera = self._manifest_camera(reference["name"], data, entries)
+            if camera is None and qualified_name != reference["name"]:
+                camera = self._manifest_camera(qualified_name, data, entries)
             if camera is not None and reference.get("camera") != camera:
                 updates.append({"reference_id": reference["id"], "camera": camera})
         if updates:
             return self.store.set_reference_cameras(session_id, updates)
-        return {"session_id": session_id, "reference_images": session["reference_images"]}
+        return {"session_id": session_id, "reference_images": session["reference_images"], "reference_clip": session.get("reference_clip")}
 
     def set_reference_cameras(self, cameras: Any) -> dict[str, Any]:
         workspace = self.ensure()
@@ -1401,9 +1472,11 @@ class WorkspaceGateway:
         for frame in feedback.get("dynamic_frames", []):
             lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
             frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""
+            view_label = f"机位 {frame['view_name']} (ID {frame['view_id']})，" if frame.get("view_id") else ""
+            reference_time = f"，参考采样时间 {frame['reference_time_sec']:.6f} 秒" if "reference_time_sec" in frame else ""
             for field, label in (("reference_original", "参考原帧"), ("reference_annotated", "带用户标记的参考帧"), ("scene_original", "干净场景帧"), ("scene_annotated", "带标记和高亮的场景帧")):
                 if frame.get(field + "_url"):
-                    add(f"{label}：{frame_label}{frame['time_sec']:.6f} 秒，证据 {frame['id']}，场景版本 {frame['scene_revision']}", frame[field + "_url"])
+                    add(f"{label}：{view_label}{frame_label}{frame['time_sec']:.6f} 秒{reference_time}，证据 {frame['id']}，场景版本 {frame['scene_revision']}", frame[field + "_url"])
         lines += ["", "红线、箭头、编号、框和画笔痕迹是用户后画的提示，不是参考图中的真实几何。请结合图像和原话继续当前重建任务；修改完成后调用 workspace_publish_scene 发布新的 GLB。"]
         return "\n".join(lines), image_paths
 

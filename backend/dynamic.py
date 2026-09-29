@@ -18,10 +18,36 @@ from typing import Any
 from core import APIError, MAX_REFERENCE_BYTES, _safe_json
 
 MAX_CLIP_FRAMES = 600
+MAX_REFERENCE_VIEWS = 8
+MAX_CLIP_MANIFEST_BYTES = 2 * 1024 * 1024
+MAX_MULTIVIEW_MANIFEST_BYTES = MAX_REFERENCE_VIEWS * MAX_CLIP_MANIFEST_BYTES
 MAX_BROWSER_CLIP_BYTES = 40 * 1024 * 1024
 MAX_LOCAL_CLIP_BYTES = 250 * 1024 * 1024
 MAX_DYNAMIC_FRAMES = 8
 IMAGE_FIELDS = ("reference_original", "reference_annotated", "scene_original", "scene_annotated")
+
+
+def reference_views(clip: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Expose the original clip as the first view without duplicating its frames."""
+    if not clip:
+        return []
+    return [{key: value for key, value in clip.items() if key != "views"}, *clip.get("views", [])]
+
+
+def reference_frames(clip: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [frame for view in reference_views(clip) for frame in view.get("frames", [])]
+
+
+def shared_duration(clip: dict[str, Any]) -> float:
+    return max(view["duration_sec"] for view in reference_views(clip))
+
+
+def reference_clip_metadata(clip: dict[str, Any]) -> dict[str, Any]:
+    result = {key: copy.deepcopy(value) for key, value in clip.items() if key not in {"frames", "views"}}
+    if clip.get("views"):
+        result["views"] = [{key: copy.deepcopy(value) for key, value in view.items() if key != "frames"} for view in clip["views"]]
+    result["shared_duration_sec"] = shared_duration(clip)
+    return result
 
 
 def number(value: Any, label: str, *, minimum: float = 0, maximum: float = 86400) -> float:
@@ -91,7 +117,8 @@ def sample_video(source: Path, fps: float) -> tuple[list[dict[str, Any]], float]
 
 
 def prepare_clip(store: Any, payload: Any, *, local_frames: list[dict[str, Any]] | None = None,
-                 source_type: str = "sequence", byte_limit: int = MAX_BROWSER_CLIP_BYTES) -> dict[str, Any]:
+                 source_type: str = "sequence", byte_limit: int = MAX_BROWSER_CLIP_BYTES,
+                 write_media: bool = True) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise APIError(400, "clip must be an object")
     fps = fps_value(payload.get("fps"))
@@ -129,9 +156,15 @@ def prepare_clip(store: Any, payload: Any, *, local_frames: list[dict[str, Any]]
         raise APIError(400, "clip duration must include its last frame")
     # Write only after the entire import passes validation.
     result = {"clip_id": uuid.uuid4().hex, "name": name, "source_type": source_type, "fps": fps, "duration_sec": duration,
-              "frames": [{**frame, "url": store._write_media(data)} for frame, data in prepared]}
+              "frames": [{**frame, **({"url": store._write_media(data)} if write_media else {"data": data})} for frame, data in prepared]}
     if source_type == "video":
         result["sampled"] = True
+    return result
+
+
+def publish_prepared_clip(store: Any, clip: dict[str, Any]) -> dict[str, Any]:
+    result = {key: copy.deepcopy(value) for key, value in clip.items() if key != "frames"}
+    result["frames"] = [{**{key: value for key, value in frame.items() if key != "data"}, "url": store._write_media(frame["data"])} for frame in clip["frames"]]
     return result
 
 
@@ -153,7 +186,11 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
         raise APIError(400, "timeline clip_id must identify the current reference clip")
     duration = number(timeline.get("duration_sec"), "timeline duration_sec", minimum=0.001)
     fps = fps_value(timeline.get("fps"))
-    if clip and (abs(duration - clip["duration_sec"]) > 1e-4 or abs(fps - clip["fps"]) > 1e-4):
+    views = {view["clip_id"]: view for view in reference_views(clip)}
+    timeline_view_id = timeline.get("view_id", clip_id)
+    if timeline_view_id is not None and (not isinstance(timeline_view_id, str) or timeline_view_id not in views):
+        raise APIError(400, "timeline view_id does not match a current reference view")
+    if clip and (abs(duration - shared_duration(clip)) > 1e-4 or abs(fps - clip["fps"]) > 1e-4):
         raise APIError(400, "timeline duration/fps must match the current reference clip")
     time_sec = number(timeline.get("time_sec"), "timeline time_sec", maximum=duration)
     scope = timeline.get("scope", {"kind": "frame"})
@@ -169,12 +206,10 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
     elif "start_sec" in scope or "end_sec" in scope:
         raise APIError(400, "only range scope accepts start_sec/end_sec")
     normalized_timeline = {"clip_id": clip_id, "time_sec": time_sec, "duration_sec": duration, "fps": fps, "scope": normalized_scope}
+    if timeline_view_id is not None:
+        normalized_timeline.update(view_id=timeline_view_id, view_name=views[timeline_view_id]["name"])
     if not isinstance(frames, list) or not 1 <= len(frames) <= MAX_DYNAMIC_FRAMES:
         raise APIError(400, "dynamic_frames must contain 1 to 8 frozen evidence frames")
-    references = {frame["id"]: frame for frame in clip["frames"]} if clip else {}
-    # The ordinal is defined by the imported sequence, including irregular sampling
-    # and older clips saved before frame_index existed. Never infer it from fps.
-    reference_indices = {frame["id"]: index for index, frame in enumerate(clip["frames"])} if clip else {}
     static_references = {reference["id"]: reference for reference in session.get("reference_images", [])}
     prepared = []
     seen = set()
@@ -195,12 +230,19 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
                            detail={"code": "feedback_revision_conflict", "current_scene_revision": store.state["scene"]["revision"]})
         reference_id = item.get("reference_frame_id")
         static_reference_id = item.get("static_reference_id")
-        if static_reference_id is not None and static_reference_id not in static_references:
+        view_id = item.get("view_id", clip_id if reference_id is not None else None)
+        if view_id is not None and (not isinstance(view_id, str) or view_id not in views):
+            raise APIError(400, "dynamic frame view_id is unknown")
+        view = views.get(view_id)
+        references = {reference["id"]: reference for reference in view["frames"]} if view else {}
+        # The authoritative ordinal belongs to this view's imported sequence.
+        reference_indices = {reference["id"]: index for index, reference in enumerate(view["frames"])} if view else {}
+        if static_reference_id is not None and (not isinstance(static_reference_id, str) or static_reference_id not in static_references):
             raise APIError(400, "dynamic frame static_reference_id is unknown")
         if reference_id is not None and static_reference_id is not None:
             raise APIError(400, "dynamic frame must choose a clip frame or a static reference")
-        if reference_id is not None and reference_id not in references:
-            raise APIError(400, "dynamic frame reference_frame_id is unknown")
+        if reference_id is not None and (not isinstance(reference_id, str) or reference_id not in references):
+            raise APIError(400, "dynamic frame reference_frame_id is unknown in its reference view")
         if reference_id is not None:
             nearest = min(references.values(), key=lambda reference: abs(reference["time_sec"] - frame_time))
             if abs(references[reference_id]["time_sec"] - frame_time) > abs(nearest["time_sec"] - frame_time) + 1e-5:
@@ -229,6 +271,9 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
                  "camera": copy.deepcopy(camera), "selected_object_ids": list(selected), "selected_scene_nodes": nodes}
         if reference_id is not None:
             frame["frame_index"] = reference_indices[reference_id]
+            frame.update(view_id=view_id, view_name=view["name"], reference_time_sec=references[reference_id]["time_sec"])
+        elif view_id is not None:
+            frame.update(view_id=view_id, view_name=view["name"])
         if static_reference_id is not None:
             frame["static_reference_id"] = static_reference_id
         animations = item.get("animation_clips", [])
@@ -286,7 +331,7 @@ def validate_timed_annotations(annotations: list[dict[str, Any]], timeline: dict
         # Client indices are display hints; only a validated clip evidence frame
         # can supply the authoritative ordinal in submitted feedback.
         annotation.pop("frame_index", None)
-        timed = any(key in annotation for key in ("frame_id", "time_sec", "clip_id"))
+        timed = any(key in annotation for key in ("frame_id", "time_sec", "clip_id", "view_id"))
         if not timed:
             continue
         frame = evidence.get(annotation.get("frame_id"))
@@ -296,5 +341,15 @@ def validate_timed_annotations(annotations: list[dict[str, Any]], timeline: dict
             raise APIError(400, "annotation timestamp, clip and revision must match its evidence frame")
         if annotation.get("pane") == "reference" and annotation.get("reference_image_id") != (frame["reference_frame_id"] or frame.get("static_reference_id")):
             raise APIError(400, "timed annotation reference must match its evidence frame")
+        view_id = frame.get("view_id")
+        if annotation.get("view_id") != view_id and not (annotation.get("view_id") is None and view_id == timeline["clip_id"]):
+            raise APIError(400, "annotation view_id must match its evidence frame")
+        for key in ("view_name", "reference_time_sec"):
+            annotation.pop(key, None)
+        if view_id is not None:
+            annotation["view_id"] = view_id
+            annotation["view_name"] = frame["view_name"]
+            if "reference_time_sec" in frame:
+                annotation["reference_time_sec"] = frame["reference_time_sec"]
         if "frame_index" in frame:
             annotation["frame_index"] = frame["frame_index"]

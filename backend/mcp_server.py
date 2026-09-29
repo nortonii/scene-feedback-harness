@@ -133,10 +133,12 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
             content.append(_preview_image(Path(crop["path"])))
         for frame in item.get("dynamic_frames", []):
             frame_label = f"clip frame {frame['frame_index'] + 1}, " if "frame_index" in frame else ""
-            content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, {frame_label}time {frame['time_sec']:.6f}s, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
+            view_label = f"view {frame['view_name']} (ID {frame['view_id']}), " if frame.get("view_id") else ""
+            reference_time = f", reference sample time {frame['reference_time_sec']:.6f}s" if "reference_time_sec" in frame else ""
+            content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, {view_label}{frame_label}time {frame['time_sec']:.6f}s{reference_time}, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
             for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
                 if frame.get(name + "_path"):
-                    content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()} ({frame_label}time {frame['time_sec']:.6f}s, evidence {frame['id']}): {frame[name + '_path']}"))
+                    content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()} ({view_label}{frame_label}time {frame['time_sec']:.6f}s{reference_time}, evidence {frame['id']}): {frame[name + '_path']}"))
                     content.append(_preview_image(Path(frame[name + "_path"])))
     return CallToolResult(content=content, structured_content=enriched)
 
@@ -213,7 +215,8 @@ def workspace_get_context() -> CallToolResult:
     for reference in context["reference_images"]:
         reference["path"] = str(_image_path(reference["url"]))
     if context.get("reference_clip"):
-        for frame in context["reference_clip"]["frames"]:
+        from dynamic import reference_frames
+        for frame in reference_frames(context["reference_clip"]):
             frame["path"] = str(_image_path(frame["url"]))
     for obj in context["scene"]["objects"]:
         if obj.get("type") == "model" and obj.get("url", "").startswith("/assets/"):
@@ -243,17 +246,21 @@ def workspace_publish_scene(local_path: str, expected_revision: int) -> dict[str
 @mcp.tool()
 def workspace_set_reference_clip(manifest_path: str | None = None, video_path: str | None = None,
                                  fps: float | None = None, camera_manifest_path: str | None = None,
-                                 clear: bool = False) -> dict[str, Any]:
+                                 clear: bool = False, append_view: bool = False,
+                                 view_name: str | None = None, replace_view_id: str | None = None) -> dict[str, Any]:
     """Load a project-local image-sequence manifest or video for synchronized dynamic review.
 
     Sequence JSON: {name?,fps?,duration_sec?,frames:[{path,time_sec?,camera?}]}.
     Paths are relative to the manifest and must remain within the project.
     Videos are fully sampled into at most 600 frames (ffmpeg required); fps defaults to 10.
     An optional video camera manifest has one camera or timed frames[{time_sec,camera}].
+    A multi-view manifest has views:[{name?,manifest_path|video_path|frames,fps?,duration_sec?,camera_manifest_path?}].
+    append_view=True adds views while preserving the primary clip ID and existing frames (up to 8 views).
+    replace_view_id updates one existing view. view_name labels a single imported view.
     clear=True removes the current clip. This does not change scene revision.
     """
     ensure_http_server()
-    payload = {"clear": True} if clear else {key: value for key, value in {"manifest_path": manifest_path, "video_path": video_path, "fps": fps, "camera_manifest_path": camera_manifest_path}.items() if value is not None}
+    payload = {"clear": True} if clear else {key: value for key, value in {"manifest_path": manifest_path, "video_path": video_path, "fps": fps, "camera_manifest_path": camera_manifest_path, "append_view": append_view, "view_name": view_name, "replace_view_id": replace_view_id}.items() if value is not None}
     return _http("POST", "/api/workspace/clip", payload, private=True, timeout=120)
 
 

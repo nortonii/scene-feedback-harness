@@ -10,6 +10,16 @@ export function frameAtTime(frames, time) {
   return frames[low];
 }
 
+// Synchronized views can have different sampling rates. Match the shared
+// scene time to the closest available frame without moving that shared clock.
+export function nearestFrameAtTime(frames, time) {
+  const before = frameAtTime(frames, time);
+  if (!before) return null;
+  const index = frames.indexOf(before);
+  const after = frames[index + 1];
+  return after && Math.abs(after.time_sec - time) < Math.abs(before.time_sec - time) - 1e-7 ? after : before;
+}
+
 export function stepTime(frames, time, direction, fps, duration) {
   if (frames?.length) {
     const index = frames.indexOf(frameAtTime(frames, time));

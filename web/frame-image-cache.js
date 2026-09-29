@@ -148,11 +148,25 @@ export function createFrameImageCache({maxEntries=32, maxBytes=80 * 1024 * 1024,
     queue = [...neighbors].filter((url) => !entries.has(url));
     pump();
   }
+  function retain(urls) {
+    urls = urlsList(urls);
+    const wanted = new Set(urls);
+    if (wanted.size === foreground.size && [...wanted].every((url) => foreground.has(url))) return;
+    // Returning to an already visible/cached view still supersedes a pending
+    // camera switch, without downloading that visible image again.
+    generation++; batchController?.abort(); batchController = null;
+    foreground = wanted; displayed = new Set(urls);
+    neighbors = new Set(); queue = [];
+    for (const entry of entries.values()) {
+      if (entry.status === 'pending' && !wanted.has(entry.url)) remove(entry);
+    }
+    trim();
+  }
   function clear() {
     generation++; batchController?.abort(); batchController = null;
     foreground = new Set(); displayed = new Set(); neighbors = new Set(); queue = [];
     for (const entry of entries.values()) remove(entry);
     bytes = 0;
   }
-  return {prepare, prefetch, clear};
+  return {prepare, prefetch, retain, clear};
 }
