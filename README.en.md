@@ -27,7 +27,7 @@ This interface helps people point out problems. It does not define a reconstruct
 
 ## Page layout and navigation
 
-The page retains its warm off-white background and black or gray controls. Compact headers and margins give the side-by-side reference and scene more room. A translucent glass conversation dock with soft highlights and rounded edges floats at the bottom; task, activity, and reference panels open when needed.
+The page retains its warm off-white background and black or gray controls, with a consistent system sans-serif typeface and distinct sizes for headings, body text, controls, and metadata. Repeated helper copy is omitted; actionable queue, connection, and delivery states appear when needed. Compact headers and margins give the side-by-side reference and scene more room. A translucent glass conversation dock with soft highlights and rounded edges floats at the bottom; task, activity, and reference panels open when needed.
 
 | Control | Purpose |
 | --- | --- |

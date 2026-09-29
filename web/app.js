@@ -21,6 +21,7 @@ function newId() {
 const labels = {point:'点', rectangle:'方框', line:'线段', arrow:'箭头', text:'文字', freehand:'自由画笔'};
 const glyphs = {point:'●', rectangle:'▢', line:'╱', arrow:'↗', text:'T', freehand:'〰'};
 const circled = ['','①','②','③','④','⑤','⑥','⑦','⑧','⑨'];
+const annotationFontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
 const ui = {
   viewport:id('viewport'), sceneStage:id('scene-stage'), sceneCanvas:id('scene-annotations'),
   referenceStage:id('reference-stage'), referenceMedia:id('reference-media'),
@@ -321,7 +322,7 @@ function setSession(session) {
   ui.referenceInput.disabled = state.sessionStatus !== 'open';
   ui.clipInput.disabled = !editable();
   if (state.sessionStatus !== 'open') {
-    ui.caption.textContent = '这个会话已结束。已保存的标记仍可查看。';
+    ui.caption.textContent = '会话已结束，标记仍可查看。';
   } else {
     updateSubmitLabel();
   }
@@ -428,16 +429,17 @@ function updateSubmitLabel() {
     ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
-    ui.caption.textContent = state.pendingSubmission
-      ? '上次提交的送达状态未确认。重试沿用同一消息编号。'
+    ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
+      ? '会话已结束，标记仍可查看。'
+      : state.pendingSubmission
+        ? '送达未确认，重试不会重复创建反馈。'
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status)
-        ? '目标任务正在执行；这条图文反馈会加入下一轮。'
+        ? '发送后排队，目标任务空闲时自动处理。'
       : bound && status === 'delivery_uncertain'
-        ? '请先核对目标 Codex 任务中的送达情况；新反馈会先保存。'
-      : bound
-        ? '原图、标注图和场景截图会送入当前选择的 Codex 任务。'
-      : '反馈会保存在工作台，待 MCP 工具读取后交回 Codex。';
-    appendSceneSnapshotHint();
+        ? '请先在目标任务核对送达情况；新反馈会先保存。'
+      : bound && ['disconnected', 'error'].includes(status)
+        ? '暂未连接；反馈先保存，恢复后自动发送。'
+      : bound ? '' : '反馈先保存，等待 MCP 工具读取。';
     return;
   }
   const label = state.pendingSubmission ? '重试发送'
@@ -448,16 +450,12 @@ function updateSubmitLabel() {
   ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission;
-  if (state.pendingSubmission) ui.caption.textContent = '上一条消息的送达状态尚未确认。重试会使用相同编号，不会重复启动一轮。';
-  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '这条图文消息已保存，Codex 空闲后会自动发送。';
-  else if (status === 'disconnected' || status === 'error') ui.caption.textContent = 'Codex 暂时未连接；消息会在本机保存，恢复后自动进入同一会话。';
-  else ui.caption.textContent = '原图、标注图和场景截图会作为图像输入送入当前 Codex 会话。';
-  appendSceneSnapshotHint();
-}
-function appendSceneSnapshotHint() {
-  if (state.annotations.some((mark) => mark.pane === 'scene')) {
-    ui.caption.textContent += ' 场景标记使用已保存的原截图，旋转不会改变其视角。';
-  }
+  if (['submitted', 'cancelled'].includes(state.sessionStatus)) ui.caption.textContent = '会话已结束，标记仍可查看。';
+  else if (state.pendingSubmission) ui.caption.textContent = '送达未确认，重试不会重复创建反馈。';
+  else if (['running', 'awaiting_approval', 'waiting'].includes(status)) ui.caption.textContent = '发送后排队，Codex 空闲时自动处理。';
+  else if (status === 'delivery_uncertain') ui.caption.textContent = '送达状态待核实，请先查看执行记录。';
+  else if (status === 'disconnected' || status === 'error') ui.caption.textContent = '暂未连接；反馈先保存，恢复后自动发送。';
+  else ui.caption.textContent = '';
 }
 function shortTaskId(threadId) {
   return typeof threadId === 'string' && threadId.length > 12
@@ -1747,7 +1745,7 @@ async function loadScene(sceneData) {
     drawOverlays();
     id('revision-label').textContent = '版本 ' + scene.revision;
     id('scene-name').textContent = scene.name || '当前场景';
-    id('scene-title').textContent = scene.name || 'Codex 的当前结果';
+    id('scene-title').textContent = scene.name || '';
     if (priorRevision !== null) {
       announce('场景已更新到版本 ' + scene.revision + '。已有标注仍绑定原截图。');
     }
@@ -2751,7 +2749,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
     ctx.stroke();
   } else if (annotation.type === 'text' && annotation.text) {
     ctx.setLineDash([]);
-    ctx.font = 'bold ' + Math.round(13 * scale) + 'px sans-serif';
+    ctx.font = 'bold ' + Math.round(13 * scale) + 'px ' + annotationFontFamily;
     const text = String(annotation.text).slice(0, 100);
     const textWidth = Math.min(ctx.measureText(text).width, width - 12);
     ctx.fillStyle = '#f5f4efed';
@@ -2761,7 +2759,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
   }
   if (annotation.group_id && circled[Number(annotation.group_id)]) {
     ctx.setLineDash([]);
-    ctx.font = 'bold ' + Math.round(20 * scale) + 'px sans-serif';
+    ctx.font = 'bold ' + Math.round(20 * scale) + 'px ' + annotationFontFamily;
     ctx.fillStyle = '#f5f4ef';
     ctx.fillRect(x - 5 * scale, y - 30 * scale, 26 * scale, 23 * scale);
     ctx.fillStyle = color;
@@ -3149,7 +3147,7 @@ async function submitFeedback() {
     state.feedbackCount += 1;
     id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
     const delivery = result.delivery?.status || (state.deliveryMode === 'external' ? 'submitted' : 'queued');
-    ui.caption.textContent = '标记仍保留；再次发送前可删除或清空。';
+    ui.caption.textContent = '';
     saveDraft();
     if (state.deliveryMode === 'external') {
       announce(delivery === 'running' ? '图文反馈已送入原 Codex 任务。'
