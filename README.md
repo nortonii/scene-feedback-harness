@@ -132,6 +132,29 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
+## 人体关键点：ViTPose 单人追踪
+
+打开参考区右上角的「人体追踪」，点击「在参考图拖框」圈住一个人，或选用当前原图上已有的框标记。静态图片点「识别当前图」；动态机位从人物框所在帧开始，设置结束时间与采样率，再点「追踪当前机位」。任务异步显示进度并可取消，默认采样 5 fps，每次最多 600 个原始参考帧。
+
+完成后显示 COCO17 二维关键点与骨架，可以关闭骨架显示、下载完整 JSON，或点「引用人体」将 `[[pose:任务ID:原帧ID]]` 插入统一提示。同一反馈最多引用 8 个人体样本，可以来自不同已完成任务或机位。发送时，服务器读取已保存结果，附带**推理原帧、青色估计骨架图、置信度、人物框、机位、帧号、时间与已有相机数据**；估计和红色人工标记分开，原图不被改写。反馈保存成功后清空本轮人体引用，已完成任务继续保留。
+
+结果按场景保存，换机位不会把另一视角的骨架移到当前图；替换片段后仍可读取旧任务的原始证据。取消和失败状态持久化；服务重启将未完成任务标为中断，需要手动重新开始。每个场景只允许一个活跃人体任务，服务内各场景共用一个推理名额，其他场景的任务排队。
+
+这是 **ViTPose+ Base 的单人、单机位 COCO17 二维估计**。前一采样帧的可信关键点用于逐步更新人物 ROI，低可信、画外或丢失人物的骨架不显示。它不保证遮挡或多人交错后的身份连续性，不关联跨机位身份，不提供手指关键点、三维动作重建或自动驱动 Blender 骨骼；偏离人物时请重新框选。JSON 中坐标相对原图归一化，并保留原始宽高和来源。
+
+### 可选推理环境
+
+HTTP 服务不加载模型，ViTPose 在独立进程运行。复用已安装 `torch`、`transformers`、`Pillow`、`numpy`、`scipy`、`opencv-python` 的 Python 环境，以及含 `config.json`、`preprocessor_config.json`、`model.safetensors` 的本地 ViTPose+ Base 权重目录。启动服务前设置：
+
+依赖清单：[requirements-pose.txt](backend/requirements-pose.txt)；[官方模型权重](https://huggingface.co/usyd-community/vitpose-plus-base)；[Transformers ViTPose 文档](https://huggingface.co/docs/transformers/model_doc/vitpose)。
+
+```bash
+export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
+export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
+```
+
+依赖或权重缺失时面板显示原因；未配置仍可圈画和发送普通反馈。自定义 `SCENE_FEEDBACK_POSE_RUNNER` 可指定 JSON 参数数组，必须包含输入清单 `{manifest}` 与输出文件 `{output}` 占位符。已用 RTX 5060 完成真实 ViTPose 推理及反馈图像、MCP 图像验证。
+
 ## 快速试用：房间与柜子
 
 需要 Python 3.11+、支持 WebGL 的浏览器，以及已登录的 **`codex-cli 0.156.1`**。App Server 的请求和响应格式已对照这个版本生成的 JSON Schema 核对；其他版本会明确报错，避免静默使用不兼容字段。
@@ -222,6 +245,9 @@ LAN_IP=192.168.1.10
 | `workspace_open` | 返回或打开这个项目的工作台地址 |
 | `workspace_get_context` | 读取当前参考图、场景版本和项目上下文 |
 | `workspace_get_feedback` | 读取已提交反馈及其实际图像 |
+| `workspace_track_human_pose` | 启动手动框选单人的 ViTPose 异步任务，立即返回 job_id |
+| `workspace_get_human_pose` | 读取环境、进度与 COCO17 结果；`frame_offset` / `max_frames` 分页，默认 8 帧、最多 32 帧，返回完整 JSON 的本地路径 |
+| `workspace_cancel_human_pose` | 取消当前场景内排队或运行中的人体任务，保留完成结果 |
 | `workspace_publish_scene` | 校验并发布新的 GLB，检查预期版本，通知页面刷新 |
 | `workspace_set_reference_clip` | 导入单机位或多机位清单，或用 FFmpeg 对项目内的视频抽帧；`append_view=True` 追加机位 |
 | `workspace_request_feedback` | 默认模式：在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |

@@ -1,0 +1,10 @@
+# Optional ViTPose worker environment, separate from the HTTP server venv.
+# Reuse or install a GPU-compatible PyTorch build first. This file deliberately
+# excludes torch/torchvision to preserve an existing CUDA/vendor environment.
+# Verified with Python 3.12, torch 2.14.0+cu130 and an RTX 5060.
+transformers==5.3.0
+opencv-python==5.0.0.93
+safetensors==0.8.0
+Pillow>=11,<13
+numpy>=2.0,<3
+scipy>=1.14,<2

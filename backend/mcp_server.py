@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import uuid
 import urllib.error
 import urllib.request
 import webbrowser
@@ -82,6 +83,9 @@ def _feedback_with_local_paths(result: dict[str, Any]) -> dict[str, Any]:
             reference["path"] = str(_image_path(reference["url"]))
         for crop in item.get("crops", []):
             crop["path"] = str(_image_path(crop["url"]))
+        for pose in item.get("human_pose", []):
+            for name in ("reference_original", "pose_overlay"):
+                pose[name + "_path"] = str(_image_path(pose[name + "_url"]))
         for name in ("scene_original", "scene_annotated", "screenshot"):
             url = item.get(f"{name}_url")
             if url:
@@ -131,6 +135,14 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
         for crop in item.get("crops", []):
             content.append(TextContent(type="text", text=f"{crop['source'].title()} detail crop: {crop['path']}"))
             content.append(_preview_image(Path(crop["path"])))
+        for pose in item.get("human_pose", []):
+            frame = pose["frame"]
+            label = f"ViTPose estimate {pose['track_id']}; reference {frame['reference_id']}"
+            if "frame_index" in frame:
+                label += f", view {frame['view_name']}, frame {frame['frame_index'] + 1}, {frame['time_sec']:.6f}s"
+            for name in ("reference_original", "pose_overlay"):
+                content.append(TextContent(type="text", text=f"{label}: {name} (estimated 2D keypoints, not user-drawn geometry)"))
+                content.append(_preview_image(Path(pose[name + "_path"])))
         for frame in item.get("dynamic_frames", []):
             frame_label = f"clip frame {frame['frame_index'] + 1}, " if "frame_index" in frame else ""
             view_label = f"view {frame['view_name']} (ID {frame['view_id']}), " if frame.get("view_id") else ""
@@ -234,6 +246,64 @@ def workspace_get_feedback(feedback_id: str) -> CallToolResult:
     ensure_http_server()
     packet = _http("GET", f"/api/workspace/feedback/{feedback_id}")
     return _visual_tool_result({"items": [packet], "next_cursor": 1, "session_id": packet["session_id"]})
+
+
+@mcp.tool()
+def workspace_track_human_pose(bbox: list[float], reference_id: str | None = None, view_id: str | None = None,
+                              start_time_sec: float | None = None, end_time_sec: float | None = None,
+                              sample_fps: float = 5, confidence_threshold: float = .3,
+                              request_id: str | None = None) -> dict[str, Any]:
+    """Start asynchronous ViTPose COCO17 2D tracking for one manually boxed person.
+
+    bbox is normalized [x,y,width,height] in the original reference image.
+    Choose a static reference_id OR one dynamic view_id (read workspace_get_context).
+    A moving ROI tracks within this view only; no cross-view identity or 3D pose is inferred.
+    At most 600 sampled frames. Returns a job_id immediately; read with
+    workspace_get_human_pose. Reuse request_id to retry an uncertain creation.
+    """
+    ensure_http_server()
+    session_id = _http("GET", "/api/workspace/state")["session_id"]
+    payload = {"session_id": session_id, "bbox": bbox, "sample_fps": sample_fps,
+               "confidence_threshold": confidence_threshold, "request_id": request_id or uuid.uuid4().hex}
+    payload.update({key: value for key, value in {"reference_id": reference_id, "view_id": view_id,
+                   "start_time_sec": start_time_sec, "end_time_sec": end_time_sec}.items() if value is not None})
+    return _http("POST", "/api/workspace/pose", payload, private=True)
+
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
+def workspace_get_human_pose(job_id: str | None = None, frame_offset: int = 0, max_frames: int = 8) -> dict[str, Any]:
+    """Read this project's ViTPose job progress and exact sampled-frame keypoints.
+
+    Without job_id, list current-session jobs and runtime availability.
+    Completed jobs include normalized coordinates, confidence, source IDs, view,
+    frame, time, camera, and skeleton edges. Read up to max_frames samples
+    (default 8, maximum 32) from frame_offset; next_frame_offset paginates them.
+    result_json_path retains the complete job on disk. Preserve provenance.
+    """
+    ensure_http_server()
+    if job_id is not None:
+        if re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+            raise ValueError("job_id must be a 32-character hexadecimal ID")
+        if type(frame_offset) is not int or frame_offset < 0 or type(max_frames) is not int or not 1 <= max_frames <= 32:
+            raise ValueError("frame_offset must be nonnegative; max_frames must be between 1 and 32")
+        result = _http("GET", f"/api/workspace/pose/{job_id}")
+        frames = result.get("frames", [])
+        result["result_frame_count"] = len(frames)
+        result["frames"] = frames[frame_offset:frame_offset + max_frames]
+        result["frame_offset"] = frame_offset
+        result["next_frame_offset"] = frame_offset + max_frames if frame_offset + max_frames < len(frames) else None
+        result["result_json_path"] = str(DATA_DIR / "human_pose" / job_id / "job.json")
+        return result
+    return _http("GET", "/api/workspace/pose")
+
+
+@mcp.tool()
+def workspace_cancel_human_pose(job_id: str) -> dict[str, Any]:
+    """Cancel one queued/running ViTPose job in this project; keep completed results."""
+    ensure_http_server()
+    if re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+        raise ValueError("job_id must be a 32-character hexadecimal ID")
+    return _http("POST", f"/api/workspace/pose/{job_id}/cancel", {}, private=True, timeout=20)
 
 
 @mcp.tool()

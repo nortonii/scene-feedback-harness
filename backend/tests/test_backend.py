@@ -395,7 +395,7 @@ class FakeAdapter:
 class GatewayTests(unittest.TestCase):
     def test_mcp_registers_workspace_and_external_review_tools(self) -> None:
         names = [tool.name for tool in asyncio.run(mcp_server.mcp.list_tools())]
-        self.assertEqual(names, ["workspace_open", "workspace_get_context", "workspace_get_feedback", "workspace_publish_scene", "workspace_set_reference_clip", "workspace_request_feedback", "request_visual_feedback", "wait_visual_feedback", "get_visual_feedback"])
+        self.assertEqual(names, ["workspace_open", "workspace_get_context", "workspace_get_feedback", "workspace_track_human_pose", "workspace_get_human_pose", "workspace_cancel_human_pose", "workspace_publish_scene", "workspace_set_reference_clip", "workspace_request_feedback", "request_visual_feedback", "wait_visual_feedback", "get_visual_feedback"])
 
     @staticmethod
     def wait_for(predicate, timeout: float = 3) -> None:

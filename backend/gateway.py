@@ -34,6 +34,7 @@ class WorkspaceGateway:
         self.target_binding_lock = threading.RLock()
         self.project_name: str | None = None
         self.registry_project_id: str | None = None
+        self.pose_jobs: Any = None
         self._worker_lock = threading.Lock()
         self._worker_running = False
         self._worker_thread: threading.Thread | None = None
@@ -71,6 +72,7 @@ class WorkspaceGateway:
         result["object_prompts_supported"] = True
         result["inline_references_supported"] = True
         result["dynamic_scenes_supported"] = True
+        result["human_pose_supported"] = self.pose_jobs is not None
         result["desktop_available"] = self.external_review and bool(
             result.get("thread_id") or getattr(self.adapter, "thread_id", None) or self.desktop_seed_thread_id
         )
@@ -189,6 +191,8 @@ class WorkspaceGateway:
                 self.store.workspace_event("saved_visual_feedback_resumed", {"feedback_ids": restored})
 
     def close(self) -> None:
+        if self.pose_jobs is not None:
+            self.pose_jobs.close()
         with self._worker_lock:
             self._started = False
             worker = self._worker_thread
@@ -1501,6 +1505,10 @@ class WorkspaceGateway:
             lines.append(f"场景截图已按这张参考图的标定相机视角对齐：{reference_names[aligned_id]} (ID {aligned_id})。请把两张图作为同一视角比较；镜头畸变和标定误差仍可能造成少量像素偏差。")
         if feedback.get("annotations"):
             lines.append("标记数据：" + json.dumps(feedback["annotations"], ensure_ascii=False))
+        if feedback.get("human_pose"):
+            lines.append("用户引用的人体关键点（ViTPose 推理估计，单人身份仅在所属机位/追踪任务内有效；不是人工标记或三维动作约束）：")
+            for pose in feedback["human_pose"]:
+                lines.append(json.dumps({key: value for key, value in pose.items() if not key.endswith("_url")}, ensure_ascii=False))
         lines += ["", "附件顺序："]
         image_paths: list[str] = []
 
@@ -1526,6 +1534,15 @@ class WorkspaceGateway:
                 add(label, feedback[key])
         for crop in feedback.get("crops", []):
             add(f"{crop['source']} 局部放大图", crop["url"])
+        for pose in feedback.get("human_pose", []):
+            frame = pose["frame"]
+            label = pose["track_id"]
+            if frame.get("view_name"):
+                label += f" · {frame['view_name']} · 第 {frame['frame_index'] + 1} 帧 · {frame['time_sec']:.6f} 秒"
+            else:
+                label += " · " + frame["reference_name"]
+            add("人体关键点来源原帧：" + label, pose["reference_original_url"])
+            add("ViTPose 估计骨架（青色，区别于人工提示）：" + label, pose["pose_overlay_url"])
         for frame in feedback.get("dynamic_frames", []):
             lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
             frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""

@@ -132,6 +132,29 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
+## Human keypoints: single-person ViTPose tracking
+
+Open `人体追踪` at the top right of the reference pane. Click `在参考图拖框` to box one person, or select an existing rectangle on the original image. For a static image, use `识别当前图`. For a dynamic view, start from the boxed frame, set the end time and sampling rate, then use `追踪当前机位`. Asynchronous jobs show progress and support cancellation. Sampling defaults to 5 fps, with at most 600 original reference frames per job.
+
+Completed results show COCO17 2D joints and a skeleton. Toggle the overlay, download the complete JSON, or use `引用人体` to insert `[[pose:JOB_ID:REFERENCE_ID]]` in the shared prompt. A feedback packet may cite up to 8 samples from different completed jobs or views. The server resolves stored predictions and sends the **original inference frame, cyan estimated-skeleton image, confidence, person box, view, frame number, time and available camera calibration**. Estimates stay separate from red human annotations; originals remain unchanged. Successful feedback saves clear this round's pose references and retain job history.
+
+Results belong to their scene; switching views does not move another camera's skeleton onto the current image. Original evidence remains readable after clip replacement. Cancelled and failed states persist; restarting the service marks unfinished jobs interrupted, requiring an explicit new start. Each scene allows one active pose job, and all scenes share one inference slot; other scenes' jobs wait in the queue.
+
+This is **single-person, single-view ViTPose+ Base COCO17 2D estimation**. A gradual ROI heuristic follows confident joints from the previous sampled frame. Low-confidence, off-image and lost-person skeletons are hidden. It does not guarantee identity through occlusion or crossing people, associate people across views, estimate finger joints or 3D motion, or drive Blender rigs automatically. Draw a new starting box if it drifts. JSON uses coordinates normalized to the original image and preserves its dimensions and provenance.
+
+### Optional inference environment
+
+The HTTP service does not load the model; ViTPose runs in a separate process. Reuse Python with `torch`, `transformers`, `Pillow`, `numpy`, `scipy` and `opencv-python`, and a local ViTPose+ Base model containing `config.json`, `preprocessor_config.json` and `model.safetensors`. Set these before starting the service:
+
+Dependencies: [requirements-pose.txt](backend/requirements-pose.txt); [official model weights](https://huggingface.co/usyd-community/vitpose-plus-base); [Transformers ViTPose documentation](https://huggingface.co/docs/transformers/model_doc/vitpose).
+
+```bash
+export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
+export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
+```
+
+The pane reports missing dependencies or weights; ordinary annotation and feedback remain available without this optional setup. Custom `SCENE_FEEDBACK_POSE_RUNNER` accepts a JSON argv array with required `{manifest}` and `{output}` placeholders. Real ViTPose inference, feedback images and MCP image delivery were verified on an RTX 5060.
+
 ## Quick start: room and cabinet
 
 The browser UI uses Chinese labels: `标注` means “Annotate,” `返回 3D` returns to live selection, and `发送反馈` means “Send feedback.”
@@ -224,6 +247,9 @@ For the desktop task binding option, also keep `--shared-thread-id "$THREAD_ID"`
 | `workspace_open` | Return or open this project's workbench URL |
 | `workspace_get_context` | Read current reference images, scene revision, and project context |
 | `workspace_get_feedback` | Read submitted feedback and its actual images |
+| `workspace_track_human_pose` | Start asynchronous ViTPose for one manually boxed person; return job_id |
+| `workspace_get_human_pose` | Read runtime, progress and COCO17 results; `frame_offset` / `max_frames` pagination defaults to 8 frames (max 32), with a local path to the full JSON |
+| `workspace_cancel_human_pose` | Cancel this scene’s queued/running pose job; retain completed results |
 | `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
 | `workspace_set_reference_clip` | Import a single-view or multi-view manifest, or sample a project-local video with FFmpeg; `append_view=True` appends views |
 | `workspace_request_feedback` | Default mode: ask the user to inspect something on the page and return immediately; their reply becomes the next user message |

@@ -132,6 +132,29 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
+## 人体キーポイント：ViTPose による単独人物の追跡
+
+参照画像の右上で `人体追踪` を開き、`在参考图拖框` で一人を囲むか、その原画像の矩形注釈を選びます。静止画は `识别当前图`、動的カメラは囲んだフレームを開始点として終了時刻と FPS を設定し `追踪当前机位` を押します。非同期ジョブとして進捗を表示し、キャンセルできます。既定値は 5 fps、1 ジョブ最大 600 枚の元の参照フレームです。
+
+完了後は COCO17 の二次元関節と骨格を表示し、表示切替、完全な JSON のダウンロード、`引用人体` による `[[pose:JOB_ID:REFERENCE_ID]]` の挿入が可能です。一つのプロンプトで異なる完了ジョブや視点から最大 8 サンプルを参照できます。送信時は保存済み推定から**推論の原フレーム、シアン色の推定骨格画像、信頼度、人物領域、視点、フレーム番号、時刻、既存のカメラ校正**を添付します。赤い手動注釈と区別し、原画像は変更しません。保存成功後は今回の人体参照を消去し、ジョブ履歴を残します。
+
+結果はシーン別に保存され、視点切替で別カメラの骨格を現在の画像に移しません。クリップ置換後も旧証拠を読めます。キャンセル・失敗を保存し、再起動では未完了ジョブを中断として、自動再実行しません。各シーンの活発なジョブは一つまでで、サービス全体の一つの推論枠を共有し、他シーンのジョブは待機します。
+
+これは **ViTPose+ Base による単独人物・単一カメラの COCO17 二次元推定**です。前のサンプルの信頼できる関節から ROI を徐々に更新します。低信頼度、画像外、人物を見失った骨格は描画しません。遮蔽や人物の交差で同一人物は保証せず、カメラ間の人物対応、指関節、三次元動作復元、Blender リグの自動操作も含みません。外れたら再度囲んでください。JSON の座標は原画像に正規化され、寸法と出典を保持します。
+
+### 任意の推論環境
+
+HTTP サービスはモデルを読み込まず、別プロセスで推論します。`torch`、`transformers`、`Pillow`、`numpy`、`scipy`、`opencv-python` を含む Python 環境と、`config.json`、`preprocessor_config.json`、`model.safetensors` を含むローカル ViTPose+ Base モデルを用意し、起動前に設定します。
+
+依存関係：[requirements-pose.txt](backend/requirements-pose.txt)、[公式モデル重み](https://huggingface.co/usyd-community/vitpose-plus-base)、[Transformers ViTPose ドキュメント](https://huggingface.co/docs/transformers/model_doc/vitpose)。
+
+```bash
+export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
+export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
+```
+
+依存や重みが不足すると理由を表示し、未設定でも通常の注釈と送信は使えます。独自 `SCENE_FEEDBACK_POSE_RUNNER` は JSON 引数配列を取り、`{manifest}`、`{output}` が必須です。RTX 5060 で実際の ViTPose 推論、フィードバック画像と MCP 画像配信を検証しました。
+
 ## クイックスタート：部屋とキャビネット
 
 ブラウザーのボタン表示は中国語です。`标注` は注釈、`返回 3D` はライブの選択画面へ戻る操作、`发送反馈` はフィードバックの送信です。
@@ -224,6 +247,9 @@ LAN_IP=192.168.1.10
 | `workspace_open` | このプロジェクトのワークベンチ URL を返す、または開く |
 | `workspace_get_context` | 現在の参照画像、シーンのリビジョン、プロジェクトのコンテキストを読み取る |
 | `workspace_get_feedback` | 送信済みフィードバックと実際の画像を読み取る |
+| `workspace_track_human_pose` | 手動で囲んだ一人の ViTPose 非同期ジョブを開始し job_id を返す |
+| `workspace_get_human_pose` | 環境・進捗・COCO17 結果を読む。`frame_offset` / `max_frames` でページ化（既定 8 フレーム、最大 32）、全 JSON のローカルパスも返す |
+| `workspace_cancel_human_pose` | 現在シーンの待機中・実行中ジョブをキャンセルし完了結果を保持 |
 | `workspace_publish_scene` | 新しい GLB を検証して公開し、想定リビジョンを確認してページの更新を通知する |
 | `workspace_set_reference_clip` | 単一・複数カメラのマニフェストを読み込む、またはプロジェクト内の動画を FFmpeg で抽出する。`append_view=True` でカメラを追加 |
 | `workspace_request_feedback` | 標準モード：ページで確認を依頼してすぐに返る。返信は次のユーザーメッセージになる |

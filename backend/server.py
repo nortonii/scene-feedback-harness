@@ -12,6 +12,7 @@ import logging
 import mimetypes
 import os
 import re
+import signal
 import sys
 import traceback
 import uuid
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - this server requires Unix file locking
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
 from projects import ProjectContext, ProjectRegistry
+from human_pose import HumanPoseJobs
 
 
 HERE = Path(__file__).resolve().parent
@@ -39,6 +41,7 @@ WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confir
 WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 PROJECT_ROUTE = re.compile(r"^/p/([0-9a-f]{32})(/.*)?$")
+POSE_ROUTE = re.compile(r"^/api/workspace/pose/([0-9a-f]{32})(/cancel)?$")
 
 
 class _DataDirLock:
@@ -232,6 +235,13 @@ def _make_server_unlocked(
             if not hmac.compare_digest(key, self.context.store.browser_token):
                 raise APIError(403, "this operation requires the workspace browser capability")
 
+        def _require_pose_access(self) -> None:
+            key = self.headers.get("X-Scene-Harness-Key", "")
+            if hmac.compare_digest(key, self.context.store.control_token):
+                self._require_control_key()
+            else:
+                self._require_browser_capability()
+
         def _read_json(self) -> dict:
             if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
                 raise APIError(415, "request body must be application/json")
@@ -311,6 +321,21 @@ def _make_server_unlocked(
                 return self._send_json(200, gateway.list_targets())
             if self.command == "GET" and path == "/api/workspace/models":
                 return self._send_json(200, gateway.list_models())
+            if self.command == "GET" and path == "/api/workspace/pose":
+                session_id = query.get("session_id", [None])[0] or gateway.state()["session_id"]
+                return self._send_json(200, gateway.pose_jobs.list(session_id))
+            if self.command == "POST" and path == "/api/workspace/pose":
+                self._require_pose_access()
+                return self._send_json(202, gateway.pose_jobs.start(self._read_json()))
+            pose_match = POSE_ROUTE.fullmatch(path)
+            if pose_match:
+                job_id, cancel = pose_match.groups()
+                if self.command == "GET" and not cancel:
+                    return self._send_json(200, gateway.pose_jobs.get(job_id))
+                if self.command == "POST" and cancel:
+                    self._require_pose_access()
+                    self._read_json()
+                    return self._send_json(200, gateway.pose_jobs.cancel(job_id))
             if self.command == "POST" and path == "/api/workspace/targets":
                 self._require_browser_capability()
                 payload = self._read_json()
@@ -503,6 +528,8 @@ def _make_server_unlocked(
     )
 
     def configure_context(context: ProjectContext) -> None:
+        if context.gateway.pose_jobs is None:
+            context.gateway.pose_jobs = HumanPoseJobs(context.store)
         context.gateway.registry_project_id = context.project_id
         context.gateway.project_name = context.name
         context.gateway.desktop_seed_thread_id = (
@@ -513,7 +540,8 @@ def _make_server_unlocked(
             "env": {"SCENE_FEEDBACK_PORT": str(server.server_port),
                     "SCENE_FEEDBACK_DATA_DIR": str(context.store.data_dir),
                     "SCENE_FEEDBACK_PROJECT_DIR": str(context.project_dir),
-                    "SCENE_FEEDBACK_WEB_DIR": str(web_root)},
+                    "SCENE_FEEDBACK_WEB_DIR": str(web_root),
+                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-29-vitpose"},
             "tool_timeout_sec": 120, "required": True,
         }}}
         context.gateway.browser_url = lambda session_id: browser_url(session_id, server.server_port, context, prefixed=True)
@@ -658,6 +686,9 @@ def main() -> None:
     )
     session_id = server.workspace_gateway.state()["session_id"]
     print(f"Scene feedback UI: {server.browser_url(session_id)}", flush=True)
+    def terminate_server(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, terminate_server)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

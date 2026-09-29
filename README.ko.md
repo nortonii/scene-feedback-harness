@@ -132,6 +132,29 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
+## 인체 키포인트: ViTPose 단일 인물 추적
+
+참고 이미지 오른쪽 위의 `人体追踪`을 열고 `在参考图拖框`으로 한 사람을 둘러싸거나 해당 원본의 기존 사각형 표식을 선택합니다. 정지 이미지는 `识别当前图`, 동적 카메라는 영역을 지정한 프레임부터 종료 시간과 FPS를 정한 뒤 `追踪当前机位`를 누릅니다. 비동기 작업으로 진행률을 표시하며 취소할 수 있습니다. 기본값은 5 fps, 작업당 원본 참고 프레임은 최대 600개입니다.
+
+완료되면 COCO17 2D 관절과 골격을 표시합니다. 표시 전환, 전체 JSON 다운로드, `引用人体`를 통한 `[[pose:JOB_ID:REFERENCE_ID]]` 삽입을 지원합니다. 한 피드백은 서로 다른 완료 작업이나 카메라의 샘플을 최대 8개 인용할 수 있습니다. 서버는 저장된 결과에서 **추론 원본 프레임, 청록색 추정 골격 이미지, 신뢰도, 인물 영역, 카메라, 프레임 번호, 시간과 기존 보정 정보**를 전송합니다. 빨간 수동 표식과 구분되며 원본은 바뀌지 않습니다. 저장 성공 시 이번 인체 인용을 비우고 작업 이력은 유지합니다.
+
+결과는 장면별로 저장되어 카메라 전환 시 다른 시점의 골격을 현재 이미지로 옮기지 않습니다. 클립 교체 뒤에도 이전 증거를 읽을 수 있습니다. 취소·실패를 보존하고 서비스 재시작 시 미완료 작업을 중단으로 표시하며 자동 재실행하지 않습니다. 장면마다 활성 작업은 하나이고 모든 장면이 추론 슬롯 하나를 공유하여 다른 장면의 작업은 대기합니다.
+
+이 기능은 **ViTPose+ Base 단일 인물·단일 카메라 COCO17 2D 추정**입니다. 이전 샘플의 신뢰도 높은 관절로 ROI를 점진적으로 조정하며 낮은 신뢰도, 이미지 밖, 인물을 놓친 골격은 그리지 않습니다. 가림이나 인물 교차 후 신원을 보장하지 않으며 카메라 간 신원 연결, 손가락 관절, 3D 동작 복원, Blender 리그 자동 조작은 포함하지 않습니다. 벗어나면 다시 영역을 지정하세요. JSON 좌표는 원본 기준으로 정규화되며 원본 크기와 출처를 보존합니다.
+
+### 선택적 추론 환경
+
+HTTP 서비스는 모델을 로드하지 않고 별도 프로세스에서 추론합니다. `torch`, `transformers`, `Pillow`, `numpy`, `scipy`, `opencv-python`이 설치된 Python과 `config.json`, `preprocessor_config.json`, `model.safetensors`를 포함한 로컬 ViTPose+ Base 모델을 준비하고 서비스 시작 전에 설정합니다.
+
+의존성: [requirements-pose.txt](backend/requirements-pose.txt), [공식 모델 가중치](https://huggingface.co/usyd-community/vitpose-plus-base), [Transformers ViTPose 문서](https://huggingface.co/docs/transformers/model_doc/vitpose).
+
+```bash
+export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
+export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
+```
+
+의존성이나 가중치가 없으면 이유를 표시하며 일반 표식과 피드백은 설정 없이 이용할 수 있습니다. 사용자 `SCENE_FEEDBACK_POSE_RUNNER`는 JSON 인수 배열이며 `{manifest}`, `{output}` 자리표시자가 필수입니다. RTX 5060에서 실제 ViTPose 추론, 피드백 이미지 및 MCP 이미지 전송을 검증했습니다.
+
 ## 빠른 체험: 방과 캐비닛
 
 브라우저 버튼은 중국어로 표시됩니다. `标注`는 주석, `返回 3D`는 실시간 선택으로 돌아가기, `发送反馈`는 피드백 보내기입니다.
@@ -224,6 +247,9 @@ LAN_IP=192.168.1.10
 | `workspace_open` | 이 프로젝트의 작업대 주소를 반환하거나 엽니다 |
 | `workspace_get_context` | 현재 참고 이미지, 장면 버전 및 프로젝트 문맥을 읽습니다 |
 | `workspace_get_feedback` | 제출된 피드백과 실제 이미지를 읽습니다 |
+| `workspace_track_human_pose` | 수동 지정한 한 사람의 ViTPose 비동기 작업을 시작하고 job_id 반환 |
+| `workspace_get_human_pose` | 환경·진행률·COCO17 결과 읽기; `frame_offset` / `max_frames` 페이지 구분은 기본 8프레임(최대 32), 전체 JSON의 로컬 경로 반환 |
+| `workspace_cancel_human_pose` | 현재 장면의 대기·실행 중 작업 취소, 완료 결과 유지 |
 | `workspace_publish_scene` | 새 GLB를 검증하고 게시하며, 예상 버전을 확인하고 페이지에 새로고침을 알립니다 |
 | `workspace_set_reference_clip` | 단일·여러 카메라 매니페스트를 가져오거나 프로젝트 동영상을 FFmpeg로 샘플링. `append_view=True`로 카메라 추가 |
 | `workspace_request_feedback` | 기본 모드: 페이지에서 검토를 요청하고 즉시 반환합니다. 답변은 다음 사용자 메시지가 됩니다 |

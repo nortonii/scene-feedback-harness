@@ -91,6 +91,22 @@ select { min-width: 0; font-size: 12px; }
 .reference-media { position: relative; max-width: 100%; max-height: 100%; flex: none; transform-origin: center center; }
 .reference-media img, .scene-snapshot-media img { display: block; height: 100%; width: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
 .reference-media canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+.reference-media .human-pose-overlay { pointer-events: none; z-index: 2; }
+.human-pose-popover .popover-content { width: 310px; max-height: min(620px, 75vh); overflow-y: auto; }
+.human-pose-controls p { margin: 0; font-size: 10px; line-height: 1.6; }
+.human-pose-source, .human-pose-range { display: grid; gap: 7px; }
+.human-pose-controls label { font-size: 11px; }
+.human-pose-range-inputs { display: flex; align-items: center; gap: 6px; }
+.human-pose-range-inputs input { min-width: 0; width: 50%; }
+.human-pose-overlay-control { display: flex; align-items: center; gap: 6px; }
+.human-pose-jobs { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.human-pose-job { display: grid; gap: 5px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+.human-pose-job-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+.human-pose-job small { color: var(--muted); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.human-pose-job .human-pose-error { color: #a53d25; }
+.human-pose-job progress { width: 100%; height: 5px; accent-color: #087f8c; }
+.human-pose-job-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.human-pose-job-actions .compact-button { width: auto; }
 .reference-empty { max-width: 280px; text-align: center; padding: 32px; }
 .empty-graphic { font-size: 36px; line-height: 1; color: #adada4; margin-bottom: 18px; }
 .reference-empty strong { font-size: 14px; font-weight: 400; }
