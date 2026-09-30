@@ -445,3 +445,10 @@ dialog::backdrop { background: #17171522; }
 .snapshot-open[aria-pressed=true] { background: var(--paper); border-color: var(--ink); }
 .snapshot-remove { flex: none; padding: 6px; color: var(--muted); }
 .scene-stage:has(.scene-snapshot-strip:not(.hidden)) .selected-chip { top: 66px; }
+
+.eraser-icon { flex: none; }
+body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annotations { cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Ccircle cx='12' cy='12' r='10' fill='none' stroke='white' stroke-width='3'/%3E%3Ccircle cx='12' cy='12' r='10' fill='none' stroke='%23171715' stroke-width='1'/%3E%3C/svg%3E") 12 12, crosshair; }
+@media (max-width: 640px) {
+  .tool-list { flex-wrap: wrap; max-width: 100%; min-width: 0; }
+  .eraser-tool > span { display: none; }
+}

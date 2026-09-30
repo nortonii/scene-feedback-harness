@@ -353,6 +353,100 @@ def verify_scene_modes(page, screenshots):
     mode(False)
 
 
+def verify_eraser(page, screenshots):
+    def tool(name):
+        page.locator(f'[data-tool="{name}"]').click()
+
+    def position(selector, x, y):
+        r = page.locator(selector).bounding_box()
+        return r["x"] + r["width"] * x, r["y"] + r["height"] * y
+
+    def stroke(selector, start, end):
+        page.mouse.move(*position(selector, *start))
+        page.mouse.down()
+        page.mouse.move(*position(selector, *end), steps=1)
+        page.mouse.up()
+
+    page.locator("#chat-collapse").click()
+    tool("erase")
+    scene = "#scene-annotations"
+    before = draft(page)
+    page.mouse.click(*position("#viewport", .6, .4))
+    assert draft(page).get("snapshot") is None, "Erasing live 3D must not capture a screenshot"
+    expect(page.locator(".snapshot-open")).to_have_count(0)
+    page.locator("#snapshot-button").click()
+    first = draft(page)["snapshot"]
+    tool("line")
+    stroke(scene, (.2, .35), (.8, .35))
+    tool("rectangle")
+    stroke(scene, (.25, .55), (.5, .8))
+    tool("point")
+    page.mouse.click(*position("#reference-annotations", .5, .5))
+    page.locator("#browse-button").click()
+    page.locator("#capture-scene-button").click()
+    second = draft(page)["snapshot"]
+    tool("point")
+    page.mouse.click(*position(scene, .55, .35))
+    page.locator(".snapshot-open").first.click()
+    original = draft(page)
+    expect(page.locator("#annotation-count")).to_have_text("4")
+    page.keyboard.press("8")
+    expect(page.locator("body")).to_have_attribute("data-tool", "erase")
+    # Empty box interiors are not ink.
+    page.mouse.click(*position(scene, .375, .67))
+    assert draft(page)["annotations"] == original["annotations"]
+    # One fast gesture crosses a line and rectangle, only in the selected view.
+    page.mouse.move(*position(scene, .55, .2))
+    page.mouse.down()
+    page.mouse.move(*position(scene, .55, .5), steps=1)
+    page.mouse.move(*position(scene, .25, .65), steps=1)
+    assert draft(page)["annotations"] == original["annotations"], "Preview must not alter saved evidence"
+    page.mouse.up()
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    remaining = draft(page)["annotations"]
+    assert any(mark["pane"] == "reference" for mark in remaining)
+    assert any(mark.get("snapshot_id") == second["id"] for mark in remaining)
+    assert draft(page)["snapshot"] == first
+    expect(page.locator(".snapshot-open")).to_have_count(2)
+    page.locator("#undo-annotation").click()
+    assert draft(page)["annotations"] == original["annotations"]
+    page.locator("#redo-annotation").click()
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    page.locator("#undo-annotation").click()
+    # Escape and pointer cancellation discard previews without creating edits.
+    for cancel in ("escape", "pointer"):
+        page.mouse.move(*position(scene, .55, .35)); page.mouse.down()
+        if cancel == "escape":
+            page.keyboard.press("Escape")
+        else:
+            page.locator(scene).dispatch_event("pointercancel", {"pointerId": 1})
+        page.mouse.up()
+        assert draft(page)["annotations"] == original["annotations"]
+    page.locator("#reference-zoom-in").click()
+    page.locator("#reference-zoom-in").click()
+    page.mouse.click(*position("#reference-annotations", .5, .5))
+    expect(page.locator("#annotation-count")).to_have_text("3")
+    assert all(mark["pane"] == "scene" for mark in draft(page)["annotations"])
+    page.wait_for_function("""() => {
+      const canvas = document.getElementById("reference-annotations");
+      const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let i=3; i<data.length; i+=4) if (data[i]) return false;
+      return true;
+    }""", timeout=5000)
+    assert draft(page)["snapshot"] == first
+    if screenshots:
+        page.screenshot(path=str(screenshots / "eraser-active.png"))
+    page.reload()
+    wait_ready(page)
+    expect(page.locator("#annotation-count")).to_have_text("3")
+    expect(page.locator(".snapshot-open")).to_have_count(2)
+    assert draft(page)["snapshot"] == first
+    page.locator("#reference-zoom-reset").click()
+    page.locator("#clear-annotations").click()
+    page.locator("#browse-button").click()
+    page.locator("#chat-launcher").click()
+
+
 def verify_selection_panel(page, screenshots):
     page.locator("#chat-history-toggle").click()
     composer_before = page.locator("#feedback-note").bounding_box()
@@ -620,6 +714,7 @@ def verify_project_isolation(page, server, screenshots):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshots", type=Path)
+    parser.add_argument("--eraser-only", action="store_true", help="Run only the eraser interaction regression.")
     parser.add_argument("--baseline", action="store_true", help="Report original geometry only.")
     args = parser.parse_args()
     screenshots = args.screenshots
@@ -657,6 +752,9 @@ def main():
                 browser = playwright.chromium.launch(headless=True, args=[
                     "--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader",
                     "--enable-unsafe-swiftshader",
+                    # SwiftShader can retain stale 2D pixels after clearRect;
+                    # keep annotation pixel checks on the software 2D path.
+                    "--disable-accelerated-2d-canvas",
                 ])
                 context = browser.new_context(viewport={"width": 1440, "height": 900},
                                               device_scale_factor=1, locale="zh-CN")
@@ -679,8 +777,16 @@ def main():
                     browser.close()
                     return
 
+                if args.eraser_only:
+                    verify_eraser(page, screenshots)
+                    assert not errors, errors
+                    passed("eraser interaction and cleared overlay pixels")
+                    browser.close()
+                    return
                 verify_scene_modes(page, screenshots)
                 passed("multiple static views preserve independent marks, current-camera capture, selection, legacy-draft upgrade, reload, deletion undo, eight-view capacity and narrow-screen gallery")
+                verify_eraser(page, screenshots)
+                passed("eraser sweeps only visible marks, preserves other screenshots, batches undo/redo, cancels previews and works after reference zoom and reload")
                 verify_selection_panel(page, screenshots)
                 passed("selecting a real GLB part leaves composer geometry unchanged; side panel inserts node references and clears selection")
                 expect(page.locator("#chat-dock")).to_be_visible()
@@ -936,6 +1042,9 @@ def main():
                 page.locator("#snapshot-button").click()
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 moment = draft(page)["snapshot"]
+                page.locator('[data-tool="point"]').click()
+                r = page.locator("#scene-annotations").bounding_box()
+                page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 saved_time = page.locator("#timeline-seek").input_value()
                 page.locator("#browse-button").click()
                 page.locator("#timeline-prev").click()
@@ -944,10 +1053,22 @@ def main():
                 page.locator("#snapshot-button").click()
                 expect(page.locator("#timeline-seek")).to_have_value(current_time)
                 assert draft(page)["snapshot"]["id"] != moment["id"]
+                other_moment = draft(page)["snapshot"]["id"]
+                page.locator('[data-tool="point"]').click()
+                r = page.locator("#scene-annotations").bounding_box()
+                page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
+                expect(page.locator("#annotation-count")).to_have_text("2")
                 page.locator(".moment-card button").first.click()
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 assert draft(page)["snapshot"] == moment
+                page.locator('[data-tool="erase"]').click()
+                r = page.locator("#scene-annotations").bounding_box()
+                page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
+                expect(page.locator("#annotation-count")).to_have_text("1")
+                assert draft(page)["annotations"][0]["frame_id"] == other_moment
+                expect(page.locator(".moment-card")).to_have_count(2)
+                passed("eraser removes only the active dynamic frame's marks and preserves both evidence frames")
                 page.locator("#browse-button").click()
                 page.locator("#clear-annotations").click()
                 passed("annotation mode captures the current dynamic frame; explicit moment selection restores the original frame and evidence")
@@ -984,6 +1105,7 @@ def main():
                           const r = el.getBoundingClientRect();
                           return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
                         }""")
+                    expect(page.locator('[data-tool="erase"]')).to_be_visible()
                     expect(page.locator("#projects-dialog-button")).to_be_visible()
                     expect(page.locator("#human-pose-panel summary")).to_be_visible()
                     page.locator("#human-pose-panel summary").click()

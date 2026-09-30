@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
 import { createAnnotationHistory } from './annotation-history.js';
+import { eraserHitsAnnotation } from './eraser.js';
 import { createFrameImageCache } from './frame-image-cache.js';
 import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
 import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, drawPoseSkeleton, POSE_COLORS } from './human-pose.js';
@@ -3343,6 +3344,10 @@ function cameraData() {
 }
 function updateSceneHint() {
   if (state.sceneLoading) { ui.sceneHint.textContent = '新场景正在加载，完成后可继续标注和发送。'; return; }
+  if (state.mode === 'erase') {
+    ui.sceneHint.textContent = state.sceneView === 'snapshot' ? '划过标记擦除整条 · 可撤销' : '先选择一张截图，再擦除标记';
+    return;
+  }
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
       ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
@@ -3366,9 +3371,11 @@ function updateMode() {
   const drawing = state.mode !== 'select' && editable();
   ui.referenceCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
   ui.sceneCanvas.style.pointerEvents = drawing && state.sceneView === 'snapshot' ? 'auto' : 'none';
-  ui.referenceCanvas.style.cursor = drawing ? 'crosshair' : 'default';
-  ui.sceneCanvas.style.cursor = drawing ? 'crosshair' : 'default';
-  renderer.domElement.style.cursor = drawing && state.sceneView === 'live' ? 'crosshair' : '';
+  const cursor = drawing ? (state.mode === 'erase' ? '' : 'crosshair') : 'default';
+  ui.referenceCanvas.style.cursor = cursor;
+  ui.sceneCanvas.style.cursor = cursor;
+  renderer.domElement.style.cursor = drawing && state.sceneView === 'live' ? (state.mode === 'erase' ? 'not-allowed' : 'crosshair') : '';
+  ui.referenceHint.textContent = state.mode === 'erase' ? '划过标记擦除整条 · 可撤销' : '在图片上圈出想让 Codex 注意的地方';
   controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
   ui.referenceHint.classList.toggle('hidden', !drawing || !activeReference());
   updateSceneHint();
@@ -3377,7 +3384,7 @@ function updateMode() {
 }
 function setMode(mode) {
   if (state.submitting || state.pendingSubmission) return;
-  if (!['select','point','rectangle','line','arrow','text','freehand'].includes(mode)) return;
+  if (!['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode)) return;
   state.mode = mode;
   if (mode !== 'select') pauseTimeline();
   hideTextEditor();
@@ -3466,6 +3473,27 @@ function prepareSceneAnnotation() {
   freezeScene();
   return state.sceneView === 'snapshot' && !!state.snapshot;
 }
+function annotationVisibleInPane(annotation, pane) {
+  if (annotation.pane !== pane) return false;
+  if (pane === 'scene') return state.sceneView === 'snapshot' && annotation.snapshot_id === state.snapshot?.id;
+  if (annotation.reference_image_id !== state.activeReferenceId) return false;
+  return !annotation.frame_id || (!state.playing && annotation.frame_id === state.snapshot?.id && Math.abs(annotation.time_sec - state.time) < 1e-6);
+}
+function sweepEraser(to, canvas) {
+  const drag = state.drag;
+  const rect = canvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return;
+  const zoom = rect.width / canvas.clientWidth;
+  const scale = Math.max(1, Math.min(canvas.clientWidth, canvas.clientHeight) / 550) * zoom;
+  const context = canvas.getContext('2d');
+  context.save(); context.font = 'bold ' + Math.round(13 * scale / zoom) + 'px ' + annotationFontFamily;
+  for (const mark of state.annotations) {
+    if (drag.erased.has(mark.id) || !annotationVisibleInPane(mark, drag.pane)) continue;
+    const textWidth = mark.type === 'text' ? Math.min(context.measureText(String(mark.text || '').slice(0,100)).width, canvas.clientWidth - 12) * zoom : 0;
+    if (eraserHitsAnnotation(mark, drag.end, to, {width:rect.width, height:rect.height, scale, textWidth})) drag.erased.add(mark.id);
+  }
+  context.restore(); drag.end = to;
+}
 function annotationPointerDown(event, pane) {
   if (!editable() || state.mode === 'select' || state.spacePan || event.button !== 0) return;
   if (pane === 'reference' && !activeReference()) return;
@@ -3473,6 +3501,13 @@ function annotationPointerDown(event, pane) {
   // Preserve the clicked pixel before saving a moment can resize the timeline.
   const point = pointFromPointer(event, canvas);
   event.preventDefault();
+  if (state.mode === 'erase') {
+    if (pane === 'scene' && state.sceneView !== 'snapshot') { announce('请先选择一张截图，再擦除上面的标记。'); return; }
+    canvas.setPointerCapture(event.pointerId);
+    state.drag = {pane, type:'erase', start:point, end:point, pointerId:event.pointerId, erased:new Set()};
+    sweepEraser(point, canvas); drawOverlays();
+    return;
+  }
   if (pane === 'scene') { if (!prepareSceneAnnotation()) return; }
   else if (dynamicEnabled() && !ensureDynamicMoment()) return;
   if (state.mode === 'text') {
@@ -3486,6 +3521,10 @@ function annotationPointerDown(event, pane) {
 }
 function annotationPointerMove(event) {
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
+  if (state.drag.type === 'erase') {
+    if (!editable()) { state.drag = null; drawOverlays(); return; }
+    sweepEraser(pointFromPointer(event, event.currentTarget), event.currentTarget); drawOverlays(); return;
+  }
   state.drag.end = pointFromPointer(event, state.drag.pane === 'scene' ? ui.sceneCanvas : event.currentTarget);
   if (state.drag.type === 'freehand' && state.drag.points.length < 256) {
     const last = state.drag.points.at(-1);
@@ -3494,9 +3533,20 @@ function annotationPointerMove(event) {
   drawOverlays();
 }
 function annotationPointerUp(event) {
-  if (!editable()) { state.drag = null; return; }
+  if (!editable()) { state.drag = null; drawOverlays(); return; }
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   const drag = state.drag;
+  if (drag.type === 'erase') {
+    sweepEraser(pointFromPointer(event, event.currentTarget), event.currentTarget);
+    state.drag = null;
+    if (drag.erased.size) {
+      const before = annotationEditState();
+      state.annotations = state.annotations.filter(mark => !drag.erased.has(mark.id));
+      recordAnnotationEdit(before); renderAnnotations(); renderTimeline(); saveDraft();
+      announce('已擦除 ' + drag.erased.size + ' 条标记，可撤销。');
+    }
+    drawOverlays(); return;
+  }
   state.drag = null;
   const end = pointFromPointer(event, drag.pane === 'scene' ? ui.sceneCanvas : event.currentTarget);
   const distance = Math.hypot(end.x - drag.start.x, end.y - drag.start.y);
@@ -3625,14 +3675,10 @@ function drawOverlays() {
     const surface = prepareCanvas(canvas);
     if (!surface) continue;
     for (const annotation of state.annotations) {
-      if (annotation.pane !== pane) continue;
-      if (pane === 'reference' && annotation.reference_image_id !== state.activeReferenceId) continue;
-      if (pane === 'reference' && annotation.frame_id &&
-          (state.playing || annotation.frame_id !== state.snapshot?.id || Math.abs(annotation.time_sec - state.time) > 1e-6)) continue;
-      if (pane === 'scene' && (!state.snapshot || annotation.snapshot_id !== state.snapshot.id)) continue;
+      if (!annotationVisibleInPane(annotation, pane) || state.drag?.erased?.has(annotation.id)) continue;
       drawAnnotation(surface.context, annotation, surface.width, surface.height);
     }
-    if (state.drag?.pane === pane) {
+    if (state.drag?.pane === pane && state.drag.type !== 'erase') {
       drawAnnotation(surface.context, {
         pane, type:state.drag.type,
         coordinates:{x:state.drag.start.x, y:state.drag.start.y, x2:state.drag.end.x, y2:state.drag.end.y},
@@ -4400,10 +4446,17 @@ function bindEvents() {
         return;
       }
     }
+    if (event.key === 'Escape' && state.drag?.type === 'erase') {
+      state.drag = null; drawOverlays(); return;
+    }
+    if (event.key === '8' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.isComposing &&
+        !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false]), dialog[open]')) {
+      event.preventDefault(); setMode('erase'); return;
+    }
     if (event.target.closest('input, textarea, select, button, summary, a, [contenteditable=true], dialog[open]')) return;
     if (event.code === 'Space') { event.preventDefault(); state.spacePan = true; }
-    if (event.key >= '1' && event.key <= '7') {
-      setMode(['select','point','rectangle','line','arrow','text','freehand'][Number(event.key) - 1]);
+    if (event.key >= '1' && event.key <= '8') {
+      setMode(['select','point','rectangle','line','arrow','text','freehand','erase'][Number(event.key) - 1]);
     }
     if (event.key === 'Escape') {
       state.drag = null;
@@ -4416,7 +4469,7 @@ function bindEvents() {
     }
   });
   document.addEventListener('keyup', (event) => { if (event.code === 'Space') state.spacePan = false; });
-  window.addEventListener('blur', () => { state.spacePan = false; state.referencePanning = null; });
+  window.addEventListener('blur', () => { state.spacePan = false; state.referencePanning = null; if (state.drag?.type === 'erase') { state.drag = null; drawOverlays(); } });
   window.addEventListener('beforeunload', saveDraft);
   new ResizeObserver(updateReferenceGeometry).observe(ui.referenceStage);
   new ResizeObserver(resizeScene).observe(ui.sceneStage);
