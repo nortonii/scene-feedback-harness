@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
+import { setupWorkspaceControls } from './workspace-controls.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { eraserHitsAnnotation } from './eraser.js';
 import { createFrameImageCache } from './frame-image-cache.js';
@@ -121,6 +122,7 @@ const frameImages = {
 };
 
 let minimalLayout = null;
+let workspaceControls = null;
 const annotationHistory = createAnnotationHistory();
 const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#eae9e3');
@@ -2122,7 +2124,7 @@ function openSceneSnapshot(snapshotId) {
   renderSceneView(); renderAnnotations();
 }
 function renderSceneSnapshots() {
-  ui.snapshotStrip.classList.toggle('hidden', !state.sceneSnapshots.length);
+  workspaceControls?.refresh();
   ui.snapshotStrip.replaceChildren();
   for (const snapshot of state.sceneSnapshots) {
     const card = document.createElement('div'); card.className = 'snapshot-card';
@@ -3490,7 +3492,7 @@ function sweepEraser(to, canvas) {
   for (const mark of state.annotations) {
     if (drag.erased.has(mark.id) || !annotationVisibleInPane(mark, drag.pane)) continue;
     const textWidth = mark.type === 'text' ? Math.min(context.measureText(String(mark.text || '').slice(0,100)).width, canvas.clientWidth - 12) * zoom : 0;
-    if (eraserHitsAnnotation(mark, drag.end, to, {width:rect.width, height:rect.height, scale, textWidth})) drag.erased.add(mark.id);
+    if (eraserHitsAnnotation(mark, drag.end, to, {width:rect.width, height:rect.height, scale, textWidth, radius:workspaceControls.eraserRadius()})) drag.erased.add(mark.id);
   }
   context.restore(); drag.end = to;
 }
@@ -4227,6 +4229,7 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
+  workspaceControls = setupWorkspaceControls({getState:() => state});
   minimalLayout = setupMinimalLayout({getState:() => state});
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);

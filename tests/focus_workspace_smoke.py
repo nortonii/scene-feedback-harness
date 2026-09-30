@@ -447,6 +447,123 @@ def verify_eraser(page, screenshots):
     page.locator("#chat-launcher").click()
 
 
+
+def verify_workspace_controls(page, screenshots):
+    def center(selector):
+        box = page.locator(selector).bounding_box()
+        return box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+
+    def eraser_size(key):
+        page.locator("#eraser-settings summary").click()
+        page.locator("#eraser-size").press(key)
+        page.keyboard.press("Escape")
+
+    def assert_no_overflow():
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "Workspace overflows"
+        for selector in (".reference-pane .pane-actions", ".scene-pane .pane-actions"):
+            box = page.locator(selector).bounding_box()
+            assert box["x"] >= 0 and box["x"] + box["width"] <= page.viewport_size["width"] + 1, box
+
+    page.locator("#chat-collapse").click()
+    page.locator("#snapshot-button").click()
+    page.locator('[data-tool="point"]').click()
+    page.mouse.click(*center("#reference-annotations"))
+    page.mouse.click(*center("#scene-annotations"))
+    original = draft(page)
+    snapshot_pixels = page.locator("#scene-snapshot-image").get_attribute("src")
+    page.locator('[data-tool="erase"]').click()
+    eraser_size("Home")
+    expect(page.locator("#eraser-size")).to_have_value("8")
+    x, y = center("#scene-annotations")
+    page.mouse.click(x+32, y)
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    eraser_size("End")
+    expect(page.locator("#eraser-size-value")).to_have_text("96 px")
+    assert "width%3D%22100%22" in page.locator("#scene-annotations").evaluate("el => getComputedStyle(el).cursor")
+    page.mouse.click(x+32, y)
+    expect(page.locator("#annotation-count")).to_have_text("1")
+    page.locator("#undo-annotation").click()
+    assert draft(page)["annotations"] == original["annotations"]
+
+    before = geometry(page)
+    toggle = page.locator("#snapshot-strip-toggle")
+    toggle.click()
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
+    assert geometry(page) == before, "Folding thumbnails must not resize the saved view"
+    toggle.press("Enter")
+    expect(page.locator(".snapshot-open")).to_be_visible()
+    toggle.click()
+
+    divider = page.locator("#workspace-divider")
+    x, y = center("#workspace-divider")
+    page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x-180, y, steps=10); page.mouse.up()
+    page.wait_for_timeout(150)
+    after = geometry(page)
+    assert after["reference-stage"]["width"] < before["reference-stage"]["width"] - 150
+    assert after["scene-stage"]["width"] > before["scene-stage"]["width"] + 150
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["annotations"] == original["annotations"]
+    assert page.locator("#scene-snapshot-image").get_attribute("src") == snapshot_pixels
+    # The original marks remain on their bitmap coordinates after both panes resize.
+    for selector in ("#reference-annotations", "#scene-annotations"):
+        assert page.locator(selector).evaluate("""canvas => {
+          const ctx = canvas.getContext('2d');
+          return ctx.getImageData(Math.floor(canvas.width/2), Math.floor(canvas.height/2), 1, 1).data[3] > 0;
+        }""")
+    page.mouse.click(*center("#scene-annotations"))
+    expect(page.locator("#annotation-count")).to_have_text("1")
+    page.locator("#undo-annotation").click()
+    assert draft(page)["annotations"] == original["annotations"]
+    for key in ("Home", "End"):
+        divider.press(key); page.wait_for_timeout(100); assert_no_overflow()
+    divider.press("Enter")
+    for _ in range(5):
+        divider.press("ArrowLeft")
+    expect(divider).to_have_attribute("aria-valuenow", "40")
+    x, y = center("#workspace-divider")
+    page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x+150,y,steps=4)
+    page.keyboard.press("Escape"); page.mouse.up()
+    expect(divider).to_have_attribute("aria-valuenow", "40")
+    page.reload(); wait_ready(page)
+    expect(divider).to_have_attribute("aria-valuenow", "40")
+    expect(page.locator("#eraser-size")).to_have_value("96")
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    assert draft(page)["snapshot"] == original["snapshot"]
+    if screenshots:
+        page.screenshot(path=str(screenshots / "resized-workspace.png"))
+    for width in (768, 390, 340):
+        page.set_viewport_size({"width":width, "height":900})
+        page.wait_for_timeout(150)
+        assert_no_overflow()
+        if width <= 640:
+            expect(divider).to_be_hidden()
+        page.locator("#eraser-settings summary").click()
+        box = page.locator("#eraser-settings .popover-content").bounding_box()
+        assert box["x"] >= 0 and box["x"] + box["width"] <= width + 1, box
+        if screenshots:
+            page.screenshot(path=str(screenshots / f"workspace-controls-{width}.png"))
+        page.keyboard.press("Escape")
+    page.set_viewport_size({"width":1440, "height":900})
+    page.evaluate("scrollTo(0,0)")
+    expect(divider).to_have_attribute("aria-valuenow", "40")
+    divider.dblclick()
+    expect(divider).to_have_attribute("aria-valuenow", "50")
+    toggle.click()
+    expect(page.locator(".snapshot-open")).to_be_visible()
+    eraser_size("Home")
+    page.locator("#eraser-settings summary").click()
+    for _ in range(6):
+        page.locator("#eraser-size").press("ArrowRight")
+    expect(page.locator("#eraser-size")).to_have_value("20")
+    page.keyboard.press("Escape")
+    page.locator("#clear-annotations").click()
+    page.locator("#browse-button").click()
+    page.locator("#chat-launcher").click()
+
+
 def verify_selection_panel(page, screenshots):
     page.locator("#chat-history-toggle").click()
     composer_before = page.locator("#feedback-note").bounding_box()
@@ -714,6 +831,7 @@ def verify_project_isolation(page, server, screenshots):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshots", type=Path)
+    parser.add_argument("--controls-only", action="store_true", help="Run only workspace size and layout controls.")
     parser.add_argument("--eraser-only", action="store_true", help="Run only the eraser interaction regression.")
     parser.add_argument("--baseline", action="store_true", help="Report original geometry only.")
     args = parser.parse_args()
@@ -777,6 +895,12 @@ def main():
                     browser.close()
                     return
 
+                if args.controls_only:
+                    verify_workspace_controls(page, screenshots)
+                    assert not errors, errors
+                    passed("workspace size and layout controls")
+                    browser.close()
+                    return
                 if args.eraser_only:
                     verify_eraser(page, screenshots)
                     assert not errors, errors
@@ -787,6 +911,8 @@ def main():
                 passed("multiple static views preserve independent marks, current-camera capture, selection, legacy-draft upgrade, reload, deletion undo, eight-view capacity and narrow-screen gallery")
                 verify_eraser(page, screenshots)
                 passed("eraser sweeps only visible marks, preserves other screenshots, batches undo/redo, cancels previews and works after reference zoom and reload")
+                verify_workspace_controls(page, screenshots)
+                passed("eraser size changes real hit radius; gallery collapse, split dragging, keyboard and reload preserve screenshots and marks across desktop and mobile")
                 verify_selection_panel(page, screenshots)
                 passed("selecting a real GLB part leaves composer geometry unchanged; side panel inserts node references and clears selection")
                 expect(page.locator("#chat-dock")).to_be_visible()
