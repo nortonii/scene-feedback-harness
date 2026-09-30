@@ -186,6 +186,73 @@ class PoseMCPAccessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not a camera"):
                 mcp_server.workspace_get_human_pose(created["job_id"], view_id=uuid.uuid4().hex)
 
+    def test_one_click_http_tracks_every_imported_frame_and_supports_windowed_reads(self):
+        _, image = fixtures.image_data()
+        first = self.context.store.set_reference_clip(self.session, {
+            "name": "camera A", "fps": 4,
+            "frames": [{"name": f"A{index}", "time_sec": index / 4, "data_url": image}
+                       for index in range(4)],
+        })["reference_clip"]
+        second = self.context.store.set_reference_clip(self.session, {
+            "append_view": True, "name": "camera B", "fps": 3,
+            "frames": [{"name": f"B{index}", "time_sec": index / 3, "data_url": image}
+                       for index in range(3)],
+        })["reference_clip"]["views"][0]
+        status, created = self.request(
+            "POST", "/api/workspace/pose",
+            {"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True},
+            capability=self.context.store.browser_token,
+        )
+        self.assertEqual(status, 202, created)
+        path = "/api/workspace/pose/" + created["job_id"]
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            status, job = self.request("GET", path)
+            self.assertEqual(status, 200, job)
+            if job["status"] == "completed":
+                break
+            self.assertNotIn(job["status"], {"failed", "interrupted", "cancelled"}, job.get("error"))
+            time.sleep(.02)
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["total_frames"], 7)
+        self.assertEqual(job["result_frame_count"], 7)
+        self.assertEqual([view["sampled_frames"] for view in job["views"]], [4, 3])
+        self.assertEqual([view["view_id"] for view in job["views"]], [first["clip_id"], second["clip_id"]])
+        self.assertEqual([frame["view_id"] for frame in job["frames"]],
+                         [first["clip_id"]] * 4 + [second["clip_id"]] * 3)
+        status, window = self.request("GET", path + "?frame_offset=4&max_frames=2")
+        self.assertEqual(status, 200, window)
+        self.assertEqual([frame["frame_index"] for frame in window["frames"]], [0, 1])
+        self.assertEqual(window["next_frame_offset"], 6)
+        target = second["frames"][2]["id"]
+        status, exact = self.request("GET", path + "?reference_id=" + target)
+        self.assertEqual(status, 200, exact)
+        self.assertEqual([frame["reference_id"] for frame in exact["frames"]], [target])
+        self.assertEqual(self.request("GET", path + "?reference_id=" + uuid.uuid4().hex)[0], 404)
+        status, download = self.request("GET", path + "?download=1")
+        self.assertEqual(status, 200, download)
+        self.assertEqual(len(download["frames"]), 7)
+        self.assertEqual(self.request("GET", path + "?download=1&max_frames=2")[0], 400)
+        self.assertEqual(self.request("GET", path + "?frame_offset=-1")[0], 400)
+        self.assertEqual(self.request("GET", path + "?max_frames=33")[0], 400)
+
+    def test_mcp_can_start_one_click_job_without_manual_boxes(self):
+        with self.mcp_context(self.context):
+            created = mcp_server.workspace_track_human_pose(all_views=True)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                job = mcp_server.workspace_get_human_pose(created["job_id"])
+                if job["status"] == "completed":
+                    break
+                self.assertNotIn(job["status"], {"failed", "interrupted", "cancelled"}, job.get("error"))
+                time.sleep(.02)
+            self.assertEqual(job["status"], "completed")
+            self.assertTrue(job["automatic"])
+            self.assertEqual(job["total_frames"], 1)
+            self.assertEqual(job["frames"][0]["reference_id"], self.reference["id"])
+            with self.assertRaisesRegex(ValueError, "does not accept"):
+                mcp_server.workspace_track_human_pose(all_views=True, bbox=[.1, .1, .6, .7])
+
 
 if __name__ == "__main__":
     unittest.main()

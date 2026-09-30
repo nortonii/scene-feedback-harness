@@ -2,6 +2,11 @@
 # Reuse or install a GPU-compatible PyTorch build first. This file deliberately
 # excludes torch/torchvision to preserve an existing CUDA/vendor environment.
 # Verified with Python 3.12, torch 2.14.0+cu130 and an RTX 5060.
+# Automatic all-camera/all-frame mode also needs a torchvision build compatible
+# with the installed Torch and the official Faster R-CNN MobileNet V3 320 COCO
+# checkpoint. Set SCENE_FEEDBACK_POSE_DETECTOR to its local .pth path, or place
+# it in ~/.cache/torch/hub/checkpoints/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth.
+# The worker never downloads detector weights during a tracking job.
 transformers==5.3.0
 opencv-python==5.0.0.93
 safetensors==0.8.0

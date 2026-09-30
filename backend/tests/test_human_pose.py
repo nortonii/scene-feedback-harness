@@ -242,6 +242,69 @@ class HumanPoseTests(unittest.TestCase):
         self.assertEqual([entry["frame"]["view_id"] for entry in prepared], job["view_ids"])
         self.assertTrue(all(entry["multi_view"] and entry["view_ids"] == job["view_ids"] for entry in prepared))
 
+    def test_one_click_tracks_every_imported_frame_in_every_view_and_pages_archive(self):
+        primary, second = self.clip()
+        payload = {"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True}
+        job = self.start(payload)
+        self.assertEqual((job["automatic"], job["multi_view"], job["total_frames"], job["result_frame_count"]),
+                         (True, True, 9, 9))
+        self.assertEqual([view["sampled_frames"] for view in job["views"]], [4, 5])
+        self.assertEqual(len(job["frames"]), 8)
+        self.assertEqual(job["next_frame_offset"], 8)
+        self.assertEqual(job["tracking"]["cross_view_identity_source"], "automatic_dominant_person_per_view")
+        directory = self.jobs.directory / job["job_id"]
+        disk_job = json.loads((directory / "job.json").read_text())
+        self.assertNotIn("sources", disk_job)
+        self.assertNotIn("frames", disk_job)
+        manifest = json.loads((directory / "input.json").read_text())
+        self.assertEqual(manifest["options"]["auto_detect"], True)
+        self.assertTrue(all("bbox_xywh" not in frame for frame in manifest["frames"]))
+        self.assertEqual([frame["frame_index"] for frame in manifest["frames"]], list(range(4)) + list(range(5)))
+        self.assertEqual([frame["time_seconds"] for frame in manifest["frames"]],
+                         [0, .5, 1, 1.5, 0, .34, .8, 1.2, 1.6])
+        final = self.jobs.get(job["job_id"], frame_offset=8, max_frames=8)
+        self.assertEqual((len(final["frames"]), final["next_frame_offset"]), (1, None))
+        by_view = self.jobs.get(job["job_id"], view_id=second["clip_id"], max_frames=2)
+        self.assertEqual((by_view["result_frame_count"], by_view["next_frame_offset"]), (5, 2))
+        self.assertTrue(all(frame["view_id"] == second["clip_id"] for frame in by_view["frames"]))
+        one = self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"])
+        self.assertEqual(one["frames"][0]["time_sec"], 1.6)
+        self.assertEqual(len(self.jobs.get(job["job_id"], max_frames="all")["frames"]), 9)
+        with self.assertRaisesRegex(APIError, "not found"):
+            self.jobs.get(job["job_id"], reference_id=uuid.uuid4().hex)
+        with self.assertRaisesRegex(APIError, "does not belong"):
+            self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"], view_id=primary["clip_id"])
+        refs = [{"job_id": job["job_id"], "reference_id": second["frames"][4]["id"]}]
+        prepared = prepare_pose_feedback(self.store, self.session, refs)
+        self.assertEqual(prepared[0]["frame"], one["frames"][0])
+        self.assertEqual(prepared[0]["cross_view_identity_source"], "automatic_dominant_person_per_view")
+        self.store.set_reference_clip(self.session, {"frames": [{"data_url": self.data_url}]})
+        self.assertEqual(self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"])["frames"], one["frames"])
+        self.jobs.close()
+        self.jobs = HumanPoseJobs(SceneStore(self.store.data_dir))
+        self.assertEqual(self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"])["frames"], one["frames"])
+        self.assertEqual(self.jobs.start(payload)["job_id"], job["job_id"])
+
+    def test_one_click_static_fallback_tracks_all_reference_images_without_clip(self):
+        second = self.store.add_reference(self.session, "another-person.png", image_data("blue")[1])
+        job = self.start({"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True})
+        self.assertEqual((job["source_kind"], job["total_frames"], job["result_frame_count"]),
+                         ("static_references", 2, 2))
+        self.assertEqual([frame["reference_id"] for frame in job["frames"]], [self.reference["id"], second["id"]])
+        self.assertEqual([frame["time_sec"] for frame in job["frames"]], [0, 0])
+
+    def test_one_click_rejects_conflicting_options_missing_detector_and_oversize(self):
+        self.clip()
+        payload = {"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True}
+        with self.assertRaisesRegex(APIError, "without box"):
+            self.jobs.start(dict(payload, bbox=[.1, .1, .5, .5]))
+        with patch("human_pose.runtime_status", return_value={"configured": True, "automatic_detection_configured": False}):
+            with self.assertRaisesRegex(APIError, "detector"):
+                self.jobs.start(payload)
+        with patch("human_pose.MAX_AUTO_FRAMES", 8), self.assertRaisesRegex(APIError, "at most 8"):
+            self.jobs.start(payload)
+        self.assertEqual(self.jobs.list(self.session)["jobs"], [])
+
     def test_multi_view_rejects_ambiguous_stale_or_oversize_inputs_before_creating_job(self):
         primary, second = self.clip()
         item_a = {"view_id": primary["clip_id"], "reference_id": primary["frames"][0]["id"], "bbox": [.1, .1, .5, .6]}

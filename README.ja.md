@@ -132,28 +132,29 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
-## 人体キーポイント：ViTPose による単独人物の複数カメラ追跡
+## 人体キーポイント：全視点・全参照フレームをワンクリックで追跡
 
-参照画像の右上で `人体追踪` を開き、`在参考图拖框` で一人を囲むか、その原画像の矩形注釈を選びます。静止画は単独で解析でき、動画では従来どおり現在のカメラだけを追跡することもできます。複数カメラを同時に追跡する場合は `多机位追踪` を有効にして 2–8 台を選び、`以当前帧为起点` で共通の開始時刻を指定します。各カメラの `切到起始帧` から元画像に移り、同じ人物をカメラごとに囲みます。共通の終了時刻と FPS を設定して開始すると、非同期ジョブの進捗を確認・キャンセルできます。既定値は 5 fps、**全カメラ合計で最大 600 フレーム**です。時刻を意味のある形で揃えるには、各カメラの `time_sec` に共通の起点が必要です。
+参照画像のツールバーで `人体追踪` を押すとすぐに開始します。隣の `结果` で進捗と完了ジョブを確認できます。現在の動的クリップにある**全カメラの取り込み済み参照フレームすべて**に、人物検出と ViTPose を適用します。人物の枠、カメラ、時間範囲、サンプリング率の設定は不要です。動的クリップがなければ、このセッションの静止参照画像すべてを処理します。非同期ジョブには処理済みフレーム数と全体の進捗が表示されます。最大 8 視点、各 600 フレーム、合計 **4800 フレーム**です。「全フレーム」は取り込み済みの参照フレームを指し、動画からの抽出時に省かれた元動画のフレームは復元しません。時刻による比較には各視点の `time_sec` に共通の起点が必要です。
 
-完了後は COCO17 の二次元関節と骨格を表示し、表示切替、完全な JSON のダウンロード、`引用人体` による `[[pose:JOB_ID:REFERENCE_ID]]` の挿入が可能です。一つのプロンプトで異なる完了ジョブや視点から最大 8 サンプルを参照できます。送信時は保存済み推定から**推論の原フレーム、シアン色の推定骨格画像、信頼度、人物領域、視点、フレーム番号、時刻、既存のカメラ校正**を添付します。赤い手動注釈と区別し、原画像は変更しません。保存成功後は今回の人体参照を消去し、ジョブ履歴を残します。
+完了後、現在の視点と時刻に対応する原フレーム上の COCO17 二次元骨格を、実際の出典フレームとともに表示します。結果の確認、全視点を含む JSON のダウンロード、`引用人体` による `[[pose:JOB_ID:REFERENCE_ID]]` の挿入ができます。一つのフィードバックで、完了したジョブや視点から最大 8 サンプルを参照できます。送信時には**推論の原フレーム、シアン色の推定骨格画像、信頼度、人物領域、視点、フレーム番号、時刻、既存のカメラ校正**を添付します。赤い手動注釈とは分けて表示し、原画像は変更しません。保存成功後は今回の参照だけを消去し、ジョブ履歴は残します。
 
-結果はシーン別に保存されます。複数カメラのジョブは視点ごとに独立した二次元軌跡を保持し、視点を切り替えると現在時刻のそのカメラの骨格だけを表示します。`view_id` で一視点の結果だけを取得でき、完全な JSON には全視点のサンプルが含まれます。クリップ置換後も旧証拠を読めます。キャンセル・失敗を保存し、再起動では未完了ジョブを中断として、自動再実行しません。各シーンの活発なジョブは一つまでで、サービス全体の一つの推論枠を共有し、他シーンのジョブは待機します。
+結果はシーン別に保存され、視点ごとに独立した二次元軌跡を持ちます。視点を切り替えても他のカメラの骨格は表示しません。`view_id` による個別取得と全サンプルを含む JSON に対応します。クリップを置き換えても旧証拠は読めます。各シーンで実行できる人体ジョブは一つ、サービス全体の推論枠も一つです。長いジョブの進捗は保存され、MCP からキャンセルできます。サービス再起動後、未完了ジョブは中断として記録されるため、再度開始してください。
 
-これは **各カメラで独立に行う ViTPose+ Base の単独人物 COCO17 二次元推定**です。人物の枠はカメラごとに手動で選び、信頼できる関節はそのカメラの ROI だけを更新します。低信頼度、画像外、人物を見失った骨格は描画しません。同じ人物を各視点で囲んでも、視点間の人物同定、関節の融合、三角測量による三次元姿勢推定は自動で行いません。遮蔽や人物の交差後の同一性も保証しません。指関節と Blender リグの自動操作は対象外で、追跡が外れたら該当カメラで囲み直してください。JSON の座標はそれぞれの原画像に正規化され、寸法と出典を保持します。
+これは **ViTPose+ Base の単独人物 COCO17 二次元推定**です。各視点で目立つ人物を一人自動検出して追跡し、見失ったら再検出します。画面内の全人物を追跡する機能ではありません。複数人、遮蔽、再検出で別人に切り替わる可能性があり、**視点をまたぐ同一人物の識別も保証しません**。関節の融合や三角測量による三次元姿勢推定は行いません。低信頼度、画像外、見失った骨格は表示しません。指関節や Blender リグの自動操作も対象外です。結果を原画像と照合してください。JSON の座標は各原画像基準で正規化され、寸法と出典を保持します。
 
 ### 任意の推論環境
 
-HTTP サービスはモデルを読み込まず、別プロセスで推論します。`torch`、`transformers`、`Pillow`、`numpy`、`scipy`、`opencv-python` を含む Python 環境と、`config.json`、`preprocessor_config.json`、`model.safetensors` を含むローカル ViTPose+ Base モデルを用意し、起動前に設定します。
+HTTP サービスはモデルを読み込まず、別プロセスで推論します。`torch`、その ABI と互換の `torchvision`、`transformers`、`Pillow`、`numpy`、`scipy`、`opencv-python` と、`config.json`、`preprocessor_config.json`、`model.safetensors` を含むローカル ViTPose+ Base を用意します。自動人物選択には Faster R-CNN MobileNet V3 320 COCO のローカル重みも必要です。実行中のサービスは重みを自動ダウンロードしません。起動前に設定します。
 
-依存関係：[requirements-pose.txt](backend/requirements-pose.txt)、[公式モデル重み](https://huggingface.co/usyd-community/vitpose-plus-base)、[Transformers ViTPose ドキュメント](https://huggingface.co/docs/transformers/model_doc/vitpose)。
+依存関係：[requirements-pose.txt](backend/requirements-pose.txt)、[ViTPose+ Base の重み](https://huggingface.co/usyd-community/vitpose-plus-base)、[Transformers ViTPose ドキュメント](https://huggingface.co/docs/transformers/model_doc/vitpose)、[PyTorch 検出器ドキュメント](https://docs.pytorch.org/vision/2.0/models/generated/torchvision.models.detection.fasterrcnn_mobilenet_v3_large_320_fpn.html)と[公式検出器重み](https://download.pytorch.org/models/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth)。
 
 ```bash
 export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
 export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
+export SCENE_FEEDBACK_POSE_DETECTOR=/absolute/path/to/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth
 ```
 
-依存や重みが不足すると理由を表示し、未設定でも通常の注釈と送信は使えます。独自 `SCENE_FEEDBACK_POSE_RUNNER` は JSON 引数配列を取り、`{manifest}`、`{output}` が必須です。RTX 5060 で実際の ViTPose 推論、フィードバック画像と MCP 画像配信を検証しました。
+依存や重みが不足すると理由を表示し、未設定でも通常の注釈と送信は使えます。独自 `SCENE_FEEDBACK_POSE_RUNNER` は JSON 引数配列を取り、`{manifest}`、`{output}` が必須です。以前の RTX 5060 検証では ViTPose 推論、フィードバック画像、MCP 画像配信を確認しました。
 
 ## クイックスタート：部屋とキャビネット
 
@@ -247,7 +248,7 @@ LAN_IP=192.168.1.10
 | `workspace_open` | このプロジェクトのワークベンチ URL を返す、または開く |
 | `workspace_get_context` | 現在の参照画像、シーンのリビジョン、プロジェクトのコンテキストを読み取る |
 | `workspace_get_feedback` | 送信済みフィードバックと実際の画像を読み取る |
-| `workspace_track_human_pose` | 手動で囲んだ一人の ViTPose 非同期ジョブを開始する。`views=[{view_id,bbox},…]` で 2–8 視点を指定でき、従来の単一視点の引数も使える。job_id を返す |
+| `workspace_track_human_pose` | `all_views=true` で全視点・全取り込み済みフレームを追跡する。動的クリップがなければ全静止画を処理する。従来の手動枠と単一視点の引数も利用可能。job_id をすぐ返す |
 | `workspace_get_human_pose` | 環境・進捗・COCO17 結果を読む。`view_id` で一視点に絞り、`frame_offset` / `max_frames` でページ化（既定 8、最大 32 フレーム）。完全な JSON のローカルパスも返す |
 | `workspace_cancel_human_pose` | 現在シーンの待機中・実行中ジョブをキャンセルし完了結果を保持 |
 | `workspace_publish_scene` | 新しい GLB を検証して公開し、想定リビジョンを確認してページの更新を通知する |

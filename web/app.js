@@ -6,7 +6,7 @@ import { setupMinimalLayout } from './layout.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { createFrameImageCache } from './frame-image-cache.js';
 import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
-import { rectangleBBox, validBBox, sampledPoseFrameCount, firstPoseFrame, sampledPoseViewCount, poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, drawPoseSkeleton, POSE_COLORS } from './human-pose.js';
+import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, drawPoseSkeleton, POSE_COLORS } from './human-pose.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -37,11 +37,9 @@ const ui = {
   referenceStage:id('reference-stage'), referenceMedia:id('reference-media'),
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
   humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'), humanRuntime:id('human-pose-runtime'),
-  humanBox:id('human-pose-box'), humanDraw:id('human-pose-draw'), humanRange:id('human-pose-range'),
-  humanMultiControl:id('human-pose-multi-control'), humanMulti:id('human-pose-multi'), humanViews:id('human-pose-views'), humanAnchor:id('human-pose-anchor'),
-  humanView:id('human-pose-view'), humanStart:id('human-pose-start'), humanEnd:id('human-pose-end'),
-  humanFps:id('human-pose-fps'), humanSampling:id('human-pose-sampling'), humanRun:id('human-pose-run'),
-  humanStatus:id('human-pose-status'), humanShow:id('human-pose-show'), humanJobs:id('human-pose-jobs'),
+  humanRun:id('human-pose-run'), humanProgressWrap:id('human-pose-progress-wrap'),
+  humanProgress:id('human-pose-progress'), humanProgressLabel:id('human-pose-progress-label'),
+  humanStatus:id('human-pose-status'), humanJobs:id('human-pose-jobs'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
@@ -98,10 +96,8 @@ const state = {
   lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
   poseRefs:[], humanJobs:[], humanDetails:new Map(), humanDetailLoads:new Set(), humanDetailErrors:new Map(),
-  humanConfigured:null, humanRuntimeLabel:'', humanMessage:'', humanLoading:false, humanCreating:false,
-  humanPendingRequest:null, humanError:null, humanCancelling:new Set(), humanSeed:null,
-  humanMulti:false, humanMultiClipId:null, humanMultiViewIds:[], humanMultiStart:null, humanViewSeeds:{},
-  humanDrawing:false, humanDrawingReferenceId:null, humanDrag:null, humanFormKey:null, humanBoxSignature:null, humanJobsSignature:null,
+  humanConfigured:null, humanMessage:'', humanLoading:false, humanCreating:false,
+  humanPendingRequest:null, humanError:null, humanJobsSignature:null,
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
   annotations:[], mode:'select', groupId:'', drag:null, textPending:null,
@@ -217,10 +213,7 @@ function saveDraft() {
       lastPickedDetailNode:state.lastPickedDetailNode,
       selectionLevel:state.selectionLevel,
       referencedSceneNodes:state.referencedSceneNodes,
-      poseRefs:state.poseRefs, humanSeed:state.humanSeed, humanPendingRequest:state.humanPendingRequest,
-      humanMulti:state.humanMulti, humanMultiClipId:state.humanMultiClipId, humanMultiViewIds:state.humanMultiViewIds,
-      humanMultiStart:state.humanMultiStart, humanViewSeeds:state.humanViewSeeds,
-      humanEnd:ui.humanEnd.value, humanFps:ui.humanFps.value,
+      poseRefs:state.poseRefs, humanPendingRequest:state.humanPendingRequest,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
@@ -253,28 +246,9 @@ function restoreDraft() {
       ? draft.referencedSceneNodes.filter((node) => node && typeof node.parent_object_id === 'string' && Array.isArray(node.node_path))
       : [];
     state.poseRefs = Array.isArray(draft.poseRefs) ? draft.poseRefs.filter((item) => poseToken(item?.job_id,item?.reference_id)).slice(0,64) : [];
-    state.humanSeed = draft.humanSeed && validBBox(draft.humanSeed.bbox) && typeof draft.humanSeed.reference_id === 'string'
-      ? draft.humanSeed : null;
-    state.humanMulti = draft.humanMulti === true;
-    state.humanMultiClipId = typeof draft.humanMultiClipId === 'string' ? draft.humanMultiClipId : null;
-    state.humanMultiViewIds = Array.isArray(draft.humanMultiViewIds)
-      ? [...new Set(draft.humanMultiViewIds.filter((value) => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value)))].slice(0,8) : [];
-    state.humanMultiStart = Number.isFinite(draft.humanMultiStart) && draft.humanMultiStart >= 0 ? draft.humanMultiStart : null;
-    if (Number.isFinite(Number(draft.humanEnd)) && Number(draft.humanEnd) >= 0) ui.humanEnd.value=String(draft.humanEnd);
-    if (Number.isFinite(Number(draft.humanFps)) && Number(draft.humanFps) >= .1 && Number(draft.humanFps) <= 60)
-      ui.humanFps.value=String(draft.humanFps);
-    state.humanViewSeeds = {};
-    if (draft.humanViewSeeds && typeof draft.humanViewSeeds === 'object') {
-      for (const [viewId, seed] of Object.entries(draft.humanViewSeeds)) {
-        if (/^[0-9a-f]{32}$/.test(viewId) && seed?.view_id === viewId && typeof seed.reference_id === 'string' && validBBox(seed.bbox)) {
-          state.humanViewSeeds[viewId] = seed;
-        }
-      }
-    }
     const poseRequest = draft.humanPendingRequest;
     if (poseRequest?.session_id === state.sessionId && /^[0-9a-f]{32}$/i.test(poseRequest.request_id || '') &&
-        (validBBox(poseRequest.bbox) || Array.isArray(poseRequest.views) && poseRequest.views.length >= 2 && poseRequest.views.every((view) =>
-          typeof view.view_id === 'string' && typeof view.reference_id === 'string' && validBBox(view.bbox)))) {
+        poseRequest.all_views === true) {
       state.humanPendingRequest = poseRequest;
     }
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
@@ -2386,209 +2360,105 @@ function humanJobName(job) {
   const ordered = [...state.humanJobs].sort((a,b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || a.job_id.localeCompare(b.job_id));
   return '人体' + (Math.max(0, ordered.findIndex((item) => item.job_id === job.job_id)) + 1);
 }
+function humanAutomaticJob(job) { return job.automatic === true || job.all_views === true; }
+function humanPosePageOffset(job, referenceId) {
+  if (!humanAutomaticJob(job) || !referenceId || !Array.isArray(job.views)) return null;
+  if (job.source_kind === 'static_references') {
+    const index=job.views.findIndex((item) => item.reference_id === referenceId);
+    return index < 0 ? null : Math.floor(index/32)*32;
+  }
+  const view=referenceViews().find((item) => item.frames?.some((frame) => frame.id === referenceId));
+  const index=job.views.findIndex((item) => item.view_id === view?.clip_id);
+  const frameIndex=view?.frames?.findIndex((frame) => frame.id === referenceId) ?? -1;
+  if (index < 0 || frameIndex < 0 || !job.views.slice(0,index).every((item) => Number.isInteger(item.sampled_frames))) return null;
+  const absolute=job.views.slice(0,index).reduce((sum,item) => sum+item.sampled_frames,0)+frameIndex;
+  return Math.floor(absolute/32)*32;
+}
+function humanPoseLoadKey(job, referenceId) {
+  if (!humanAutomaticJob(job) || !referenceId) return job.job_id;
+  const pageOffset=humanPosePageOffset(job,referenceId);
+  return job.job_id + ':' + (pageOffset === null ? referenceId : 'page:' + pageOffset);
+}
 function humanCurrentFrame(job) {
   const detail = state.humanDetails.get(job.job_id);
   const ref = activeReference();
+  // Automatic jobs sample every source frame. Never paint a cached skeleton
+  // on a different frame while that frame's result is still loading.
+  if (humanAutomaticJob(job)) return detail?.frames?.find((frame) => frame.reference_id === ref?.id) || null;
   return poseFrameForReference(detail, ref?.id, clipReference() ? referenceView()?.clip_id : null, state.time);
 }
-function humanCurrentBoxes() {
-  return state.annotations.filter((item) => item.pane === 'reference' && item.type === 'rectangle' &&
-    item.reference_image_id === activeReference()?.id && rectangleBBox(item.coordinates));
-}
-function humanMultiActive() {
-  return state.humanMulti && !!clipReference() && referenceViews().length > 1;
-}
-function humanSelectedViews() {
-  const selected = new Set(state.humanMultiViewIds);
-  return referenceViews().filter((view) => selected.has(view.clip_id));
-}
-function humanViewSource(view) {
-  return firstPoseFrame(view, state.humanMultiStart);
-}
-function humanViewSeed(view) {
-  const seed=state.humanViewSeeds[view?.clip_id], source=humanViewSource(view);
-  return seed && source && seed.reference_id === source.id && seed.view_id === view.clip_id && validBBox(seed.bbox) ? seed : null;
-}
-function humanSelectedSeed() {
-  const ref = activeReference();
-  if (humanMultiActive()) {
-    const view=referenceView();
-    return state.humanMultiViewIds.includes(view.clip_id) && humanViewSeed(view)?.reference_id === ref?.id
-      ? humanViewSeed(view) : null;
-  }
-  if (ui.humanBox.value === 'drawn' && state.humanSeed?.reference_id === ref?.id) return state.humanSeed;
-  const annotation = humanCurrentBoxes().find((item) => item.id === ui.humanBox.value);
-  return annotation ? {reference_id:ref.id, ...(clipReference() ? {view_id:referenceView().clip_id} : {}),
-    bbox:rectangleBBox(annotation.coordinates)} : null;
-}
-function renderHumanViewChoices(locked) {
-  ui.humanViews.replaceChildren();
-  const chosen=new Set(state.humanMultiViewIds);
-  for (const view of referenceViews()) {
-    const row=document.createElement('div'); row.className='human-pose-view-row';
-    const label=document.createElement('label');
-    const check=document.createElement('input'); check.type='checkbox'; check.value=view.clip_id;
-    check.checked=chosen.has(view.clip_id); check.disabled=locked;
-    check.addEventListener('change',() => {
-      if (check.checked) state.humanMultiViewIds=[...new Set([...state.humanMultiViewIds,view.clip_id])];
-      else state.humanMultiViewIds=state.humanMultiViewIds.filter((id) => id !== view.clip_id);
-      const shortest=Math.min(...humanSelectedViews().map((item) => item.duration_sec));
-      if (Number.isFinite(shortest) && Number(ui.humanEnd.value)>shortest) ui.humanEnd.value=String(shortest);
-      renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
-    });
-    const name=document.createElement('span'); name.className='human-pose-view-name'; name.textContent=view.name;
-    const status=document.createElement('span'); status.className='human-pose-view-state';
-    status.textContent=chosen.has(view.clip_id) ? !humanViewSource(view) ? '无起始帧' : humanViewSeed(view) ? '已框选' : '待框选' : '';
-    label.append(check,name,status);
-    const jump=document.createElement('button'); jump.type='button'; jump.className='compact-button';
-    jump.textContent='切到起始帧'; jump.disabled=locked || !chosen.has(view.clip_id) || !humanViewSource(view);
-    jump.addEventListener('click',async () => {
-      const source=humanViewSource(view);
-      if (source && await seekTimeline(source.time_sec,{viewId:view.clip_id,preserveTime:true})) {
-        ui.humanPanel.open=true; renderHumanPosePanel(); drawHumanPoseOverlay();
-      }
-    });
-    row.append(label,jump); ui.humanViews.append(row);
-  }
-}
 function renderHumanPosePanel() {
-  const ref = activeReference();
-  const view = clipReference() ? referenceView() : null;
-  const multi=humanMultiActive();
-  const key = multi ? 'multi:' + state.referenceClip.clip_id : (view?.clip_id || 'static') + ':' + (ref?.id || '');
-  if (state.humanDrawing && state.humanDrawingReferenceId !== ref?.id) cancelHumanSeedDrawing();
-  if (state.humanFormKey !== key) {
-    state.humanFormKey = key;
-    if (multi) {
-      if (state.humanMultiClipId !== state.referenceClip.clip_id) {
-        state.humanMultiClipId=state.referenceClip.clip_id;
-        state.humanMultiViewIds=view ? [view.clip_id] : [];
-        state.humanMultiStart=ref?.time_sec ?? state.time;
-        state.humanViewSeeds={};
-      }
-      const available=new Set(referenceViews().map((item) => item.clip_id));
-      state.humanMultiViewIds=state.humanMultiViewIds.filter((id) => available.has(id));
-      if (!state.humanMultiViewIds.length && view) state.humanMultiViewIds=[view.clip_id];
-      if (state.humanMultiStart === null) state.humanMultiStart=ref?.time_sec ?? state.time;
-      ui.humanStart.value=String(state.humanMultiStart);
-      const defaultEnd=Math.min(...humanSelectedViews().map((item) => item.duration_sec));
-      const currentEnd=Number(ui.humanEnd.value);
-      ui.humanEnd.value=String(ui.humanEnd.value !== '' && Number.isFinite(currentEnd) && currentEnd>=state.humanMultiStart && currentEnd<=defaultEnd
-        ? currentEnd : defaultEnd);
-    } else {
-      ui.humanStart.value = String(view ? ref.time_sec ?? state.time : 0);
-      ui.humanEnd.value = String(view?.duration_sec ?? 0);
-    }
-    if (state.humanDrawing && state.humanDrag?.reference_id !== ref?.id) cancelHumanSeedDrawing();
-    state.humanBoxSignature = null;
+  const hasDynamicSources=!!state.referenceClip && referenceViews().some((view) => view.frames?.length);
+  const hasStaticSources=!state.referenceClip && state.references.length > 0;
+  const active=state.humanJobs.find((job) => ['queued','running'].includes(job.status));
+  const ready=hasDynamicSources || hasStaticSources;
+  ui.humanRun.disabled=!state.workspaceReady || state.humanConfigured !== true || !editable() ||
+    state.humanCreating || !!active || (!state.humanPendingRequest && !ready);
+  ui.humanRun.textContent=state.humanCreating ? '正在启动…' : active ? '追踪中…'
+    : state.humanPendingRequest ? '重试追踪' : '人体追踪';
+  ui.humanRun.title=hasDynamicSources ? '一键追踪全部机位与全部已导入帧'
+    : '一键追踪全部静态参考图';
+  ui.humanRuntime.textContent=state.humanConfigured === false ? state.humanMessage || '人体追踪服务不可用。'
+    : state.humanConfigured === true ? '' : '正在连接人体追踪…';
+  ui.humanRuntime.classList.toggle('hidden',state.humanConfigured === true);
+  ui.humanProgressWrap.classList.toggle('hidden',!active);
+  ui.humanPanel.querySelector('summary').textContent=active && active.total_frames
+    ? '进度 ' + Math.floor((active.completed_frames || 0)/active.total_frames*100) + '%'
+    : '结果';
+  if (active) {
+    const done=Math.max(0,active.completed_frames || 0), total=Math.max(1,active.total_frames || 1);
+    ui.humanProgress.max=total; ui.humanProgress.value=Math.min(done,total);
+    ui.humanProgressLabel.textContent=active.status === 'queued'
+      ? `等待运行 · ${active.total_frames || 0} 帧`
+      : `已处理 ${done} / ${active.total_frames || 0} 帧 · ${Math.floor(done/total*100)}%`;
   }
-  const source=multi ? humanViewSource(view) : null;
-  const atSource=!multi || source?.id === ref?.id;
-  const viewSelected=!multi || state.humanMultiViewIds.includes(view?.clip_id);
-  const boxes = atSource && viewSelected ? humanCurrentBoxes() : [];
-  const drawn = !multi && !!state.humanSeed && !!ref && state.humanSeed.reference_id === ref.id;
-  const saved = multi && atSource && viewSelected ? humanViewSeed(view) : null;
-  const signature = JSON.stringify([key, ref?.id, boxes.map((item) => [item.id,item.coordinates]), drawn ? state.humanSeed.bbox : null, saved?.bbox]);
-  if (signature !== state.humanBoxSignature) {
-    state.humanBoxSignature = signature;
-    const previous = ui.humanBox.value;
-    ui.humanBox.replaceChildren();
-    const empty = document.createElement('option'); empty.value = ''; empty.textContent = '请选择人物框'; ui.humanBox.append(empty);
-    if (saved) {
-      const option=document.createElement('option'); option.value='saved'; option.textContent='已选中的人物框'; ui.humanBox.append(option);
-    }
-    if (drawn) {
-      const option=document.createElement('option'); option.value='drawn'; option.textContent='刚拖出的人物框'; ui.humanBox.append(option);
-    }
-    boxes.forEach((item,index) => {
-      const option=document.createElement('option'); option.value=item.id; option.textContent='参考框 ' + (index+1); ui.humanBox.append(option);
-    });
-    ui.humanBox.value = multi ? saved ? 'saved' : ''
-      : drawn ? 'drawn' : boxes.some((item) => item.id === previous) ? previous : boxes[0]?.id || '';
-  }
-  const locked = !editable() || state.humanCreating || !!state.humanPendingRequest;
-  ui.humanMultiControl.classList.toggle('hidden',!view || referenceViews().length < 2);
-  ui.humanMulti.checked=state.humanMulti;
-  ui.humanMulti.disabled=locked;
-  ui.humanViews.classList.toggle('hidden',!multi);
-  if (multi && ui.humanPanel.open) renderHumanViewChoices(locked);
-  ui.humanBox.disabled = locked || !viewSelected || !atSource;
-  ui.humanDraw.disabled = !ref || locked || !viewSelected || (multi && !source);
-  ui.humanDraw.textContent = state.humanDrawing ? '取消拖框' : '在参考图拖框';
-  ui.humanRange.classList.toggle('hidden', !view);
-  ui.humanView.textContent = multi ? '同一人物需在每个机位的起始帧各框一次；切换机位不会自动推算人物位置。'
-    : view ? '当前机位：' + view.name + '；起点为人物框所在帧。' : '';
-  ui.humanAnchor.classList.toggle('hidden',!multi);
-  ui.humanAnchor.disabled=locked || !ref || !viewSelected;
-  ui.humanStart.readOnly = true;
-  ui.humanEnd.disabled = locked; ui.humanFps.disabled = locked;
-  const selectedViews=multi ? humanSelectedViews() : [];
-  const maxEnd=multi ? Math.min(...selectedViews.map((item) => item.duration_sec)) : view?.duration_sec;
-  if (view) { ui.humanEnd.max=Number.isFinite(maxEnd) ? String(maxEnd) : ''; ui.humanEnd.min=ui.humanStart.value; }
-  const fps=Number(ui.humanFps.value), start=Number(ui.humanStart.value), end=Number(ui.humanEnd.value);
-  const count=multi ? sampledPoseViewCount(selectedViews,start,end,fps) : view ? sampledPoseFrameCount(view.frames,start,end,fps) : 1;
-  const rangeValid=!view || Number.isFinite(fps) && fps >= 0.1 && fps <= 60 && Number.isFinite(end) && end >= start &&
-    end <= maxEnd+1e-6 && count > 0 && count <= 600 && (!multi || selectedViews.every((item) => sampledPoseFrameCount(item.frames,start,end,fps)>0));
-  const seedsReady=multi && selectedViews.length >= 2 && selectedViews.length <= 8 && selectedViews.every((item) => humanViewSeed(item));
-  const canRun=multi ? seedsReady && rangeValid && !state.humanDrawing : !!humanSelectedSeed() && rangeValid && !state.humanDrawing;
-  ui.humanSampling.textContent = count > 600 ? '总计超过 600 个采样帧，请缩短范围或降低帧率。'
-    : multi ? `${selectedViews.length} 个机位，共 ${count} 个采样帧（上限 600）。`
-      : count + ' 个采样帧；低于原视频帧率时显示实际来源帧。';
-  ui.humanRun.disabled = !state.workspaceReady || state.humanConfigured !== true || !editable() || state.humanCreating ||
-    (!state.humanPendingRequest && !canRun);
-  ui.humanRun.textContent = state.humanCreating ? '正在建立追踪…' : state.humanPendingRequest ? '重试同一次追踪'
-    : multi ? `追踪 ${selectedViews.length} 个机位` : view ? '追踪当前机位' : '识别当前图';
-  ui.humanRuntime.textContent = state.humanConfigured === true ? (state.humanRuntimeLabel || 'ViTPose 已连接')
-    : state.humanConfigured === false ? state.humanMessage || '尚未配置 ViTPose 运行服务。' : '正在连接人体追踪…';
-  ui.humanStatus.textContent = state.humanDrawing ? '请在参考图拖框，只框一个人。Esc 取消。'
-    : state.humanError || (state.humanPendingRequest ? '上次请求结果未确认；重试会沿用同一请求编号。'
-      : multi && selectedViews.length < 2 ? '请至少选择 2 个机位。'
-        : multi && selectedViews.some((item) => !humanViewSource(item)) ? '有机位没有起始帧，请在较早的时间点击「以当前帧为起点」。'
-          : multi && !rangeValid ? '请调整共享时间范围或采样帧率。'
-        : multi && !seedsReady ? `还有 ${selectedViews.filter((item) => !humanViewSeed(item)).length} 个机位待框选。` : '');
-  ui.humanCanvas.style.pointerEvents = state.humanDrawing && editable() ? 'auto' : 'none';
-  ui.humanCanvas.style.cursor = state.humanDrawing ? 'crosshair' : 'default';
+  ui.humanStatus.textContent=state.humanError || (state.humanPendingRequest
+    ? '上次启动结果未确认；再次点击会沿用同一次请求。'
+    : !ready ? '请先导入参考图片或机位视频。' : '');
   for (const job of state.humanJobs) {
-    if (job.status === 'completed' && (job.multi_view ? job.view_ids?.includes(view?.clip_id) : job.view_id ? job.view_id === view?.clip_id : job.reference_id === ref?.id) &&
-        !state.humanDetails.has(job.job_id) && !state.humanDetailLoads.has(job.job_id) && !state.humanDetailErrors.has(job.job_id)) {
-      Promise.resolve().then(() => ensureHumanPoseDetail(job));
+    if (job.status === 'completed' && humanJobContainsCurrentReference(job) && !humanCurrentFrame(job)) {
+      const referenceId=humanAutomaticJob(job) ? activeReference()?.id : null;
+      const loadKey=humanPoseLoadKey(job,referenceId);
+      const busyForJob=humanAutomaticJob(job) && [...state.humanDetailLoads].some((key) => key.startsWith(job.job_id + ':'));
+      if (!busyForJob && !state.humanDetailLoads.has(loadKey) && !state.humanDetailErrors.has(loadKey)) {
+        Promise.resolve().then(() => ensureHumanPoseDetail(job,{referenceId}));
+      }
     }
   }
   if (!ui.humanPanel.open) return;
-  const jobsSignature = JSON.stringify([state.humanJobs, state.poseRefs, state.humanCancelling.size, editable(),
-    state.humanJobs.map((job) => [job.job_id,humanCurrentFrame(job)?.reference_id,state.humanCancelling.has(job.job_id),state.humanDetailLoads.has(job.job_id),state.humanDetailErrors.get(job.job_id)])]);
+  const jobs=state.humanJobs.filter((job) => !['queued','running'].includes(job.status));
+  const jobsSignature=JSON.stringify([jobs,state.poseRefs,editable(),
+    jobs.map((job) => [job.job_id,humanCurrentFrame(job)?.reference_id,
+      state.humanDetailLoads.has(job.job_id),state.humanDetailErrors.get(job.job_id),
+      state.humanDetailLoads.has(humanPoseLoadKey(job,activeReference()?.id)),
+      state.humanDetailErrors.get(humanPoseLoadKey(job,activeReference()?.id))])]);
   if (jobsSignature === state.humanJobsSignature) return;
-  state.humanJobsSignature = jobsSignature; ui.humanJobs.replaceChildren();
-  if (!state.humanJobs.length) {
-    const empty=document.createElement('p'); empty.className='muted'; empty.textContent='追踪结果会保留在当前场景。'; ui.humanJobs.append(empty);
+  state.humanJobsSignature=jobsSignature; ui.humanJobs.replaceChildren();
+  if (!jobs.length) {
+    const empty=document.createElement('p'); empty.className='muted';
+    empty.textContent=active ? '追踪完成后可在这里引用或下载结果。' : '完成后可查看、引用或下载结果。';
+    ui.humanJobs.append(empty);
   }
-  for (const job of [...state.humanJobs].reverse()) {
+  for (const job of [...jobs].reverse()) {
     const row=document.createElement('div'); row.className='human-pose-job';
     const heading=document.createElement('div'); heading.className='human-pose-job-heading';
     const name=document.createElement('strong'); name.textContent=humanJobName(job);
-    const status=document.createElement('span'); status.textContent=({queued:'等待运行',running:'追踪中',completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'})[job.status] || job.status;
+    const status=document.createElement('span'); status.textContent=({completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'})[job.status] || job.status;
     heading.append(name,status); row.append(heading);
     const source=document.createElement('small'); source.textContent=job.multi_view
-      ? `多机位 · ${(Array.isArray(job.views) ? job.views : []).map((item) => item.view_name || referenceView(item.view_id)?.name || item.view_id).join('、')}`
-      : job.view_name || job.reference_name || '参考图'; row.append(source);
-    if (['queued','running'].includes(job.status)) {
-      const progress=document.createElement('progress'); progress.max=Math.max(1,job.total_frames || 1); progress.value=job.completed_frames || 0; row.append(progress);
-      const detail=document.createElement('small'); detail.textContent=(job.completed_frames || 0) + ' / ' + (job.total_frames || 0) + ' 帧'; row.append(detail);
-    }
-    const frame=humanCurrentFrame(job);
+      ? `${job.source_kind === 'static_references' ? '参考图' : '多机位'} · ${(Array.isArray(job.views) ? job.views : []).map((item) => item.view_name || referenceView(item.view_id)?.name || item.view_id).join('、')}`
+      : job.view_name || job.reference_name || (humanAutomaticJob(job) ? '全部参考图' : '参考图'); row.append(source);
+    const frame=humanCurrentFrame(job), ref=activeReference();
     if (frame) {
       const detail=document.createElement('small'); detail.textContent=(frame.reference_id !== ref?.id ? '近邻采样：' : '来源：') +
         poseFrameLabel(frame,job.reference_name) + (frame.tracking_status === 'lost' ? ' · 未找到人物' : ''); row.append(detail);
     }
-    const error=job.error || state.humanDetailErrors.get(job.job_id);
+    const error=job.error || state.humanDetailErrors.get(job.job_id) || state.humanDetailErrors.get(humanPoseLoadKey(job,ref?.id));
     if (error) { const detail=document.createElement('small'); detail.className='human-pose-error'; detail.textContent=String(error); row.append(detail); }
-    const actions=document.createElement('div'); actions.className='human-pose-job-actions';
-    if (['queued','running'].includes(job.status)) {
-      const cancel=document.createElement('button'); cancel.type='button'; cancel.className='compact-button'; cancel.textContent=state.humanCancelling.has(job.job_id) ? '取消中…' : '取消';
-      cancel.disabled=state.humanCancelling.has(job.job_id); cancel.addEventListener('click',() => cancelHumanPose(job)); actions.append(cancel);
-    } else if (job.status === 'completed') {
+    if (job.status === 'completed') {
+      const actions=document.createElement('div'); actions.className='human-pose-job-actions';
       const cite=document.createElement('button'); cite.type='button'; cite.className='compact-button emphasis-button'; cite.textContent='引用人体';
-      cite.disabled=!editable() || !frame; cite.title=frame ? '引用实际采样帧的关键点和骨架图' : '切到该机位和追踪时间后引用';
+      cite.disabled=!editable() || !frame; cite.title=frame ? '引用当前来源帧的关键点和骨架图' : '切到追踪过的机位和帧后引用';
       cite.addEventListener('mousedown',event => event.preventDefault()); cite.addEventListener('click',() => insertHumanPoseReference(job,frame)); actions.append(cite);
       if (!frame) {
         const viewButton=document.createElement('button'); viewButton.type='button'; viewButton.className='compact-button'; viewButton.textContent='查看结果';
@@ -2596,16 +2466,26 @@ function renderHumanPosePanel() {
         viewButton.addEventListener('click',() => viewHumanPose(job)); actions.append(viewButton);
       }
       const download=document.createElement('button'); download.type='button'; download.className='compact-button'; download.textContent='下载 JSON';
-      download.disabled=state.humanDetailLoads.has(job.job_id); download.addEventListener('click',() => downloadHumanPose(job)); actions.append(download);
+      download.addEventListener('click',() => downloadHumanPose(job)); actions.append(download);
+      row.append(actions);
     }
-    row.append(actions); ui.humanJobs.append(row);
+    ui.humanJobs.append(row);
   }
+}
+function humanJobContainsCurrentReference(job) {
+  const ref=activeReference(), view=clipReference() ? referenceView() : null;
+  if (humanAutomaticJob(job)) return job.source_kind === 'static_references'
+    ? !!ref && job.view_ids?.includes(ref.id)
+    : !!view && job.view_ids?.includes(view.clip_id);
+  return job.multi_view ? job.view_ids?.includes(view?.clip_id)
+    : job.view_id ? job.view_id === view?.clip_id
+      : job.reference_id === ref?.id;
 }
 function drawHumanPoseOverlay() {
   const surface=prepareCanvas(ui.humanCanvas);
   if (!surface) return;
   const ref=activeReference();
-  if (ui.humanShow.checked && referencePixelsReady()) {
+  if (referencePixelsReady()) {
     for (const job of state.humanJobs) {
       const frame=humanCurrentFrame(job), detail=state.humanDetails.get(job.job_id);
       if (!frame) continue;
@@ -2614,58 +2494,51 @@ function drawHumanPoseOverlay() {
         edges:detail.skeleton_edges, label:humanJobName(job) + (frame.reference_id !== ref?.id ? ' · 近邻 ' : ' · ') + poseFrameLabel(frame,job.reference_name)});
     }
   }
-  const drag=state.humanDrag;
-  const bbox=drag ? rectangleBBox({x:drag.start.x,y:drag.start.y,x2:drag.end.x,y2:drag.end.y}) : humanSelectedSeed()?.bbox;
-  if (bbox && (state.humanDrawing || ui.humanPanel.open)) {
-    surface.context.save(); surface.context.strokeStyle='#087f8c'; surface.context.lineWidth=2;
-    surface.context.setLineDash([6,4]); surface.context.strokeRect(bbox[0]*surface.width,bbox[1]*surface.height,bbox[2]*surface.width,bbox[3]*surface.height); surface.context.restore();
-  }
 }
-function cancelHumanSeedDrawing() {
-  state.humanDrawing=false; state.humanDrawingReferenceId=null; state.humanDrag=null;
-  ui.humanCanvas.style.pointerEvents='none';
-}
-async function beginHumanSeedDrawing() {
-  if (state.humanDrawing) { cancelHumanSeedDrawing(); renderHumanPosePanel(); drawHumanPoseOverlay(); return; }
-  if (!editable() || !activeReference() || state.humanCreating || state.humanPendingRequest) return;
-  if (humanMultiActive()) {
-    const view=referenceView(), source=humanViewSource(view);
-    if (!state.humanMultiViewIds.includes(view.clip_id)) { announce('请先勾选当前机位。',true); return; }
-    if (!source) { announce('此机位在所选起点之后没有参考帧；请重新选起点。',true); return; }
-    if (activeReference().id !== source.id && !await seekTimeline(source.time_sec,{viewId:view.clip_id,preserveTime:true})) return;
-  }
-  pauseTimeline(); setMode('select'); hideTextEditor();
-  state.humanDrawing=true; state.humanDrawingReferenceId=activeReference().id; state.humanDrag=null;
-  ui.humanPanel.open=false; renderHumanPosePanel(); drawHumanPoseOverlay();
-  announce('在参考图上拖框，只框一个人。Esc 取消。');
-}
-async function ensureHumanPoseDetail(job, {retry=false}={}) {
-  if (state.humanDetails.has(job.job_id)) return state.humanDetails.get(job.job_id);
-  if (state.humanDetailLoads.has(job.job_id) || (!retry && state.humanDetailErrors.has(job.job_id))) return null;
-  state.humanDetailLoads.add(job.job_id); renderHumanPosePanel();
+async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=false}={}) {
+  const cached=state.humanDetails.get(job.job_id);
+  if (!humanAutomaticJob(job) && cached) return cached;
+  if (referenceId && cached?.frames?.some((frame) => frame.reference_id === referenceId)) return cached;
+  if (first && cached?.frames?.length) return cached;
+  const key=referenceId ? humanPoseLoadKey(job,referenceId) : job.job_id + (first ? ':first' : '');
+  if (state.humanDetailLoads.has(key) || (!retry && state.humanDetailErrors.has(key))) return null;
+  state.humanDetailLoads.add(key); renderHumanPosePanel();
   try {
-    const detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id));
+    const pageOffset=referenceId ? humanPosePageOffset(job,referenceId) : null;
+    const query=humanAutomaticJob(job) ? referenceId ? pageOffset === null
+      ? '?reference_id=' + encodeURIComponent(referenceId)
+      : '?frame_offset=' + pageOffset + '&max_frames=32'
+      : '?frame_offset=0&max_frames=1' : '';
+    let detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + query);
     if (detail.session_id !== state.sessionId || detail.status !== 'completed' || !Array.isArray(detail.frames)) throw new Error('追踪结果与当前场景会话不匹配，请刷新重试。');
-    state.humanDetails.set(job.job_id,detail); state.humanDetailErrors.delete(job.job_id); return detail;
-  } catch (error) { state.humanDetailErrors.set(job.job_id,error.message); return null; }
-  finally { state.humanDetailLoads.delete(job.job_id); renderHumanPosePanel(); drawHumanPoseOverlay(); }
+    if (referenceId && !detail.frames.some((frame) => frame.reference_id === referenceId)) {
+      // The reference set may have changed since this job was created. Ask the
+      // archive for the immutable source ID before deciding the frame is gone.
+      detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + '?reference_id=' + encodeURIComponent(referenceId));
+    }
+    if (referenceId && !detail.frames.some((frame) => frame.reference_id === referenceId)) throw new Error('该帧没有人体追踪结果。');
+    if (humanAutomaticJob(job)) {
+      const latest=state.humanDetails.get(job.job_id);
+      const retained=(latest?.frames || []).filter((frame) => !detail.frames.some((item) => item.reference_id === frame.reference_id));
+      // Keep the active working set small even for all-camera, full-rate jobs.
+      detail.frames=[...retained,...detail.frames].slice(-128);
+    }
+    state.humanDetails.set(job.job_id,detail); state.humanDetailErrors.delete(key); return detail;
+  } catch (error) { state.humanDetailErrors.set(key,error.message); return null; }
+  finally { state.humanDetailLoads.delete(key); renderHumanPosePanel(); drawHumanPoseOverlay(); }
 }
 async function loadHumanPoses() {
   if (!state.sessionId || state.humanLoading || state.navigatingProject) return;
   state.humanLoading=true;
   try {
     const result=await api('/api/workspace/pose?session_id=' + encodeURIComponent(state.sessionId));
-    state.humanConfigured=result.configured === true;
-    state.humanRuntimeLabel=result.runtime_label || ''; state.humanMessage=result.message || '';
+    state.humanConfigured=result.automatic_detection_configured === true;
+    state.humanMessage=result.automatic_detection_message || result.message || '';
     state.humanJobs=(Array.isArray(result.jobs) ? result.jobs : []).filter(job => job.session_id === state.sessionId && /^[0-9a-f]{32}$/.test(job.job_id || ''));
     if (state.humanError?.startsWith('人体追踪连接失败：')) state.humanError=null;
     if (state.humanPendingRequest && state.humanJobs.some(job => job.request_id === state.humanPendingRequest.request_id)) {
       state.humanPendingRequest=null; state.humanError=null; saveDraft();
     }
-    const view=clipReference() ? referenceView() : null;
-    await Promise.allSettled(state.humanJobs.filter(job => job.status === 'completed' &&
-      (job.multi_view ? job.view_ids?.includes(view?.clip_id) : job.view_id ? job.view_id === view?.clip_id : job.reference_id === activeReference()?.id) ||
-      job.status === 'completed' && state.poseRefs.some(ref => ref.job_id === job.job_id)).map(job => ensureHumanPoseDetail(job)));
   } catch (error) { state.humanError='人体追踪连接失败：' + error.message; throw error; }
   finally { state.humanLoading=false; renderHumanPosePanel(); drawHumanPoseOverlay(); }
 }
@@ -2673,36 +2546,10 @@ async function startHumanPose() {
   if (!editable() || state.humanCreating || state.humanConfigured !== true) return;
   let body=state.humanPendingRequest;
   if (!body) {
-    const view=clipReference() ? referenceView() : null;
-    body={session_id:state.sessionId,request_id:newId().replace(/-/g,''),sample_fps:5,confidence_threshold:0.3};
-    if (humanMultiActive()) {
-      const selected=humanSelectedViews(), start=state.humanMultiStart;
-      const end=Number(ui.humanEnd.value), fps=Number(ui.humanFps.value);
-      if (selected.length < 2 || selected.length > 8 || !Number.isFinite(start) || !Number.isFinite(end) || end < start ||
-          !Number.isFinite(fps) || fps < .1 || fps > 60 || selected.some((item) => end > item.duration_sec+1e-6 ||
-            !sampledPoseFrameCount(item.frames,start,end,fps) || !humanViewSeed(item)) ||
-          sampledPoseViewCount(selected,start,end,fps) > 600) {
-        announce('请至少选择 2 个机位，在各机位起始帧框选人物；总采样帧数最多 600。',true); return;
-      }
-      body.views=selected.map((item) => ({view_id:item.clip_id,reference_id:humanViewSeed(item).reference_id,bbox:humanViewSeed(item).bbox}));
-      body.start_time_sec=start; body.end_time_sec=end; body.sample_fps=fps;
-    } else {
-      const seed=humanSelectedSeed();
-      if (!seed || !validBBox(seed.bbox)) { announce('请先在当前参考图框出一个人。',true); return; }
-      body.bbox=seed.bbox;
-      if (view) {
-        body.view_id=view.clip_id; body.start_time_sec=Number(ui.humanStart.value); body.end_time_sec=Number(ui.humanEnd.value); body.sample_fps=Number(ui.humanFps.value);
-        if (!Number.isFinite(body.sample_fps) || body.sample_fps < 0.1 || body.sample_fps > 60 || !Number.isFinite(body.end_time_sec) ||
-            body.end_time_sec < body.start_time_sec || body.end_time_sec > view.duration_sec+1e-6 ||
-            !sampledPoseFrameCount(view.frames,body.start_time_sec,body.end_time_sec,body.sample_fps) ||
-            sampledPoseFrameCount(view.frames,body.start_time_sec,body.end_time_sec,body.sample_fps) > 600) {
-          announce('请设置有效时间范围与采样帧率，每次最多 600 帧。',true); return;
-        }
-      } else body.reference_id=seed.reference_id;
-    }
+    body={session_id:state.sessionId,request_id:newId().replace(/-/g,''),all_views:true};
     state.humanPendingRequest=body; saveDraft();
   }
-  state.humanCreating=true; state.humanError=null; cancelHumanSeedDrawing(); renderHumanPosePanel();
+  state.humanCreating=true; state.humanError=null; ui.humanPanel.open=true; renderHumanPosePanel();
   try {
     const job=await api('/api/workspace/pose',{method:'POST',body});
     if (!job.job_id || job.session_id !== state.sessionId) throw new Error('服务未返回当前场景的追踪任务');
@@ -2713,15 +2560,6 @@ async function startHumanPose() {
     if ([400,403,404,409,422,503].includes(error.status)) state.humanPendingRequest=null;
     saveDraft();
   } finally { state.humanCreating=false; renderHumanPosePanel(); drawHumanPoseOverlay(); }
-}
-async function cancelHumanPose(job) {
-  if (state.humanCancelling.has(job.job_id)) return;
-  state.humanCancelling.add(job.job_id); renderHumanPosePanel();
-  try {
-    const result=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + '/cancel',{method:'POST',body:{}});
-    state.humanJobs=state.humanJobs.map(item => item.job_id === job.job_id ? result : item);
-  } catch (error) { announce('无法取消人体追踪：' + error.message,true); }
-  finally { state.humanCancelling.delete(job.job_id); renderHumanPosePanel(); }
 }
 function insertHumanPoseReference(job, frame) {
   if (!editable() || !frame || job.session_id !== state.sessionId) return;
@@ -2740,25 +2578,28 @@ function insertHumanPoseReference(job, frame) {
   }
 }
 async function viewHumanPose(job) {
-  const detail=await ensureHumanPoseDetail(job,{retry:true});
+  const detail=await ensureHumanPoseDetail(job,{retry:true,first:true});
   const selectedView=job.multi_view && job.view_ids?.includes(referenceView()?.clip_id) ? referenceView()?.clip_id : job.view_ids?.[0];
   const frame=detail?.frames?.find((item) => item.view_id === selectedView) || detail?.frames?.[0];
   if (!frame || !editable()) return;
-  if (job.view_id || job.multi_view) {
-    const viewId=frame.view_id || job.view_id;
-    if (!referenceViews().some((view) => view.clip_id === viewId)) { announce('该人体追踪的原机位已不在当前片段。',true); return; }
-    await seekTimeline(frame.time_sec,{viewId,preserveTime:true});
-  } else {
+  if (job.source_kind === 'static_references' || !job.view_id && !job.multi_view) {
     if (!state.references.some(ref => ref.id === frame.reference_id)) { announce('该人体追踪的原参考图已被移除。',true); return; }
     pauseTimeline(); state.clipEnabled=false; state.activeReferenceId=frame.reference_id;
     renderReferenceStrip(); showActiveReference();
     if (referenceCamera(activeReference())) alignActiveReference(); else leaveReferenceCamera();
+  } else {
+    const viewId=frame.view_id || job.view_id;
+    if (!referenceViews().some((view) => view.clip_id === viewId)) { announce('该人体追踪的原机位已不在当前片段。',true); return; }
+    await seekTimeline(frame.time_sec,{viewId,preserveTime:true});
   }
   ui.humanPanel.open=true; renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
 }
 async function downloadHumanPose(job) {
-  const detail=await ensureHumanPoseDetail(job,{retry:true});
-  if (!detail) { announce('人体结果未能载入，请稍后重试下载。',true); return; }
+  let detail;
+  try {
+    detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + (humanAutomaticJob(job) ? '?download=1' : ''));
+    if (detail.session_id !== state.sessionId || detail.status !== 'completed' || !Array.isArray(detail.frames)) throw new Error('下载结果与当前场景会话不匹配');
+  } catch (error) { announce('人体结果未能下载：' + error.message,true); return; }
   const blob=new Blob([JSON.stringify(detail,null,2)],{type:'application/json;charset=utf-8'});
   const url=URL.createObjectURL(blob), link=document.createElement('a');
   link.href=url; link.download=humanJobName(job) + '_' + job.job_id.slice(0,8) + '.json';
@@ -2767,89 +2608,10 @@ async function downloadHumanPose(job) {
 }
 function bindHumanPoseEvents() {
   ui.humanPanel.addEventListener('toggle',() => {
-    if (ui.humanPanel.open) { pauseTimeline(); renderHumanPosePanel(); loadHumanPoses().catch(() => {}); }
+    if (ui.humanPanel.open) { renderHumanPosePanel(); loadHumanPoses().catch(() => {}); }
     drawHumanPoseOverlay();
   });
-  ui.humanDraw.addEventListener('click',beginHumanSeedDrawing);
-  ui.humanMulti.addEventListener('change',() => {
-    cancelHumanSeedDrawing();
-    state.humanMulti=ui.humanMulti.checked;
-    if (state.humanMulti && clipReference()) {
-      const view=referenceView();
-      if (state.humanMultiClipId !== state.referenceClip.clip_id) {
-        state.humanMultiClipId=state.referenceClip.clip_id; state.humanMultiViewIds=[];
-        state.humanMultiStart=null; state.humanViewSeeds={};
-      }
-      if (!state.humanMultiViewIds.length) state.humanMultiViewIds=[view.clip_id];
-      if (state.humanMultiStart === null) state.humanMultiStart=activeReference()?.time_sec ?? state.time;
-      if (state.humanSeed?.view_id === view.clip_id && state.humanSeed.reference_id === humanViewSource(view)?.id)
-        state.humanViewSeeds[view.clip_id]=state.humanSeed;
-    }
-    state.humanFormKey=null; state.humanBoxSignature=null;
-    renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
-  });
-  ui.humanAnchor.addEventListener('click',() => {
-    if (!humanMultiActive() || !editable() || state.humanPendingRequest || state.humanCreating) return;
-    const ref=activeReference(), view=referenceView();
-    if (!ref || !state.humanMultiViewIds.includes(view.clip_id)) return;
-    const next=ref.time_sec;
-    if (!Number.isFinite(next)) return;
-    if (Math.abs(next-state.humanMultiStart)>1e-6) {
-      state.humanMultiStart=next; state.humanViewSeeds={};
-      state.humanBoxSignature=null;
-    }
-    ui.humanStart.value=String(next);
-    if (Number(ui.humanEnd.value)<next) ui.humanEnd.value=String(next);
-    renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
-  });
-  ui.humanBox.addEventListener('change',() => {
-    if (humanMultiActive()) {
-      const view=referenceView(), ref=activeReference(), source=humanViewSource(view);
-      if (source?.id === ref?.id && state.humanMultiViewIds.includes(view.clip_id)) {
-        const selected=humanCurrentBoxes().find((item) => item.id === ui.humanBox.value);
-        if (selected) state.humanViewSeeds[view.clip_id]={view_id:view.clip_id,reference_id:ref.id,bbox:rectangleBBox(selected.coordinates)};
-        else if (!ui.humanBox.value) delete state.humanViewSeeds[view.clip_id];
-        state.humanBoxSignature=null; saveDraft();
-      }
-    }
-    renderHumanPosePanel(); drawHumanPoseOverlay();
-  });
-  for (const input of [ui.humanEnd,ui.humanFps]) input.addEventListener('input',() => { renderHumanPosePanel(); saveDraft(); });
   ui.humanRun.addEventListener('click',startHumanPose);
-  ui.humanShow.addEventListener('change',drawHumanPoseOverlay);
-  ui.humanCanvas.addEventListener('pointerdown',event => {
-    if (!state.humanDrawing || !editable() || state.spacePan || event.button !== 0 || !referencePixelsReady()) return;
-    event.preventDefault(); event.stopPropagation();
-    ui.humanCanvas.setPointerCapture(event.pointerId);
-    const point=pointFromPointer(event,ui.humanCanvas);
-    state.humanDrag={pointerId:event.pointerId,start:point,end:point,reference_id:activeReference().id};
-  });
-  ui.humanCanvas.addEventListener('pointermove',event => {
-    if (state.humanDrag?.pointerId !== event.pointerId) return;
-    event.preventDefault(); event.stopPropagation(); state.humanDrag.end=pointFromPointer(event,ui.humanCanvas); drawHumanPoseOverlay();
-  });
-  ui.humanCanvas.addEventListener('pointerup',event => {
-    if (state.humanDrag?.pointerId !== event.pointerId) return;
-    event.preventDefault(); event.stopPropagation();
-    const drag=state.humanDrag, end=pointFromPointer(event,ui.humanCanvas);
-    const bbox=rectangleBBox({x:drag.start.x,y:drag.start.y,x2:end.x,y2:end.y});
-    cancelHumanSeedDrawing();
-    if (bbox && drag.reference_id === activeReference()?.id) {
-      if (humanMultiActive()) {
-        const view=referenceView();
-        if (state.humanMultiViewIds.includes(view.clip_id) && humanViewSource(view)?.id === drag.reference_id)
-          state.humanViewSeeds[view.clip_id]={view_id:view.clip_id,reference_id:drag.reference_id,bbox};
-        else announce('当前图不是所选机位的起始帧，请点击「切到起始帧」。',true);
-      } else state.humanSeed={reference_id:drag.reference_id,bbox,...(clipReference() ? {view_id:referenceView().clip_id} : {})};
-      state.humanBoxSignature=null;
-    } else announce('人物框太小，请重新拖框。',true);
-    ui.humanPanel.open=true; renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
-  });
-  ui.humanCanvas.addEventListener('pointercancel',() => { cancelHumanSeedDrawing(); renderHumanPosePanel(); drawHumanPoseOverlay(); });
-  document.addEventListener('keydown',event => {
-    if (event.key !== 'Escape' || !state.humanDrawing) return;
-    event.preventDefault(); cancelHumanSeedDrawing(); renderHumanPosePanel(); drawHumanPoseOverlay();
-  });
   setInterval(() => {
     if (state.workspaceReady && !state.navigatingProject && (ui.humanPanel.open || state.humanJobs.some(job => ['queued','running'].includes(job.status)))) {
       loadHumanPoses().catch(() => {});
@@ -3543,7 +3305,6 @@ function updateMode() {
 function setMode(mode) {
   if (state.submitting || state.pendingSubmission) return;
   if (!['select','point','rectangle','line','arrow','text','freehand'].includes(mode)) return;
-  cancelHumanSeedDrawing();
   state.mode = mode;
   if (mode !== 'select') pauseTimeline();
   hideTextEditor();
@@ -4068,7 +3829,6 @@ async function clearSubmittedDraft(submission) {
   // was restored or changed meanwhile, preserve its associated visual draft.
   if (!clearSubmittedPrompt(submission)) return false;
   hideTextEditor(); state.drag = null;
-  cancelHumanSeedDrawing(); state.humanSeed=null; state.humanViewSeeds={}; state.humanBoxSignature=null;
   state.annotations = [];
   state.dynamicSnapshots = [];
   state.snapshot = null;

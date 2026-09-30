@@ -331,7 +331,33 @@ def _make_server_unlocked(
             if pose_match:
                 job_id, cancel = pose_match.groups()
                 if self.command == "GET" and not cancel:
-                    return self._send_json(200, gateway.pose_jobs.get(job_id))
+                    offset_text = query.get("frame_offset", ["0"])
+                    limit_text = query.get("max_frames", [None])
+                    reference_ids = query.get("reference_id", [None])
+                    view_ids = query.get("view_id", [None])
+                    download = query.get("download", ["0"])
+                    if any(len(values) != 1 for values in (offset_text, limit_text, reference_ids, view_ids, download)):
+                        raise APIError(400, "pose query parameters must occur once")
+                    try:
+                        offset = int(offset_text[0])
+                        limit = int(limit_text[0]) if limit_text[0] is not None else None
+                    except ValueError as exc:
+                        raise APIError(400, "pose frame_offset and max_frames must be integers") from exc
+                    if offset < 0 or limit is not None and not 1 <= limit <= 32:
+                        raise APIError(400, "pose frame_offset must be nonnegative and max_frames must be between 1 and 32")
+                    reference_id, view_id = reference_ids[0], view_ids[0]
+                    if reference_id is not None and (not re.fullmatch(r"[0-9a-f]{32}", reference_id) or view_id is not None):
+                        raise APIError(400, "pose reference_id must be a valid ID without view_id")
+                    if view_id is not None and not re.fullmatch(r"[0-9a-f]{32}", view_id):
+                        raise APIError(400, "pose view_id must be a valid ID")
+                    if download[0] not in {"0", "1"}:
+                        raise APIError(400, "pose download must be 0 or 1")
+                    if download[0] == "1":
+                        if limit is not None or offset or reference_id is not None or view_id is not None:
+                            raise APIError(400, "pose download cannot be combined with frame filters")
+                        limit = "all"
+                    return self._send_json(200, gateway.pose_jobs.get(job_id, frame_offset=offset, max_frames=limit,
+                                                                       reference_id=reference_id, view_id=view_id))
                 if self.command == "POST" and cancel:
                     self._require_pose_access()
                     self._read_json()
@@ -541,7 +567,7 @@ def _make_server_unlocked(
                     "SCENE_FEEDBACK_DATA_DIR": str(context.store.data_dir),
                     "SCENE_FEEDBACK_PROJECT_DIR": str(context.project_dir),
                     "SCENE_FEEDBACK_WEB_DIR": str(web_root),
-                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-vitpose-multiview"},
+                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-vitpose-one-click"},
             "tool_timeout_sec": 120, "required": True,
         }}}
         context.gateway.browser_url = lambda session_id: browser_url(session_id, server.server_port, context, prefixed=True)

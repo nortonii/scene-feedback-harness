@@ -14,7 +14,8 @@ from unittest.mock import patch
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pose_worker import (clip_bbox, command_for_job, normalized_keypoints, runtime_status,
+from pose_worker import (MAX_AUTO_FRAMES, clip_bbox, command_for_job, normalized_keypoints, runtime_status,
+                         select_person_detection,
                          tracking_quality, update_bbox, validate_manifest)  # noqa: E402
 
 
@@ -131,6 +132,40 @@ class PoseWorkerTests(unittest.TestCase):
             self.assertFalse(runtime_status()["configured"])
             with self.assertRaises(ValueError):
                 command_for_job(Path("input.json"), Path("output.json"))
+
+    def test_automatic_manifest_accepts_full_source_frames_but_manual_keeps_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            Image.new("RGB", (100, 80)).save(root / "source.png")
+            frames = [{"image_path": "source.png", "frame_index": index, "time_seconds": index / 60,
+                       "width": 100, "height": 80, "ref_id": str(index)} for index in range(601)]
+            manifest = {"schema_version": 1, "job_id": "job", "track_id": "person", "view_id": "camera",
+                        "options": {"auto_detect": True}, "frames": frames}
+            path = root / "input.json"
+            path.write_text(json.dumps(manifest))
+            self.assertEqual(len(validate_manifest(path)["frames"]), 601)
+            manifest["options"]["auto_detect"] = False
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, "1 to 600"):
+                validate_manifest(path)
+            manifest["options"]["auto_detect"] = True
+            manifest["frames"] = frames[:1] * (MAX_AUTO_FRAMES + 1)
+            path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError, f"1 to {MAX_AUTO_FRAMES}"):
+                validate_manifest(path)
+
+    def test_automatic_person_selector_uses_actual_person_labels_and_roi_continuity(self):
+        detection = {"labels": [2, 1, 1], "scores": [.99, .8, .75],
+                     "boxes": [[0, 0, 100, 80], [5, 5, 55, 75], [62, 5, 98, 70]]}
+        first = select_person_detection(detection, 100, 80)
+        self.assertIsNotNone(first)
+        self.assertLess(first[0][0], 10)
+        self.assertEqual(first[1], .8)
+        second = select_person_detection(detection, 100, 80, [60, 0, 40, 80])
+        self.assertGreater(second[0][0], 55)
+        self.assertEqual(second[1], .75)
+        self.assertIsNone(select_person_detection({"labels": [2], "scores": [.99],
+                                                     "boxes": [[0, 0, 100, 80]]}, 100, 80))
 
 
 if __name__ == "__main__":

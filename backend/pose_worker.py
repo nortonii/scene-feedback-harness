@@ -30,6 +30,9 @@ COCO_EDGES = ((15, 13), (13, 11), (16, 14), (14, 12), (11, 12), (5, 11),
               (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10),
               (1, 2), (0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6))
 MODEL_FILES = ("config.json", "preprocessor_config.json", "model.safetensors")
+DETECTOR_FILENAME = "fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth"
+DETECTOR_SHA256 = "907ea3f91ff92242bc1baea8049276a3e76bca48ce7560bd268cc029f37977b5"
+MAX_AUTO_FRAMES = 8 * 600
 
 
 def _runner_template() -> list[str] | None:
@@ -53,6 +56,11 @@ def _executable_exists(value: str) -> bool:
 
 def _model_path() -> Path:
     return Path(os.environ.get("SCENE_FEEDBACK_POSE_MODEL", str(DEFAULT_MODEL))).expanduser()
+
+
+def _detector_path() -> Path:
+    return Path(os.environ.get("SCENE_FEEDBACK_POSE_DETECTOR",
+                               str(Path.home() / ".cache/torch/hub/checkpoints" / DETECTOR_FILENAME))).expanduser()
 
 
 def _missing_dependencies(python: str) -> list[str]:
@@ -87,7 +95,8 @@ def runtime_status() -> dict[str, Any]:
             for argument in runner[1:]:
                 if argument.endswith(".py") and "{" not in argument and not Path(argument).expanduser().is_file():
                     return {"configured": False, "runtime_label": "configured runner", "message": "pose runner script is unavailable"}
-            return {"configured": True, "runtime_label": "configured runner",
+            return {"configured": True, "automatic_detection_configured": True,
+                    "runtime_label": "configured runner",
                     "message": "runner configured; checkpoint and device are checked when a job starts"}
         python = os.environ.get("SCENE_FEEDBACK_POSE_PYTHON", sys.executable)
         if not _executable_exists(python):
@@ -99,10 +108,32 @@ def runtime_status() -> dict[str, Any]:
         missing_files = [name for name in MODEL_FILES if not (model / name).is_file()]
         if missing_files:
             return {"configured": False, "runtime_label": "local ViTPose", "message": "ViTPose checkpoint is missing: " + ", ".join(missing_files)}
-        return {"configured": True, "runtime_label": "local ViTPose+ Base",
+        detector = _detector_path()
+        detector_ready = detector.is_file() and detector.stat().st_size > 70_000_000 and not _missing_optional_dependency(python, "torchvision")
+        return {"configured": True, "automatic_detection_configured": detector_ready,
+                "automatic_detection_message": "person detector checkpoint and torchvision found" if detector_ready else
+                    "automatic tracking requires torchvision and a local person detector checkpoint",
+                "runtime_label": "local ViTPose+ Base",
                 "message": "dependencies and checkpoint files found; device checked when a job starts"}
     except (ValueError, OSError) as exc:
         return {"configured": False, "runtime_label": "ViTPose", "message": str(exc)}
+
+
+def _missing_optional_dependency(python: str, name: str) -> bool:
+    """Keep the manual ViTPose mode usable when torchvision is not installed."""
+    if os.path.abspath(python) == os.path.abspath(sys.executable):
+        return importlib.util.find_spec(name) is None
+    executable = Path(shutil.which(os.path.expanduser(python)) or python)
+    prefix = executable.parent.parent
+    sites = list(prefix.glob("lib/python*/site-packages")) + list(prefix.glob("lib/python*/dist-packages"))
+    configuration = prefix / "pyvenv.cfg"
+    if configuration.is_file():
+        values = dict(line.split("=", 1) for line in configuration.read_text(encoding="utf-8").splitlines() if "=" in line)
+        values = {key.strip(): value.strip() for key, value in values.items()}
+        if values.get("include-system-site-packages", "").lower() == "true" and values.get("home"):
+            base = Path(values["home"]).parent
+            sites += list(base.glob("lib/python*/site-packages")) + list(base.glob("lib/python*/dist-packages"))
+    return not any((site / name).exists() or list(site.glob(name + ".*.so")) for site in sites)
 
 
 def command_for_job(manifest_path: Path, output_path: Path) -> list[str]:
@@ -164,8 +195,8 @@ def clip_bbox(box: Any, width: int, height: int) -> list[float]:
 
 def validate_manifest(manifest_path: Path) -> dict[str, Any]:
     path = Path(manifest_path).resolve(strict=True)
-    if path.stat().st_size > 8 * 1024 * 1024:
-        raise ValueError("pose manifest exceeds 8 MiB")
+    if path.stat().st_size > 12 * 1024 * 1024:
+        raise ValueError("pose manifest exceeds 12 MiB")
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("schema_version", 1) not in (1, 2):
         raise ValueError("pose manifest must be a schema_version 1 or 2 object")
@@ -184,12 +215,16 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
                 or any(not isinstance(view_id, str) or not view_id or len(view_id) > 200 for view_id in view_ids)
                 or len(set(view_ids)) != len(view_ids)):
             raise ValueError("multi-view pose manifest needs 2 to 8 distinct view_ids")
-    frames = manifest.get("frames")
-    if not isinstance(frames, list) or not 1 <= len(frames) <= 600:
-        raise ValueError("pose job must contain 1 to 600 frames")
     options = manifest.get("options", {})
     if not isinstance(options, dict):
         raise ValueError("pose options must be an object")
+    if not isinstance(options.get("auto_detect", False), bool):
+        raise ValueError("auto_detect must be boolean")
+    automatic = options.get("auto_detect", False)
+    frames = manifest.get("frames")
+    frame_limit = MAX_AUTO_FRAMES if automatic else 600
+    if not isinstance(frames, list) or not 1 <= len(frames) <= frame_limit:
+        raise ValueError(f"pose job must contain 1 to {frame_limit} frames")
     threshold = _number(options.get("score_threshold", 0.3), "score_threshold")
     if not 0 <= threshold <= 1:
         raise ValueError("score_threshold must be between 0 and 1")
@@ -227,12 +262,16 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
         # Dimensions are checked after the image is decoded. Check presence and
         # finite xywh now, before loading a costly checkpoint.
         box = frame.get("bbox_xywh")
-        if not isinstance(box, (list, tuple)) or len(box) != 4:
-            raise ValueError("each frame needs an explicit human bbox_xywh in pixels")
-        for value in box:
-            _number(value, "bbox coordinate")
-        if box[2] <= 0 or box[3] <= 0:
-            raise ValueError("human bbox width and height must be positive")
+        if automatic:
+            if box is not None:
+                raise ValueError("automatic pose frames must not supply a manual person bbox")
+        else:
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                raise ValueError("each frame needs an explicit human bbox_xywh in pixels")
+            for value in box:
+                _number(value, "bbox coordinate")
+            if box[2] <= 0 or box[3] <= 0:
+                raise ValueError("human bbox width and height must be positive")
         if not isinstance(frame.get("reset_roi", False), bool):
             raise ValueError("reset_roi must be boolean")
         from PIL import Image
@@ -243,7 +282,8 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
         for key, actual in (("width", width), ("height", height)):
             if key in frame and frame[key] != actual:
                 raise ValueError("manifest dimensions do not match the EXIF-oriented reference image")
-        clip_bbox(box, width, height)
+        if not automatic:
+            clip_bbox(box, width, height)
     if version == 2 and set(previous_by_view) != set(view_ids):
         raise ValueError("each declared pose camera view needs at least one frame")
     return manifest
@@ -296,13 +336,56 @@ def update_bbox(box: list[float], points: list[dict[str, Any]], width: int, heig
     return clip_bbox([left, top, new_w, new_h], width, height)
 
 
+def select_person_detection(prediction: dict[str, Any], width: int, height: int,
+                            previous_box: list[float] | None = None, threshold: float = .3) -> tuple[list[float], float] | None:
+    """Choose one detector-backed person, favoring ROI continuity when available."""
+    labels = prediction["labels"]
+    scores = prediction["scores"]
+    boxes = prediction["boxes"]
+    if hasattr(labels, "detach"):
+        labels, scores, boxes = (value.detach().cpu().tolist() for value in (labels, scores, boxes))
+    candidates = []
+    for label, score, raw in zip(labels, scores, boxes):
+        if label != 1 or not math.isfinite(float(score)) or score < threshold or len(raw) != 4:
+            continue
+        left, top, right, bottom = [float(value) for value in raw]
+        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
+            continue
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(width, right), min(height, bottom)
+        if right - left < max(2, width * .01) or bottom - top < max(2, height * .01):
+            continue
+        box = [left, top, right - left, bottom - top]
+        area = box[2] * box[3] / (width * height)
+        rating = float(score) * math.sqrt(area)
+        if previous_box is not None:
+            px, py, pw, ph = previous_box
+            overlap = max(0, min(right, px + pw) - max(left, px)) * max(0, min(bottom, py + ph) - max(top, py))
+            union = box[2] * box[3] + pw * ph - overlap
+            iou = overlap / union if union > 0 else 0
+            rating *= 1 + 2 * iou
+        candidates.append((rating, box, float(score)))
+    if not candidates:
+        return None
+    _, box, score = max(candidates, key=lambda item: item[0])
+    x, y, w, h = box
+    return clip_bbox([x - w * .08, y - h * .08, w * 1.16, h * 1.16], width, height), score
+
+
+def _empty_keypoints() -> list[dict[str, Any]]:
+    return [{"id": index, "name": name, "x": 0., "y": 0., "score": 0., "raw_score": 0.,
+             "in_frame": False, "visible": False, "pixel_x": 0., "pixel_y": 0.}
+            for index, name in enumerate(COCO_NAMES)]
+
+
 def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | None = None,
                   progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-    """Load a real checkpoint once and infer sequentially within supplied ROIs."""
+    """Load checkpoints once and infer every source frame with independent ROIs."""
     manifest = validate_manifest(manifest_path)
     options = manifest.get("options", {})
     threshold = float(options.get("score_threshold", 0.3))
     update_roi = options.get("update_roi", True)
+    automatic = options.get("auto_detect", False)
     model_directory = Path(model_path or manifest.get("model_path") or _model_path()).expanduser().resolve(strict=True)
     if not all((model_directory / name).is_file() for name in MODEL_FILES):
         raise ValueError("ViTPose+ Base checkpoint must contain config, processor config and safetensors weights")
@@ -327,25 +410,66 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
     with (model_directory / "model.safetensors").open("rb") as checkpoint:
         for chunk in iter(lambda: checkpoint.read(2 * 1024 * 1024), b""):
             digest.update(chunk)
+    detector = None
+    detector_transform = None
+    if automatic:
+        from torchvision.models.detection import (FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
+                                                   fasterrcnn_mobilenet_v3_large_320_fpn)
+        detector_path = _detector_path().resolve(strict=True)
+        detector_digest = hashlib.sha256()
+        with detector_path.open("rb") as checkpoint:
+            for chunk in iter(lambda: checkpoint.read(2 * 1024 * 1024), b""):
+                detector_digest.update(chunk)
+        if detector_digest.hexdigest() != DETECTOR_SHA256:
+            raise ValueError("person detector checkpoint SHA-256 does not match the official COCO weights")
+        detector = fasterrcnn_mobilenet_v3_large_320_fpn(weights=None, weights_backbone=None)
+        detector.load_state_dict(torch.load(detector_path, map_location="cpu", weights_only=True))
+        detector = detector.to(device).eval()
+        detector_transform = FasterRCNN_MobileNet_V3_Large_320_FPN_Weights.DEFAULT.transforms()
     emit = progress or (lambda value: None)
     emit({"type": "progress", "completed_frames": 0, "total_frames": len(manifest["frames"]), "stage": "model_loaded"})
     results = []
-    previous_by_view: dict[str, tuple[list[float], tuple[int, int]]] = {}
+    previous_by_view: dict[str, tuple[list[float] | None, tuple[int, int], bool, int]] = {}
     for completed, frame in enumerate(manifest["frames"], 1):
         with Image.open(frame["image_path"]) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
         width, height = image.size
-        manual_box = clip_bbox(frame["bbox_xywh"], width, height)
         dimensions = (width, height)
         current_view = frame.get("view_id", manifest.get("view_id"))
         previous = previous_by_view.get(current_view)
-        previous_box, previous_dimensions = previous if previous is not None else (None, None)
-        if previous_box is not None and update_roi and not frame.get("reset_roi"):
-            if previous_dimensions != dimensions:
-                raise ValueError("ROI tracking requires consistent image dimensions within a camera view")
-            box = clip_bbox(previous_box, width, height)
+        previous_box, previous_dimensions, previous_tracked, since_detection = previous if previous is not None else (None, None, False, 0)
+        if previous_dimensions is not None and previous_dimensions != dimensions:
+            raise ValueError("ROI tracking requires consistent image dimensions within a camera view")
+        detector_score = None
+        detected = False
+        if automatic:
+            if previous_box is None or not previous_tracked or since_detection >= 30 or frame.get("reset_roi"):
+                with torch.inference_mode():
+                    prediction = detector([detector_transform(image).to(device)])[0]
+                selected = select_person_detection(prediction, width, height, previous_box)
+                if selected is not None:
+                    box, detector_score = selected
+                    detected = True
+                else:
+                    box = previous_box
+            else:
+                box = previous_box
+            if box is None:
+                keypoints = _empty_keypoints()
+                result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id") if key in frame}
+                result.update({"view_id": current_view, "track_id": manifest["track_id"],
+                               "width": width, "height": height, "bbox_xywh": None, "bbox": None,
+                               "keypoints": keypoints, "tracking_status": "lost", "roi_status": "no_person_detected"})
+                results.append(result)
+                previous_by_view[current_view] = (None, dimensions, False, 0)
+                emit({"type": "progress", "completed_frames": completed, "total_frames": len(manifest["frames"])})
+                continue
         else:
-            box = manual_box
+            manual_box = clip_bbox(frame["bbox_xywh"], width, height)
+            if previous_box is not None and update_roi and not frame.get("reset_roi"):
+                box = clip_bbox(previous_box, width, height)
+            else:
+                box = manual_box
         boxes = [[box]]
         inputs = processor(images=image, boxes=boxes, return_tensors="pt")
         inputs = {name: value.to(device) for name, value in inputs.items()}
@@ -356,14 +480,17 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
         keypoints = normalized_keypoints(person["keypoints"].detach().cpu().tolist(),
                                          person["scores"].detach().cpu().tolist(), width, height, threshold)
         tracked = tracking_quality(keypoints)
-        roi_status = "updated" if tracked and update_roi else "held_low_confidence" if not tracked else "fixed"
+        roi_status = ("detected" if previous is None else "re_detected") if detected else (
+            "updated" if tracked and update_roi else "held_low_confidence" if not tracked else "fixed")
         result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id") if key in frame}
         result.update({"view_id": current_view, "track_id": manifest["track_id"],
                        "width": width, "height": height, "bbox_xywh": box,
                        "bbox": {"x": box[0] / width, "y": box[1] / height, "width": box[2] / width, "height": box[3] / height},
-                       "keypoints": keypoints, "tracking_status": "tracked" if tracked else "lost", "roi_status": roi_status})
+                       "keypoints": keypoints, "tracking_status": "tracked" if tracked else "lost", "roi_status": roi_status,
+                       **({"detector_score": detector_score} if detector_score is not None else {})})
         results.append(result)
-        previous_by_view[current_view] = (update_bbox(box, keypoints, width, height) if tracked and update_roi else box, dimensions)
+        previous_by_view[current_view] = (update_bbox(box, keypoints, width, height) if tracked and update_roi else box,
+                                          dimensions, tracked, 0 if detected else since_detection + 1)
         emit({"type": "progress", "completed_frames": completed, "total_frames": len(manifest["frames"])})
     multi_view = manifest.get("schema_version", 1) == 2
     result = {"schema_version": 2 if multi_view else 1, "job_id": manifest["job_id"], "track_id": manifest["track_id"],
@@ -373,12 +500,17 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
                         "joints": 17, "joint_names": list(COCO_NAMES), "edges": [list(edge) for edge in COCO_EDGES],
                         "device": device, "torch_version": str(torch.__version__), "transformers_version": transformers.__version__,
                         "gpu_name": torch.cuda.get_device_name(0) if device.startswith("cuda") else None},
-              "tracking": {"method": "single_person_confidence_gated_roi" if update_roi else "fixed_manual_roi",
+              "tracking": {"method": "automatic_person_detection_and_confidence_gated_roi" if automatic else
+                                      "single_person_confidence_gated_roi" if update_roi else "fixed_manual_roi",
                            "scope": "per_view_independent" if multi_view else "single_view",
-                           **({"cross_view_identity_source": "user_designated_boxes"} if multi_view else {}),
+                           **({"cross_view_identity_source": "automatic_dominant_person_per_view" if automatic else "user_designated_boxes"} if multi_view else {}),
                            "identity_guaranteed": False, "score_threshold": threshold,
                            "coordinate_space": "exif_oriented_display",
                            "visibility_method": "confidence_and_image_bounds_not_occlusion_segmentation",
-                           "raw_score_kind": "heatmap_peak_not_calibrated_probability"}, "frames": results}
+                           "raw_score_kind": "heatmap_peak_not_calibrated_probability",
+                           **({"person_detector": "torchvision_fasterrcnn_mobilenet_v3_large_320_fpn_coco_v1",
+                               "person_detector_sha256": DETECTOR_SHA256,
+                               "selection": "confidence_area_with_per_view_roi_continuity",
+                               "redetection_interval_frames": 30} if automatic else {})}, "frames": results}
     atomic_json(Path(output_path), result)
     return result

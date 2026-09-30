@@ -1,7 +1,7 @@
 """Project-local asynchronous ViTPose jobs and immutable visual evidence.
 
-The user supplies a person ROI for each view. Multi-view tracks only group
-those user-selected ROIs; they never infer cross-camera identity or 3D pose.
+Automatic jobs cover every imported camera/frame and detect one dominant
+person independently per view. Neither mode infers cross-camera identity.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 import uuid
 
 from core import APIError, _now
-from dynamic import number, reference_views
+from dynamic import MAX_CLIP_FRAMES, number, reference_views
 from pose_worker import command_for_job, runtime_status
 
 
@@ -37,6 +37,7 @@ ACTIVE = {"queued", "running"}
 _RUNNER_SLOT = threading.Semaphore(1)
 MAX_FRAMES = 600
 MAX_VIEWS = 8
+MAX_AUTO_FRAMES = MAX_VIEWS * MAX_CLIP_FRAMES
 
 
 def _atomic_json(path: Path, document: dict) -> None:
@@ -63,6 +64,57 @@ def _load_job(store: Any, job_id: Any) -> dict:
 
 def _summary(job: dict) -> dict:
     return copy.deepcopy({key: value for key, value in job.items() if key not in {"sources", "frames", "request_digest"}})
+
+
+def _sources(store: Any, job: dict) -> list[dict]:
+    if job.get("automatic"):
+        return json.loads((store.data_dir / "human_pose" / job["job_id"] / "sources.json").read_text(encoding="utf-8"))["sources"]
+    return job["sources"]
+
+
+def _frame_index(store: Any, job_id: str) -> dict:
+    return json.loads((store.data_dir / "human_pose" / job_id / "frames_index.json").read_text(encoding="utf-8"))
+
+
+def _read_archive_frames(store: Any, job_id: str, index: dict, first: int, count: int) -> list[dict]:
+    offsets = index["offsets"]
+    if count <= 0 or first >= len(offsets):
+        return []
+    result = []
+    path = store.data_dir / "human_pose" / job_id / "frames.jsonl"
+    with path.open("rb") as handle:
+        handle.seek(offsets[first])
+        for _ in range(min(count, len(offsets) - first)):
+            result.append(json.loads(handle.readline()))
+    return result
+
+
+def _store_frame_archive(directory: Path, frames: list[dict]) -> None:
+    """Write once, then seek by frame/reference/view without loading all results."""
+    path = directory / "frames.jsonl"
+    descriptor, temporary = tempfile.mkstemp(prefix="pose-frames-", suffix=".tmp", dir=directory)
+    offsets: list[int] = []
+    references: dict[str, int] = {}
+    views: dict[str, dict[str, int]] = {}
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            for position, frame in enumerate(frames):
+                offsets.append(handle.tell())
+                references[frame["reference_id"]] = position
+                view_id = frame.get("view_id")
+                if view_id is not None:
+                    view = views.setdefault(view_id, {"start": position, "count": 0})
+                    if view["start"] + view["count"] != position:
+                        raise ValueError("pose result frames for each view must be contiguous")
+                    view["count"] += 1
+                handle.write((json.dumps(frame, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\n").encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _atomic_json(directory / "frames_index.json", {"offsets": offsets, "references": references, "views": views})
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def _bbox(value: Any) -> list[float]:
@@ -117,10 +169,65 @@ class HumanPoseJobs:
         jobs = sorted((job for job in jobs if job["session_id"] == session_id), key=lambda job: job["created_at"], reverse=True)
         return {**runtime_status(), "session_id": session_id, "jobs": jobs}
 
-    def get(self, job_id: str) -> dict:
+    def get(self, job_id: str, frame_offset: int = 0, max_frames: int | str | None = None,
+            reference_id: str | None = None, view_id: str | None = None) -> dict:
         with self.lock:
             job = _load_job(self.store, job_id)
-            return {**_summary(job), "frames": copy.deepcopy(job.get("frames", [])),
+            if type(frame_offset) is not int or frame_offset < 0:
+                raise APIError(400, "frame_offset must be nonnegative")
+            if reference_id is not None and (not isinstance(reference_id, str) or not ID.fullmatch(reference_id)):
+                raise APIError(400, "reference_id must be an exact stored pose frame ID")
+            if view_id is not None and (not isinstance(view_id, str) or not ID.fullmatch(view_id)):
+                raise APIError(400, "view_id must identify a pose camera")
+            known_views = job.get("view_ids", [job.get("view_id")])
+            if view_id is not None and view_id not in known_views:
+                raise APIError(404, "view_id is not a camera in this pose job")
+            if max_frames not in (None, "all") and (type(max_frames) is not int or not 1 <= max_frames <= 32):
+                raise APIError(400, "max_frames must be between 1 and 32")
+            summary = _summary(job)
+            if not job.get("automatic"):
+                frames = copy.deepcopy(job.get("frames", []))
+                all_count = len(frames)
+                if view_id is not None:
+                    frames = [frame for frame in frames if frame.get("view_id") == view_id]
+                if reference_id is not None:
+                    frames = [frame for frame in frames if frame["reference_id"] == reference_id]
+                    if not frames:
+                        raise APIError(404, "pose reference not found in this job")
+                total = len(frames)
+                count = total if max_frames in (None, "all") else max_frames
+                page = frames[frame_offset:frame_offset + count]
+                next_offset = frame_offset + count if frame_offset + count < total else None
+            elif job["status"] != "completed":
+                page, total, all_count, next_offset = [], 0, 0, None
+            else:
+                index = _frame_index(self.store, job_id)
+                total = len(index["offsets"])
+                all_count = total
+                if reference_id is not None:
+                    position = index["references"].get(reference_id)
+                    if position is None:
+                        raise APIError(404, "pose reference not found in this job")
+                    if view_id is not None and index["views"].get(view_id, {}).get("start", -1) > position:
+                        raise APIError(404, "pose reference does not belong to that camera")
+                    page = _read_archive_frames(self.store, job_id, index, position, 1)
+                    if view_id is not None and page[0].get("view_id") != view_id:
+                        raise APIError(404, "pose reference does not belong to that camera")
+                    total, next_offset = 1, None
+                else:
+                    view = index["views"].get(view_id) if view_id is not None else None
+                    if view_id is not None and view is None:
+                        raise APIError(404, "pose camera not found in this job")
+                    start, total = (view["start"], view["count"]) if view else (0, total)
+                    count = total if max_frames == "all" else max_frames if max_frames is not None else 8
+                    page = _read_archive_frames(self.store, job_id, index, start + frame_offset,
+                                                min(count, max(0, total - frame_offset)))
+                    next_offset = frame_offset + len(page) if frame_offset + len(page) < total else None
+            return {**summary, "frames": page, "result_frame_count": total, "total_frame_count": all_count,
+                    "frame_offset": frame_offset,
+                    "next_frame_offset": next_offset,
+                    "result_json_path": str(self.directory / job_id / ("output.json" if job.get("automatic") else "job.json"))
+                        if job["status"] == "completed" else None,
                     "keypoint_names": JOINT_NAMES, "skeleton_edges": SKELETON_EDGES}
 
     def start(self, payload: Any) -> dict:
@@ -154,6 +261,12 @@ class HumanPoseJobs:
                 raise APIError(503, capability.get("message", "ViTPose runner is not configured"))
             if any(json.loads(path.read_text(encoding="utf-8")).get("status") in ACTIVE for path in self.directory.glob("*/job.json")):
                 raise APIError(409, "this project already has an active human pose job")
+            if "all_views" in payload:
+                if payload["all_views"] is not True:
+                    raise APIError(400, "all_views must be true for automatic whole-reference tracking")
+                if not capability.get("automatic_detection_configured", False):
+                    raise APIError(503, capability.get("automatic_detection_message", "automatic person detector is unavailable"))
+                return self._start_automatic_locked(payload, session, request_id, digest)
             reference_id, view_id = payload.get("reference_id"), payload.get("view_id")
             multi_requested = "views" in payload
             multi_views = payload.get("views")
@@ -256,6 +369,62 @@ class HumanPoseJobs:
             thread.start()
             return _summary(job)
 
+    def _start_automatic_locked(self, payload: dict, session: dict, request_id: str, digest: str) -> dict:
+        if set(payload) - {"session_id", "request_id", "all_views"}:
+            raise APIError(400, "automatic pose tracking uses all current references without box, range or sampling options")
+        clip = session.get("reference_clip")
+        sources: list[dict] = []
+        view_metadata: list[dict] = []
+        if clip:
+            for view in reference_views(clip):
+                frames = view.get("frames", [])
+                if not frames:
+                    continue
+                view_metadata.append({"view_id": view["clip_id"], "view_name": view["name"],
+                                      "reference_id": frames[0]["id"], "sampled_frames": len(frames)})
+                sources.extend({"reference_id": frame["id"], "reference_name": frame["name"],
+                                "reference_url": frame["url"], "frame_index": frame["frame_index"],
+                                "time_sec": frame["time_sec"], "view_id": view["clip_id"],
+                                "view_name": view["name"], "clip_id": clip["clip_id"],
+                                **({"camera": copy.deepcopy(frame["camera"])} if frame.get("camera") else {})}
+                               for frame in frames)
+            source_kind = "dynamic_clip"
+        else:
+            for reference in session.get("reference_images", []):
+                view_metadata.append({"view_id": reference["id"], "view_name": reference["name"],
+                                      "reference_id": reference["id"], "sampled_frames": 1})
+                sources.append({"reference_id": reference["id"], "reference_name": reference["name"],
+                                "reference_url": reference["url"], "frame_index": 0, "time_sec": 0,
+                                "view_id": reference["id"], "view_name": reference["name"],
+                                **({"camera": copy.deepcopy(reference["camera"])} if reference.get("camera") else {})})
+            source_kind = "static_references"
+        if not sources:
+            raise APIError(400, "no reference frames are available for automatic human tracking")
+        if len(view_metadata) > MAX_VIEWS or len(sources) > MAX_AUTO_FRAMES:
+            raise APIError(400, f"automatic pose tracking supports at most {MAX_VIEWS} views and {MAX_AUTO_FRAMES} imported frames")
+        for source in sources:
+            source["width"], source["height"] = _display_dimensions(_image_path(self.store, source["reference_url"]))
+            source["image_orientation"] = "exif_oriented_display"
+        multi_view = len(view_metadata) > 1
+        job_id = uuid.uuid4().hex
+        job = {"schema_version": 2 if multi_view else 1, "job_id": job_id, "request_id": request_id,
+               "request_digest": digest, "session_id": session["session_id"], "track_id": "human_" + job_id[:8],
+               "status": "queued", "automatic": True, "all_views": True, "multi_view": multi_view,
+               "source_kind": source_kind, "sampling": "all_imported_frames", "sample_fps": None,
+               "confidence_threshold": .3, "completed_frames": 0, "total_frames": len(sources),
+               "views": view_metadata, "view_ids": [view["view_id"] for view in view_metadata],
+               **({"view_id": view_metadata[0]["view_id"], "view_name": view_metadata[0]["view_name"]} if not multi_view else {}),
+               **({"clip_id": clip["clip_id"]} if clip else {}), "created_at": _now()}
+        directory = self.directory / job_id
+        directory.mkdir()
+        _atomic_json(directory / "sources.json", {"sources": sources})
+        _atomic_json(directory / "job.json", job)
+        self.stops[job_id] = threading.Event()
+        thread = threading.Thread(target=self._run, args=(job_id,), daemon=True, name="vitpose-" + job_id[:8])
+        self.threads[job_id] = thread
+        thread.start()
+        return _summary(job)
+
     def _update(self, job_id: str, **changes: Any) -> dict:
         with self.lock:
             job = _load_job(self.store, job_id)
@@ -295,16 +464,20 @@ class HumanPoseJobs:
             job = self._update(job_id, status="running", started_at=_now())
             directory = self.directory / job_id
             frames = []
-            for source in job["sources"]:
-                x, y, width, height = source.get("seed_bbox", job.get("bbox"))
-                frames.append({"image_path": str(_image_path(self.store, source["reference_url"])), "ref_id": source["reference_id"],
-                               "width": source["width"], "height": source["height"],
-                               "frame_index": source.get("frame_index", 0), "time_seconds": source.get("time_sec", 0),
-                               **({"view_id": source["view_id"]} if job.get("multi_view") else {}),
-                               "bbox_xywh": [x * source["width"], y * source["height"], width * source["width"], height * source["height"]]})
+            for source in _sources(self.store, job):
+                frame = {"image_path": str(_image_path(self.store, source["reference_url"])), "ref_id": source["reference_id"],
+                         "width": source["width"], "height": source["height"],
+                         "frame_index": source.get("frame_index", 0), "time_seconds": source.get("time_sec", 0),
+                         **({"view_id": source["view_id"]} if job.get("multi_view") else {})}
+                if not job.get("automatic"):
+                    x, y, width, height = source.get("seed_bbox", job.get("bbox"))
+                    frame["bbox_xywh"] = [x * source["width"], y * source["height"], width * source["width"], height * source["height"]]
+                frames.append(frame)
             manifest = {"schema_version": 2 if job.get("multi_view") else 1, "job_id": job_id, "track_id": job["track_id"],
-                        **({"view_ids": job["view_ids"]} if job.get("multi_view") else {"view_id": job.get("view_id", "reference:" + job["sources"][0]["reference_id"])}),
-                        "options": {"device": "auto", "update_roi": True, "score_threshold": job["confidence_threshold"]}, "frames": frames}
+                        **({"view_ids": job["view_ids"]} if job.get("multi_view") else
+                           {"view_id": job["view_id"] if job.get("automatic") else job.get("view_id", "reference:" + frames[0]["ref_id"])}),
+                        "options": {"device": "auto", "update_roi": True, "auto_detect": bool(job.get("automatic")),
+                                    "score_threshold": job["confidence_threshold"]}, "frames": frames}
             _atomic_json(directory / "input.json", manifest)
             output = directory / "output.json"
             with (directory / "worker.log").open("wb") as log:
@@ -317,10 +490,10 @@ class HumanPoseJobs:
                                                stderr=log, text=True, start_new_session=True)
                     self.processes[job_id] = process
                 def timed_out() -> None:
-                    self._update(job_id, status="failed", error="ViTPose 超过 30 分钟未完成，请缩短片段后重试。", finished_at=_now())
+                    self._update(job_id, status="failed", error="ViTPose 追踪超时，请检查 worker 日志后重试。", finished_at=_now())
                     stop.set()
                     self._terminate(process)
-                watchdog = threading.Timer(1800, timed_out)
+                watchdog = threading.Timer(14400 if job.get("automatic") else 1800, timed_out)
                 watchdog.daemon = True
                 watchdog.start()
                 for line in process.stdout:
@@ -349,8 +522,12 @@ class HumanPoseJobs:
                 raise ValueError("pose output tracking metadata must be an object")
             if job.get("multi_view"):
                 tracking = {**tracking, "scope": "per_view_independent",
-                            "cross_view_identity_source": "user_designated_boxes", "identity_guaranteed": False}
-            self._update(job_id, status="completed", completed_frames=len(normalized), frames=normalized,
+                            "cross_view_identity_source": "automatic_dominant_person_per_view" if job.get("automatic") else "user_designated_boxes",
+                            "identity_guaranteed": False}
+            if job.get("automatic"):
+                _store_frame_archive(directory, normalized)
+            self._update(job_id, status="completed", completed_frames=len(normalized),
+                         **({"result_frame_count": len(normalized)} if job.get("automatic") else {"frames": normalized}),
                          model=result.get("model", {}), tracking=tracking, finished_at=_now(), error=None)
         except Exception as exc:
             self._update(job_id, status="failed", error=str(exc)[:1800], finished_at=_now())
@@ -371,11 +548,12 @@ class HumanPoseJobs:
             raise ValueError("pose output belongs to another tracking job")
         if job.get("multi_view") and result.get("view_ids") not in (None, job["view_ids"]):
             raise ValueError("pose output camera view list does not match the requested views")
+        sources = _sources(self.store, job)
         predictions = result.get("frames")
-        if not isinstance(predictions, list) or len(predictions) != len(job["sources"]):
+        if not isinstance(predictions, list) or len(predictions) != len(sources):
             raise ValueError("pose output frame count does not match requested images")
         frames = []
-        for source, prediction in zip(job["sources"], predictions):
+        for source, prediction in zip(sources, predictions):
             if (not isinstance(prediction, dict) or prediction.get("ref_id") != source["reference_id"]
                     or prediction.get("width") != source["width"] or prediction.get("height") != source["height"]):
                 raise ValueError("pose output source or image dimensions do not match")
@@ -400,12 +578,17 @@ class HumanPoseJobs:
             roi = prediction.get("bbox")
             if isinstance(roi, dict):
                 roi = [roi.get(key) for key in ("x", "y", "width", "height")]
-            if roi is None:
+            if roi is None and not job.get("automatic"):
                 roi = source.get("seed_bbox", job.get("bbox"))
             valid_count = sum(point["score"] >= job["confidence_threshold"] and point["in_frame"] for point in normalized)
-            frames.append({**copy.deepcopy(source), "keypoints": normalized, "bbox": _bbox(roi),
+            if roi is None and prediction.get("tracking_status") != "lost":
+                raise ValueError("tracked automatic frame needs an actual person ROI")
+            if roi is None and any(point["score"] > 0 or point["in_frame"] for point in normalized):
+                raise ValueError("no-person frame cannot contain inferred visible keypoints")
+            frames.append({**copy.deepcopy(source), "keypoints": normalized, "bbox": _bbox(roi) if roi is not None else None,
                            "tracking_status": prediction.get("tracking_status", "tracked" if valid_count >= 5 else "lost"),
-                           "roi_status": prediction.get("roi_status")})
+                           "roi_status": prediction.get("roi_status"),
+                           **({"detector_score": prediction["detector_score"]} if type(prediction.get("detector_score")) in (int, float) and math.isfinite(prediction["detector_score"]) else {})})
         return frames
 
     def cancel(self, job_id: str, *, interrupted: bool = False) -> dict:
@@ -457,7 +640,14 @@ def prepare_pose_feedback(store: Any, session_id: str, references: Any, note: st
         if job.get("status") != "completed":
             raise APIError(409, "human pose job has not completed")
         reference_id = reference.get("reference_id")
-        frame = next((frame for frame in job.get("frames", []) if frame["reference_id"] == reference_id), None)
+        if job.get("automatic"):
+            if not isinstance(reference_id, str) or not ID.fullmatch(reference_id):
+                raise APIError(400, "pose reference is not an inferred frame of this job")
+            index = _frame_index(store, job["job_id"])
+            position = index["references"].get(reference_id)
+            frame = _read_archive_frames(store, job["job_id"], index, position, 1)[0] if position is not None else None
+        else:
+            frame = next((frame for frame in job.get("frames", []) if frame["reference_id"] == reference_id), None)
         if frame is None:
             raise APIError(400, "pose reference is not an inferred frame of this job")
         key = (job["job_id"], reference_id)
@@ -468,7 +658,7 @@ def prepare_pose_feedback(store: Any, session_id: str, references: Any, note: st
         # Preserve actual inference-frame evidence even if the current clip changed.
         prepared.append({"job_id": job["job_id"], "track_id": job["track_id"], "source": "vitpose_estimate",
                          **({"multi_view": True, "view_ids": copy.deepcopy(job["view_ids"]),
-                             "cross_view_identity_source": "user_designated_boxes"} if job.get("multi_view") else {}),
+                             "cross_view_identity_source": "automatic_dominant_person_per_view" if job.get("automatic") else "user_designated_boxes"} if job.get("multi_view") else {}),
                          "coordinate_frame": "reference_image_normalized", "confidence_threshold": job["confidence_threshold"],
                          "model": copy.deepcopy(job.get("model", {})), "tracking": copy.deepcopy(job.get("tracking", {})), "frame": copy.deepcopy(frame),
                          "reference_original_url": frame["reference_url"],
