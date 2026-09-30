@@ -46,7 +46,7 @@
 | 参考图区域「导入」 | 添加参考图片、视频或帧序列，并设置序列帧率；动态素材追加为独立机位 |
 | 场景顶部「叠图」 | 一键开启 / 关闭参考图叠加；点击旁边的百分比展开透明度滑杆和常用档位 |
 | 参考区机位列表 | 在共享时间轴上切换动态参考机位 |
-| 参考区「人体追踪」 | 点击即追踪当前片段全部机位和参考帧；「结果」中查看进度并引用二维骨架 |
+| 参考区「人体结果」 | 查看、导入并引用 capsule skill 生成的二维骨架 |
 | 时间轴「选项」 | 选择反馈范围、时间区间及 GLB 动画动作 |
 
 收起会话后可继续点选和标注，当前未发送的草稿、标记、相机和截图保持原样；插入物体、标记或人体引用时会自动展开输入框。记录展开时，拖动会话框顶部的细条可调整高度，向上拉可显示更多聊天记录；双击恢复默认，也可聚焦细条后用上下方向键微调。收起记录时隐藏拖动条，保持紧凑输入；点击「展开记录」后恢复拖动和之前设定的高度。折叠状态和自定义高度按工作台会话保存在本机浏览器，刷新后恢复；小窗口会自动限制高度。新消息不会自动展开会话，入口会显示未读数量；查看旧消息时不会强制滚到底部，可点击「查看新消息 / 回到最新」。聊天区回放工作台已保存的近期消息，最多显示 100 条；未绑定任务的外部 MCP 模式，后续模型回复仍需在原 Codex 任务查看。
@@ -143,29 +143,15 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
-## 人体关键点：一键追踪所有机位与参考帧
+## 人体结果：由 capsule skill 生成，接入交互页面
 
-点击参考区工具栏的「人体追踪」就会直接开始；旁边的「结果」显示进度和已完成任务。工作台会对**当前动态片段的所有已导入机位和每一张已导入参考帧**运行人体检测与 ViTPose，无需框人、选机位、设时间范围或采样率。没有动态片段时，会处理当前会话的全部静态参考图。任务异步执行，显示已处理帧数与整体进度。动态参考最多 8 个机位、每机位 600 帧，合计最多 **4800 帧**；这里的“每帧”指导入工作台的参考帧，视频导入时已抽帧的原视频画面不会自动补回。各机位的 `time_sec` 须有共同起点，结果才能按时间对照。
+人体追踪和重建由独立的 [capsule-human-tracking skill](external-skills/capsule-human-tracking/SKILL.md) 执行。工作台的「人体结果」负责显示、导入和引用二维证据；工作台和插件不启动 ViTPose，也不安装推理环境或模型权重。
 
-完成后会在当前机位和时刻显示对应原帧的 COCO17 二维骨架，并注明实际来源帧。可查看结果、下载包含全部机位的 JSON，或点「引用人体」将 `[[pose:任务ID:原帧ID]]` 插入统一提示。同一反馈最多引用 8 个人体样本，可来自不同任务或机位。发送时，服务器读取已保存结果，附带**推理原帧、青色估计骨架图、置信度、人物框、机位、帧号、时间与已有相机数据**；估计与红色人工标记分开，原图不被改写。反馈保存成功后清空本轮人体引用，已完成任务继续保留。
+重建任务先调用 `workspace_export_pose_sources` 导出当前项目的参考帧快照，再由 skill 处理真实原帧或核验已有二维追踪。结果通过 `workspace_import_human_pose` 送回同一项目，也可在面板中导入对应的 JSON。来源快照绑定项目、会话、机位、帧、时间和图像，跨项目或已替换来源的结果会拒绝导入。更新场景几何不会单独使同一批参考图失效。
 
-结果按场景保存，并按机位分别记录二维轨迹。切换机位只显示该机位的骨架；可按 `view_id` 分页查询，完整 JSON 保存全部样本。替换片段后仍可读取旧任务的原始证据。每个场景一次只运行一个人体任务，服务内各场景共用一个推理名额；长任务的进度会持续保存，可通过 MCP 取消。服务重启会把未完成的任务标为中断，需重新点击开始。
+切换机位和拖动时间轴会显示对应来源帧的骨架。结果可声明自己的关节名称与连接关系；原有 COCO17 完成结果仍可查看。面板显示来源类型，区分真实二维观测、推理估计和现有三维模型的投影。后者不作为实际观测冒充追踪。
 
-这是 **ViTPose+ Base 的单人 COCO17 二维估计**。系统在每个机位自动检测并选择一个最显著的人，沿该机位跟踪，丢失时重新检测；不会追踪画面中的所有人。多人出现、遮挡或重检后可能选到不同的人，**不保证各机位追的是同一个人**，也不融合关节或三角化三维姿态。低可信、画外或丢失人物的骨架不显示。不提供手指关键点或自动驱动 Blender 骨骼；请对照原图核验结果。JSON 坐标相对各自原图归一化，并保留原始宽高和来源。
-
-### 可选推理环境
-
-HTTP 服务不加载模型，推理在独立进程运行。推理环境需安装 `torch`、匹配其 ABI 的 `torchvision`、`transformers`、`Pillow`、`numpy`、`scipy`、`opencv-python`，并准备本地 ViTPose+ Base 权重目录（含 `config.json`、`preprocessor_config.json`、`model.safetensors`）。一键自动选人还需要本地 Faster R-CNN MobileNet V3 320 COCO 检测权重；服务运行时不会隐式下载。启动前设置：
-
-依赖清单：[requirements-pose.txt](backend/requirements-pose.txt)；[ViTPose+ Base 权重](https://huggingface.co/usyd-community/vitpose-plus-base)；[Transformers ViTPose 文档](https://huggingface.co/docs/transformers/model_doc/vitpose)；[PyTorch 检测器文档](https://docs.pytorch.org/vision/2.0/models/generated/torchvision.models.detection.fasterrcnn_mobilenet_v3_large_320_fpn.html)与[官方检测权重](https://download.pytorch.org/models/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth)。
-
-```bash
-export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
-export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
-export SCENE_FEEDBACK_POSE_DETECTOR=/absolute/path/to/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth
-```
-
-依赖或权重缺失时面板显示原因；未配置仍可圈画和发送普通反馈。自定义 `SCENE_FEEDBACK_POSE_RUNNER` 可指定 JSON 参数数组，必须包含输入清单 `{manifest}` 与输出文件 `{output}` 占位符。此前已用 RTX 5060 验证 ViTPose 推理及反馈图像、MCP 图像传递。
+点击「引用人体」把 `[[pose:任务ID:原帧ID]]` 插入统一提示。发送时附带原图、估计骨架、置信度、机位、帧号、时间和已有相机信息；最多引用 8 个样本。新旧已保存证据均保留，反馈保存成功后清空本轮引用。自动跨机位身份识别、三角化与驱动三维人体须由重建 skill 按明确的校准和拓扑处理。
 
 ## 快速试用：房间与柜子
 
@@ -257,9 +243,9 @@ LAN_IP=192.168.1.10
 | `workspace_open` | 返回或打开这个项目的工作台地址 |
 | `workspace_get_context` | 读取当前参考图、场景版本和项目上下文 |
 | `workspace_get_feedback` | 读取已提交反馈及其实际图像 |
-| `workspace_track_human_pose` | 用 `all_views=true` 一键追踪当前片段全部机位及全部已导入帧；无片段时处理全部静态图。原有手框与单机位参数仍可用；立即返回 job_id |
-| `workspace_get_human_pose` | 读取环境、进度与 COCO17 结果；可用 `view_id` 只查一个机位，`frame_offset` / `max_frames` 分页，默认 8 帧、最多 32 帧，返回完整 JSON 的本地路径 |
-| `workspace_cancel_human_pose` | 取消当前场景内排队或运行中的人体任务，保留完成结果 |
+| `workspace_export_pose_sources` | 导出全部当前机位和参考帧的来源快照，供外部 capsule skill 使用 |
+| `workspace_import_human_pose` | 校验并导入绑定来源快照的二维人体结果，不启动推理 |
+| `workspace_get_human_pose` | 读取已导入及历史完成结果；按机位、原帧或分页查询 |
 | `workspace_publish_scene` | 校验并发布新的 GLB，检查预期版本，通知页面刷新 |
 | `workspace_set_reference_clip` | 导入单机位或多机位清单，或用 FFmpeg 对项目内的视频抽帧；`append_view=True` 追加机位 |
 | `workspace_request_feedback` | 默认模式：在页面请求用户检查某处，立即返回；用户的回复会成为下一条用户消息 |

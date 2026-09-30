@@ -34,3 +34,12 @@ with the current revision. Preserve the editable source and the current dynamic
 sequence when the change does not replace it. Re-read context if a revision
 conflict occurs. Stop monitoring when the user requests it; avoid subscribing to
 scene publication events that would repeatedly trigger your own updates.
+
+For human reconstruction, use the separate `capsule-human-tracking` skill when
+available. This plugin only exports reference-source snapshots, imports bound
+2D pose evidence, and displays or cites those results. Use
+`workspace_export_pose_sources` before running the external tracker and
+`workspace_import_human_pose` to publish its result. The source snapshot binds
+the project, session, view, frame, time and actual images. Preserve that binding;
+do not rename a foreign result to fit the current workspace. Distinguish measured
+or inferred 2D observations from projections of an existing 3D model.

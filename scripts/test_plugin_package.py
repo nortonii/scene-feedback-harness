@@ -109,6 +109,13 @@ class PluginPackageTests(unittest.TestCase):
                     runtime_files(self.root)
                 path.unlink()
 
+    def test_external_tracking_runtime_cannot_enter_plugin_archive(self):
+        for name in ("backend/pose_worker.py", "backend/pose_launcher.py", "scripts/run_pose_worker.py",
+                     "backend/requirements-pose.txt", "external-skills/capsule-human-tracking/SKILL.md"):
+            with self.subTest(path=name):
+                with self.assertRaisesRegex(ValueError, "External capsule tracking"):
+                    validate_package({**self.files, name: b"external skill resource"})
+
     def test_authoring_catalog_copies_valid_source_or_generates_for_extracted_package(self):
         generated = authoring_catalog(self.root)
         self.assertEqual(generated["plugins"][0]["source"], {"source": "local", "path": "./"})

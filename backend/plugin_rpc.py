@@ -53,11 +53,12 @@ TOOLS = [
          {"manifest_path": PATH, "video_path": PATH, "fps": {"type": "number", "exclusiveMinimum": 0},
           "camera_manifest_path": PATH, "clear": {"type": "boolean"}, "append_view": {"type": "boolean"},
           "view_name": PATH, "replace_view_id": ID}),
-    tool("workspace_track_human_pose", "Start automatic ViTPose tracking for all cameras and every imported source frame. Does not verify identity across cameras.",
+    tool("workspace_export_pose_sources", "Export exact current reference camera frames for an external reconstruction skill. No inference runs in the plugin; preserve exported source bindings.",
          {"request_id": ID}),
-    tool("workspace_get_human_pose", "Read progress or paginated sampled-frame keypoints; no job_id lists this session's jobs.",
+    tool("workspace_import_human_pose", "Import source-bound external 2D observations or declared 3D projections. Provide job_id and exactly one project-local result_path or result JSON; custom named joint profiles supported.",
+         {"job_id": ID, "result_path": PATH, "result": {"type": "object"}}, ["job_id"]),
+    tool("workspace_get_human_pose", "Read imported or historical joint evidence with declared profile and evidence kind; no job_id lists this session's exports/results.",
          {"job_id": ID, "frame_offset": REV, "max_frames": {"type": "integer", "minimum": 1, "maximum": 32}, "view_id": ID}, readonly=True),
-    tool("workspace_cancel_human_pose", "Cancel one project pose job, preserving completed results.", {"job_id": ID}, ["job_id"]),
     tool("workspace_event_status", "Read verified subscriber count and receipt status; excludes callback credentials.", readonly=True),
 ]
 TOOL_MAP = {item["name"]: item for item in TOOLS}
@@ -191,10 +192,12 @@ class PluginRPC:
             result = self.store.set_scene_preview(str(path), expected_revision=args["expected_revision"])
         elif name == "workspace_set_reference_clip":
             result = self.gateway.set_reference_clip_paths(args)
-        elif name == "workspace_track_human_pose":
-            import uuid
-            result = self.gateway.pose_jobs.start({"session_id": self.gateway.ensure()["session_id"],
-                                                   "all_views": True, "request_id": args.get("request_id", uuid.uuid4().hex)})
+        elif name == "workspace_export_pose_sources":
+            self.gateway.ensure()
+            result = self.gateway.pose_jobs.export_sources(args)
+        elif name == "workspace_import_human_pose":
+            self.gateway.ensure()
+            result = self.gateway.pose_jobs.import_result(args)
         elif name == "workspace_get_human_pose":
             if "job_id" not in args:
                 if "view_id" in args or "frame_offset" in args or "max_frames" in args:
@@ -203,8 +206,6 @@ class PluginRPC:
             else:
                 result = self.gateway.pose_jobs.get(args["job_id"], frame_offset=args.get("frame_offset", 0),
                                                     max_frames=args.get("max_frames", 8), view_id=args.get("view_id"))
-        elif name == "workspace_cancel_human_pose":
-            result = self.gateway.pose_jobs.cancel(args["job_id"])
         else:
             raise APIError(400, "unknown tool")
         return self.text_result(result)

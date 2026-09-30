@@ -136,29 +136,15 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
-## 人体キーポイント：全視点・全参照フレームをワンクリックで追跡
+## 人体結果：capsule skill で生成し、ワークベンチで確認
 
-参照画像のツールバーで `人体追踪` を押すとすぐに開始します。隣の `结果` で進捗と完了ジョブを確認できます。現在の動的クリップにある**全カメラの取り込み済み参照フレームすべて**に、人物検出と ViTPose を適用します。人物の枠、カメラ、時間範囲、サンプリング率の設定は不要です。動的クリップがなければ、このセッションの静止参照画像すべてを処理します。非同期ジョブには処理済みフレーム数と全体の進捗が表示されます。最大 8 視点、各 600 フレーム、合計 **4800 フレーム**です。「全フレーム」は取り込み済みの参照フレームを指し、動画からの抽出時に省かれた元動画のフレームは復元しません。時刻による比較には各視点の `time_sec` に共通の起点が必要です。
+人体追跡と再構築は独立した [capsule-human-tracking skill](external-skills/capsule-human-tracking/SKILL.md) が実行します。`人体结果` パネルは二次元証拠の表示、インポート、参照を担当します。ワークベンチのプラグインは ViTPose を起動せず、推論環境や重みをインストールしません。
 
-完了後、現在の視点と時刻に対応する原フレーム上の COCO17 二次元骨格を、実際の出典フレームとともに表示します。結果の確認、全視点を含む JSON のダウンロード、`引用人体` による `[[pose:JOB_ID:REFERENCE_ID]]` の挿入ができます。一つのフィードバックで、完了したジョブや視点から最大 8 サンプルを参照できます。送信時には**推論の原フレーム、シアン色の推定骨格画像、信頼度、人物領域、視点、フレーム番号、時刻、既存のカメラ校正**を添付します。赤い手動注釈とは分けて表示し、原画像は変更しません。保存成功後は今回の参照だけを消去し、ジョブ履歴は残します。
+再構築タスクは `workspace_export_pose_sources` で現在の参照フレームを保存し、skill で原画像を処理するか既存の二次元追跡を検証してから、`workspace_import_human_pose` で結果を戻します。対応する JSON をパネルからインポートすることもできます。出典はプロジェクト、セッション、視点、フレーム、時刻、画像に紐付き、別プロジェクトや置換済み画像の結果は受け付けません。参照画像が同じなら、シーン形状の更新だけでは無効になりません。
 
-結果はシーン別に保存され、視点ごとに独立した二次元軌跡を持ちます。視点を切り替えても他のカメラの骨格は表示しません。`view_id` による個別取得と全サンプルを含む JSON に対応します。クリップを置き換えても旧証拠は読めます。各シーンで実行できる人体ジョブは一つ、サービス全体の推論枠も一つです。長いジョブの進捗は保存され、MCP からキャンセルできます。サービス再起動後、未完了ジョブは中断として記録されるため、再度開始してください。
+視点と時刻を変更すると、その出典フレームの骨格を表示します。関節名と接続関係は結果で宣言でき、過去の COCO17 結果も読めます。実際の二次元観測、推論による推定、既存三次元モデルの投影を区別して表示します。投影は観測された追跡ではありません。
 
-これは **ViTPose+ Base の単独人物 COCO17 二次元推定**です。各視点で目立つ人物を一人自動検出して追跡し、見失ったら再検出します。画面内の全人物を追跡する機能ではありません。複数人、遮蔽、再検出で別人に切り替わる可能性があり、**視点をまたぐ同一人物の識別も保証しません**。関節の融合や三角測量による三次元姿勢推定は行いません。低信頼度、画像外、見失った骨格は表示しません。指関節や Blender リグの自動操作も対象外です。結果を原画像と照合してください。JSON の座標は各原画像基準で正規化され、寸法と出典を保持します。
-
-### 任意の推論環境
-
-HTTP サービスはモデルを読み込まず、別プロセスで推論します。`torch`、その ABI と互換の `torchvision`、`transformers`、`Pillow`、`numpy`、`scipy`、`opencv-python` と、`config.json`、`preprocessor_config.json`、`model.safetensors` を含むローカル ViTPose+ Base を用意します。自動人物選択には Faster R-CNN MobileNet V3 320 COCO のローカル重みも必要です。実行中のサービスは重みを自動ダウンロードしません。起動前に設定します。
-
-依存関係：[requirements-pose.txt](backend/requirements-pose.txt)、[ViTPose+ Base の重み](https://huggingface.co/usyd-community/vitpose-plus-base)、[Transformers ViTPose ドキュメント](https://huggingface.co/docs/transformers/model_doc/vitpose)、[PyTorch 検出器ドキュメント](https://docs.pytorch.org/vision/2.0/models/generated/torchvision.models.detection.fasterrcnn_mobilenet_v3_large_320_fpn.html)と[公式検出器重み](https://download.pytorch.org/models/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth)。
-
-```bash
-export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
-export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
-export SCENE_FEEDBACK_POSE_DETECTOR=/absolute/path/to/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth
-```
-
-依存や重みが不足すると理由を表示し、未設定でも通常の注釈と送信は使えます。独自 `SCENE_FEEDBACK_POSE_RUNNER` は JSON 引数配列を取り、`{manifest}`、`{output}` が必須です。以前の RTX 5060 検証では ViTPose 推論、フィードバック画像、MCP 画像配信を確認しました。
+`引用人体` は `[[pose:JOB_ID:REFERENCE_ID]]` を共通プロンプトに挿入します。一回のフィードバックは最大 8 サンプルで、原画像、骨格、信頼度、視点、フレーム、時刻、既存のカメラ情報を含みます。保存済み証拠は残り、送信成功後は今回の参照を消去します。視点間の人物対応、三角測量、三次元調整は、明示的な校正と関節定義を使って再構築 skill が担当します。
 
 ## クイックスタート：部屋とキャビネット
 
@@ -252,9 +238,9 @@ LAN_IP=192.168.1.10
 | `workspace_open` | このプロジェクトのワークベンチ URL を返す、または開く |
 | `workspace_get_context` | 現在の参照画像、シーンのリビジョン、プロジェクトのコンテキストを読み取る |
 | `workspace_get_feedback` | 送信済みフィードバックと実際の画像を読み取る |
-| `workspace_track_human_pose` | `all_views=true` で全視点・全取り込み済みフレームを追跡する。動的クリップがなければ全静止画を処理する。従来の手動枠と単一視点の引数も利用可能。job_id をすぐ返す |
-| `workspace_get_human_pose` | 環境・進捗・COCO17 結果を読む。`view_id` で一視点に絞り、`frame_offset` / `max_frames` でページ化（既定 8、最大 32 フレーム）。完全な JSON のローカルパスも返す |
-| `workspace_cancel_human_pose` | 現在シーンの待機中・実行中ジョブをキャンセルし完了結果を保持 |
+| `workspace_export_pose_sources` | 外部 capsule skill 用に全視点・参照フレームの出典を保存 |
+| `workspace_import_human_pose` | 出典に紐付いた二次元結果を検証して取り込む。推論は開始しない |
+| `workspace_get_human_pose` | 取り込み済み・過去の完了結果を視点、原フレーム、ページ別に読む |
 | `workspace_publish_scene` | 新しい GLB を検証して公開し、想定リビジョンを確認してページの更新を通知する |
 | `workspace_set_reference_clip` | 単一・複数カメラのマニフェストを読み込む、またはプロジェクト内の動画を FFmpeg で抽出する。`append_view=True` でカメラを追加 |
 | `workspace_request_feedback` | 標準モード：ページで確認を依頼してすぐに返る。返信は次のユーザーメッセージになる |

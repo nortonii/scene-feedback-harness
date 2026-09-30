@@ -25,7 +25,7 @@ FIXED_FILES = (
     "plugin.json", "mcp.json", "LICENSE", "README.md", "README.en.md",
     "README.ja.md", "README.ko.md", "README.ru.md", "CHANGELOG.md", "CONTRIBUTING.md", "preview.png",
     "docs/mcp-events-plugin.md", "scripts/plugin_bridge.py",
-    "scripts/run_pose_worker.py", "scripts/build_plugin.py",
+    "scripts/build_plugin.py",
     "scripts/configure_plugin.py",
 )
 
@@ -153,6 +153,8 @@ def validate_package(files: dict[str, bytes]) -> None:
         raise ValueError("Hosted package must not include a legacy local bridge")
     for name in files:
         path = Path(name)
+        if path.name in {"pose_worker.py", "pose_launcher.py", "run_pose_worker.py", "requirements-pose.txt"} or "external-skills" in path.parts:
+            raise ValueError(f"External capsule tracking resources must not be bundled in the workbench plugin: {name}")
         # Catalogs describe a collection of plugins. They belong in the source
         # checkout, never inside an archive submitted as one plugin. Check
         # suffixes too, since runtime directories can contain nested catalogs.

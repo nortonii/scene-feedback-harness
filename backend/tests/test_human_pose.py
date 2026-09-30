@@ -1,5 +1,4 @@
-"""Human pose jobs preserve frame evidence, worker failures and project isolation."""
-
+"""Passive pose evidence exchange: exact sources, profile and project isolation."""
 from __future__ import annotations
 
 import base64
@@ -11,7 +10,6 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from unittest.mock import patch
 import uuid
@@ -21,45 +19,10 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
-from human_pose import HumanPoseJobs, JOINT_NAMES, prepare_pose_feedback
+from human_pose import HumanPoseJobs, JOINT_NAMES, SKELETON_EDGES, prepare_pose_feedback, _atomic_json, _store_frame_archive
+import human_pose
 import mcp_server
 import server as server_module
-
-
-WORKER = r'''
-import argparse,json,sys,time
-from pathlib import Path
-from PIL import Image
-p=argparse.ArgumentParser()
-p.add_argument("--manifest");p.add_argument("--output");p.add_argument("--mode",default="normal")
-a=p.parse_args();manifest=json.loads(Path(a.manifest).read_text())
-names=["nose","left_eye","right_eye","left_ear","right_ear","left_shoulder","right_shoulder",
-"left_elbow","right_elbow","left_wrist","right_wrist","left_hip","right_hip","left_knee",
-"right_knee","left_ankle","right_ankle"]
-if a.mode=="fail":
- print("controlled worker failure",file=sys.stderr,flush=True);sys.exit(7)
-frames=[]
-for index,source in enumerate(manifest["frames"]):
- with Image.open(source["image_path"]) as image:width,height=image.size
- keypoints=[{"name":name,"x":.2+i*.03,"y":.25+(i%7)*.06,"score":.9,"in_frame":True} for i,name in enumerate(names)]
- keypoints[0]["raw_score"]=1.25
- if a.mode=="invalid":keypoints[0]["name"]="wrong_joint"
- if a.mode=="nan":keypoints[0]["x"]=float("nan")
- frame={"ref_id":source["ref_id"],"view_id":source.get("view_id",manifest.get("view_id")),
- "frame_index":source["frame_index"],"time_seconds":source["time_seconds"],
- "width":width,"height":height,"keypoints":keypoints,
- "bbox":[.12,.12,.55,.7],"tracking_status":"lost" if a.mode=="lost" else "tracked"}
- if a.mode=="wrong_view" and index==0:frame["view_id"]="other-camera"
- frames.append(frame)
- for bad in ("not-json",json.dumps({"completed_frames":-1}),json.dumps({"completed_frames":9999}),json.dumps({"completed_frames":True})):
-  print(bad,flush=True)
- print(json.dumps({"completed_frames":index+1}),flush=True)
- if a.mode=="hold":time.sleep(3600)
- if a.mode=="slow":time.sleep(.15)
-Path(a.output).write_text(json.dumps({"job_id":manifest["job_id"],"track_id":manifest["track_id"],
- **({"view_ids":manifest["view_ids"]} if "view_ids" in manifest else {}),
- "model":{"name":"controlled ViTPose transport fixture","keypoint_format":"coco17"},"frames":frames}))
-'''
 
 
 def image_data(color="navy", size=(160, 120)):
@@ -74,517 +37,296 @@ def camera():
             "intrinsics": {"width": 160, "height": 120, "fx": 150, "fy": 150, "cx": 80, "cy": 60}}
 
 
+def result_for(export, *, evidence_kind="observed_2d", names=None, edges=None, profile=None):
+    manifest = export["manifest"]
+    result = {key: copy.deepcopy(manifest[key]) for key in
+              ("schema_version", "job_id", "track_id", "project_id", "session_id", "source_snapshot_id")}
+    result.update({key: copy.deepcopy(manifest[key]) for key in ("view_id", "view_ids") if key in manifest})
+    names = JOINT_NAMES if names is None else names
+    result.update(evidence_kind=evidence_kind, model={"name": "external fixture"}, provenance={"method": "offline fixture"})
+    if profile is not None:
+        result.update(keypoint_profile=profile, keypoint_names=names, skeleton_edges=edges)
+    result["frames"] = [{**{key: source[key] for key in ("ref_id", "view_id", "width", "height", "frame_index", "time_seconds", "image_sha256", "image_orientation")},
+                         "keypoints": [{"name": name, "x": .2 + (index % 10) * .03, "y": .3,
+                                        "score": .9, "in_frame": True} for index, name in enumerate(names)],
+                         "bbox": [.1, .1, .6, .7], "tracking_status": "tracked"} for source in manifest["frames"]]
+    return result
+
+
 class HumanPoseTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.project = self.root / "project"
-        self.project.mkdir()
+        self.project = self.root / "project"; self.project.mkdir()
         self.store = SceneStore(self.root / "data")
         self.gateway = WorkspaceGateway(self.store, self.project, external_review=True)
         self.session = self.gateway.ensure()["session_id"]
         self.data, self.data_url = image_data()
         self.reference = self.store.add_reference(self.session, "person.png", self.data_url)
         self.store.set_reference_cameras(self.session, [{"reference_id": self.reference["id"], "camera": camera()}])
-        self.worker = self.root / "worker.py"
-        self.worker.write_text(WORKER)
-        self.runner_patch = patch.dict("os.environ", {"SCENE_FEEDBACK_POSE_RUNNER": self.runner("normal")})
-        self.runner_patch.start()
         self.jobs = HumanPoseJobs(self.store)
 
     def tearDown(self):
-        self.jobs.close()
-        self.runner_patch.stop()
-        self.temporary.cleanup()
-
-    def runner(self, mode):
-        return json.dumps([sys.executable, str(self.worker), "--manifest", "{manifest}", "--output", "{output}", "--mode", mode])
-
-    def request(self, **changes):
-        return {"session_id": self.session, "request_id": uuid.uuid4().hex,
-                "reference_id": self.reference["id"], "bbox": [.1, .15, .6, .7], **changes}
-
-    def wait(self, job_id, *, status="completed", timeout=6):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            job = self.jobs.get(job_id)
-            if job["status"] == status:
-                return job
-            if job["status"] in {"completed", "failed", "cancelled", "interrupted"}:
-                self.fail(f"expected {status}, got {job['status']}: {job.get('error')}")
-            time.sleep(.02)
-        self.fail(f"human pose job did not reach {status}")
-
-    def start(self, payload=None, mode="normal"):
-        with patch.dict("os.environ", {"SCENE_FEEDBACK_POSE_RUNNER": self.runner(mode)}):
-            created = self.jobs.start(payload or self.request())
-            # The worker reads its command asynchronously; keep the selected env
-            # until launch/output completes rather than racing patch teardown.
-            if mode == "hold":
-                deadline = time.monotonic() + 6
-                while time.monotonic() < deadline:
-                    current = self.jobs.get(created["job_id"])
-                    if current["completed_frames"] == 1:
-                        return current
-                    if current["status"] == "failed":
-                        self.fail(current.get("error"))
-                    time.sleep(.02)
-                self.fail("controlled worker did not report its first frame")
-            return self.wait(created["job_id"], status="failed" if mode in {"fail", "invalid", "nan", "wrong_view"} else "completed")
+        self.jobs.close(); self.temporary.cleanup()
 
     def clip(self):
-        primary = self.store.set_reference_clip(self.session, {"name": "camera A", "fps": 2, "frames": [
-            {"name": f"A{i}.png", "data_url": self.data_url, "time_sec": t, "camera": camera()}
-            for i, t in enumerate((0, .5, 1, 1.5))]})["reference_clip"]
-        _, blue = image_data("blue")
+        first = self.store.set_reference_clip(self.session, {"name": "camera A", "fps": 2, "frames": [
+            {"name": f"A{i}.png", "data_url": self.data_url, "time_sec": time, "camera": camera()}
+            for i, time in enumerate((0, .5, 1, 1.5))]})["reference_clip"]
+        _, other = image_data("blue")
         bundle = self.store.set_reference_clip(self.session, {"append_view": True, "name": "camera B", "fps": 3,
-            "frames": [{"name": f"B{i}.png", "data_url": blue, "time_sec": t, "camera": camera()}
-                       for i, t in enumerate((0, .34, .8, 1.2, 1.6))]})["reference_clip"]
-        return primary, bundle["views"][0]
+            "frames": [{"name": f"B{i}.png", "data_url": other, "time_sec": time, "camera": camera()}
+                       for i, time in enumerate((0, .34, .8, 1.2, 1.6))]})["reference_clip"]
+        return first, bundle["views"][0]
 
-    def test_current_image_subprocess_preserves_dimensions_camera_and_original(self):
-        payload = self.request()
-        before = copy.deepcopy(payload)
-        job = self.start(payload)
-        self.assertEqual(payload, before)
-        self.assertEqual((job["status"], job["completed_frames"], job["total_frames"]), ("completed", 1, 1))
-        frame = job["frames"][0]
-        self.assertEqual((frame["reference_id"], frame["width"], frame["height"]), (self.reference["id"], 160, 120))
-        self.assertEqual(frame["camera"], camera())
-        self.assertEqual([p["name"] for p in frame["keypoints"]], JOINT_NAMES)
-        self.assertEqual(frame["keypoints"][0]["raw_score"], 1.25)
-        self.assertEqual(frame["bbox"], [.12, .12, .55, .7])
-        manifest = json.loads((self.jobs.directory / job["job_id"] / "input.json").read_text())
-        self.assertEqual(manifest["frames"][0]["bbox_xywh"], [16, 18, 96, 84])
-        self.assertEqual(Path(manifest["frames"][0]["image_path"]).read_bytes(), self.data)
-        self.assertNotIn("frames", self.jobs.list(self.session)["jobs"][0])
+    def export(self):
+        return self.jobs.export_sources({"session_id": self.session})
 
-    def test_invalid_roi_and_source_requests_create_no_jobs(self):
-        invalid = [None, {}, [], [0, 0, 0, .5], [0, 0, .5, .001], [-.1, 0, .5, .5],
-                   [.8, .2, .3, .5], [True, 0, .5, .5], [float("nan"), 0, .5, .5],
-                   [0, 0, float("inf"), .5]]
-        for bbox in invalid:
-            with self.subTest(bbox=bbox), self.assertRaises(APIError):
-                self.jobs.start(self.request(bbox=bbox))
-        invalid_payloads = [self.request(reference_id="missing"), self.request(reference_id=None),
-                            self.request(view_id="missing"), self.request(start_time_sec=0),
-                            self.request(request_id="not-an-id"), self.request(sample_fps=0),
-                            self.request(confidence_threshold=2)]
-        for payload in invalid_payloads:
-            with self.subTest(payload=payload), self.assertRaises(APIError):
-                self.jobs.start(payload)
-        self.assertEqual(self.jobs.list(self.session)["jobs"], [])
+    def complete(self, export=None, **options):
+        export = export or self.export()
+        result = result_for(export, **options)
+        self.jobs.import_result({"job_id": export["job_id"], "result": result})
+        return self.jobs.get(export["job_id"]), result
 
-    def test_request_id_is_durable_and_never_restarts_a_completed_worker(self):
-        payload = self.request()
-        first = self.start(payload)
-        self.assertEqual(self.jobs.start(payload)["job_id"], first["job_id"])
-        with self.assertRaisesRegex(APIError, "different request"):
-            self.jobs.start(dict(payload, bbox=[.2, .2, .3, .3]))
-        self.jobs.close()
-        self.jobs = HumanPoseJobs(SceneStore(self.store.data_dir))
-        with patch("human_pose.runtime_status", return_value={"configured": False, "message": "offline"}):
-            self.assertEqual(self.jobs.start(payload)["job_id"], first["job_id"])
-        self.assertEqual(len(self.jobs.list(self.session)["jobs"]), 1)
+    def test_exports_bound_full_sources_without_worker_and_retry_is_stable(self):
+        request = {"session_id": self.session, "request_id": uuid.uuid4().hex}
+        with patch("subprocess.Popen", side_effect=AssertionError("passive exchange cannot launch inference")):
+            export = self.jobs.export_sources(request)
+            self.assertEqual(self.jobs.export_sources(request), export)
+        self.assertEqual(export["status"], "awaiting_import")
+        self.assertEqual(export["manifest"]["session_id"], self.session)
+        self.assertEqual(len(export["source_snapshot_id"]), 64)
+        frame = export["manifest"]["frames"][0]
+        self.assertEqual((frame["ref_id"], frame["width"], frame["height"]), (self.reference["id"], 160, 120))
+        self.assertEqual(frame["camera"]["intrinsics"]["fx"], 150)
+        self.assertTrue(Path(frame["image_path"]).is_file())
+        self.assertFalse(self.jobs.list(self.session)["inference_supported"])
+        self.assertFalse(hasattr(human_pose, "subprocess"))
+        self.assertFalse(hasattr(self.jobs, "start"))
+        self.assertFalse(hasattr(self.jobs, "cancel"))
 
-    def test_current_camera_clip_sampling_and_replacement_keep_original_provenance(self):
-        primary, second = self.clip()
-        payload = self.request(reference_id=None, view_id=second["clip_id"], sample_fps=2,
-                               start_time_sec=.3, end_time_sec=1.6)
-        job = self.start(payload)
-        self.assertEqual([f["time_sec"] for f in job["frames"]], [.34, 1.2])
-        self.assertEqual([f["frame_index"] for f in job["frames"]], [1, 3])
-        self.assertTrue(all(f["view_id"] == second["clip_id"] and f["view_name"] == "camera B"
-                            and f["clip_id"] == primary["clip_id"] for f in job["frames"]))
-        refs = [{"job_id": job["job_id"], "reference_id": f["reference_id"]} for f in job["frames"]]
-        original = copy.deepcopy(job["frames"])
-        self.store.set_reference_clip(self.session, {"frames": [{"data_url": self.data_url}]})
-        self.assertEqual(self.jobs.get(job["job_id"])["frames"], original)
-        prepared = prepare_pose_feedback(self.store, self.session, refs)
-        self.assertEqual([p["frame"] for p in prepared], original)
-        with self.assertRaisesRegex(APIError, "view_id"):
-            self.jobs.start(self.request(reference_id=None, view_id=second["clip_id"]))
+    def test_import_persists_exact_source_and_immutable_feedback_overlay(self):
+        job, result = self.complete()
+        self.assertEqual((job["status"], job["completed_frames"]), ("completed", 1))
+        self.assertEqual(job["keypoint_names"], JOINT_NAMES)
+        self.assertEqual(job["frames"][0]["camera"]["intrinsics"]["fx"], 150)
+        self.assertEqual(json.loads(Path(job["result_json_path"]).read_text()), result)
+        ref = {"job_id": job["job_id"], "reference_id": self.reference["id"]}
+        evidence = prepare_pose_feedback(self.store, self.session, [ref], f"[[pose:{job['job_id']}:{self.reference['id']}]]")
+        self.assertEqual(evidence[0]["source"], "external_pose_estimate")
+        with Image.open(io.BytesIO(evidence[0]["_overlay_data"])) as overlay:
+            self.assertEqual(overlay.size, (160, 120))
+        self.store.set_reference_clip(self.session, {"name": "replacement", "fps": 1,
+            "frames": [{"name": "new.png", "data_url": self.data_url, "time_sec": 0}]})
+        self.assertEqual(prepare_pose_feedback(self.store, self.session, [ref])[0]["frame"], evidence[0]["frame"])
 
-    def test_multi_view_tracks_independent_manual_boxes_and_preserves_both_cameras(self):
-        primary, second = self.clip()
-        first_box, second_box = [.1, .1, .5, .6], [.4, .05, .5, .8]
-        request = {"session_id": self.session, "request_id": uuid.uuid4().hex,
-                   "views": [{"view_id": primary["clip_id"], "reference_id": primary["frames"][1]["id"], "bbox": first_box},
-                             {"view_id": second["clip_id"], "reference_id": second["frames"][1]["id"], "bbox": second_box}],
-                   "start_time_sec": .3, "end_time_sec": 1.5, "sample_fps": 2}
-        original_request = copy.deepcopy(request)
-        job = self.start(request)
-        self.assertEqual(request, original_request)
-        self.assertEqual((job["status"], job["schema_version"], job["multi_view"], job["total_frames"]),
-                         ("completed", 2, True, 5))
-        self.assertEqual(job["view_ids"], [primary["clip_id"], second["clip_id"]])
-        self.assertEqual([view["sampled_frames"] for view in job["views"]], [3, 2])
-        self.assertEqual([frame["time_sec"] for frame in job["frames"]], [.5, 1., 1.5, .34, 1.2])
-        self.assertEqual([frame["frame_index"] for frame in job["frames"]], [1, 2, 3, 1, 3])
-        self.assertEqual([frame["view_id"] for frame in job["frames"]],
-                         [primary["clip_id"]] * 3 + [second["clip_id"]] * 2)
-        self.assertTrue(all(frame["camera"] == camera() for frame in job["frames"]))
-        self.assertEqual(job["tracking"]["scope"], "per_view_independent")
-        self.assertEqual(job["tracking"]["cross_view_identity_source"], "user_designated_boxes")
-        self.assertFalse(job["tracking"]["identity_guaranteed"])
-        manifest = json.loads((self.jobs.directory / job["job_id"] / "input.json").read_text())
-        self.assertEqual((manifest["schema_version"], manifest["view_ids"]), (2, job["view_ids"]))
-        self.assertEqual(manifest["frames"][0]["bbox_xywh"], [16, 12, 80, 72])
-        self.assertEqual(manifest["frames"][3]["bbox_xywh"], [64, 6, 80, 96])
-        self.assertEqual([frame["view_id"] for frame in manifest["frames"]],
-                         [primary["clip_id"]] * 3 + [second["clip_id"]] * 2)
-        refs = [{"job_id": job["job_id"], "reference_id": job["frames"][index]["reference_id"]} for index in (0, 3)]
-        note = "Compare " + " ".join("[[pose:" + ref["job_id"] + ":" + ref["reference_id"] + "]]" for ref in refs)
-        old_frames = copy.deepcopy(job["frames"])
-        self.store.set_reference_clip(self.session, {"frames": [{"data_url": self.data_url}]})
-        self.assertEqual(self.jobs.get(job["job_id"])["frames"], old_frames)
-        prepared = prepare_pose_feedback(self.store, self.session, refs, note)
-        self.assertEqual([entry["frame"]["view_id"] for entry in prepared], job["view_ids"])
-        self.assertTrue(all(entry["multi_view"] and entry["view_ids"] == job["view_ids"] for entry in prepared))
+    def test_all_views_all_frames_and_pagination_preserve_camera_identity(self):
+        first, second = self.clip()
+        job, _ = self.complete()
+        self.assertEqual((job["total_frames"], job["total_frame_count"]), (9, 9))
+        page = self.jobs.get(job["job_id"], view_id=second["clip_id"], max_frames=2)
+        self.assertEqual([frame["time_sec"] for frame in page["frames"]], [0, .34])
+        self.assertEqual(page["next_frame_offset"], 2)
+        self.assertEqual(page["result_frame_count"], 5)
+        rest = self.jobs.get(job["job_id"], view_id=second["clip_id"], frame_offset=2, max_frames=32)
+        self.assertEqual([frame["time_sec"] for frame in rest["frames"]], [.8, 1.2, 1.6])
+        self.assertTrue(all(frame["view_id"] == second["clip_id"] for frame in rest["frames"]))
+        with self.assertRaises(APIError):
+            self.jobs.get(job["job_id"], reference_id=rest["frames"][0]["reference_id"], view_id=first["clip_id"])
 
-    def test_one_click_tracks_every_imported_frame_in_every_view_and_pages_archive(self):
-        primary, second = self.clip()
-        payload = {"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True}
-        job = self.start(payload)
-        self.assertEqual((job["automatic"], job["multi_view"], job["total_frames"], job["result_frame_count"]),
-                         (True, True, 9, 9))
-        self.assertEqual([view["sampled_frames"] for view in job["views"]], [4, 5])
-        self.assertEqual(len(job["frames"]), 8)
-        self.assertEqual(job["next_frame_offset"], 8)
-        self.assertEqual(job["tracking"]["cross_view_identity_source"], "automatic_dominant_person_per_view")
+    def test_geometry_revision_can_change_before_external_result_arrives(self):
+        export = self.export()
+        revision = self.store.scene()["revision"]
+        self.store.replace_scene(revision, [{"id": "box", "name": "Box", "type": "box", "position": [0, 0, 0], "size": [1, 1, 1], "rotation": [0, 0, 0], "color": "#112233"}])
+        self.assertEqual(self.complete(export)[0]["status"], "completed")
+
+    def test_replaced_clip_or_modified_original_hash_rejects_stale_import(self):
+        for replacement in ("new_clip", "file_changed"):
+            with self.subTest(replacement=replacement):
+                export = self.export()
+                if replacement == "new_clip":
+                    self.store.set_reference_clip(self.session, {"name": "new", "fps": 1,
+                        "frames": [{"name": "new.png", "data_url": self.data_url, "time_sec": 0}]})
+                else:
+                    path = Path(export["manifest"]["frames"][0]["image_path"])
+                    path.write_bytes(image_data("red")[0])
+                with self.assertRaisesRegex(APIError, "sources changed"):
+                    self.jobs.import_result({"job_id": export["job_id"], "result": result_for(export)})
+                self.assertEqual(self.jobs.get(export["job_id"])["status"], "awaiting_import")
+
+    def test_foreign_or_unbound_results_never_persist(self):
+        export = self.export()
+        for key in ("job_id", "track_id", "project_id", "session_id", "source_snapshot_id", "view_id"):
+            with self.subTest(key=key):
+                result = result_for(export); result[key] = "foreign"
+                with self.assertRaises(APIError):
+                    self.jobs.import_result({"job_id": export["job_id"], "result": result})
+        self.assertFalse((self.jobs.directory / export["job_id"] / "output.json").exists())
+
+    def test_frame_identity_dimensions_order_and_count_are_exact(self):
+        self.clip(); export = self.export()
+        for key in ("ref_id", "view_id", "width", "height", "frame_index", "time_seconds", "image_sha256", "image_orientation"):
+            result = result_for(export)
+            result["frames"][0][key] = "wrong" if key.endswith("id") else 99
+            with self.subTest(key=key), self.assertRaises(APIError):
+                self.jobs.import_result({"job_id": export["job_id"], "result": result})
+        for change in ("reverse", "missing"):
+            result = result_for(export)
+            if change == "reverse": result["frames"].reverse()
+            else: result["frames"].pop()
+            with self.subTest(change=change), self.assertRaises(APIError):
+                self.jobs.import_result({"job_id": export["job_id"], "result": result})
+
+    def test_numeric_and_joint_visibility_validation_has_no_coordinate_guesses(self):
+        export = self.export()
+        for key, value in (("x", -1), ("y", float("nan")), ("score", True), ("in_frame", 1), ("name", "wrong")):
+            result = result_for(export); result["frames"][0]["keypoints"][0][key] = value
+            with self.subTest(key=key), self.assertRaises(APIError):
+                self.jobs.import_result({"job_id": export["job_id"], "result": result})
+        result = result_for(export); result.pop("evidence_kind")
+        with self.assertRaises(APIError):
+            self.jobs.import_result({"job_id": export["job_id"], "result": result})
+
+    def test_custom_capsule_projection_preserves_profile_edges_and_evidence_label(self):
+        names = ["pelvis", "left_knee", "left_ankle"]
+        job, _ = self.complete(evidence_kind="projected_3d", names=names, edges=[[0, 1], [1, 2]], profile="capsule-joints")
+        self.assertEqual(job["keypoint_names"], names)
+        ref = {"job_id": job["job_id"], "reference_id": self.reference["id"]}
+        evidence = prepare_pose_feedback(self.store, self.session, [ref])[0]
+        self.assertEqual((evidence["source"], evidence["evidence_kind"]), ("projected_3d_geometry", "projected_3d"))
+        self.assertEqual(evidence["skeleton_edges"], [[0, 1], [1, 2]])
+        self.assertEqual(len(evidence["frame"]["keypoints"]), 3)
+        self.assertTrue(evidence["_overlay_data"].startswith(b"\x89PNG"))
+
+    def test_custom_joint_profile_rejects_duplicate_names_invalid_edges_and_fake_coco(self):
+        export = self.export()
+        for names, edges, profile in ((["pelvis", "pelvis"], [], "capsule"), (["pelvis"], [[0, 1]], "capsule"),
+                                      (["pelvis"], [], "coco17"), (["pelvis"], [[0, 0]], "capsule")):
+            result = result_for(export, names=names, edges=edges, profile=profile)
+            with self.subTest(names=names, edges=edges, profile=profile), self.assertRaises(APIError):
+                self.jobs.import_result({"job_id": export["job_id"], "result": result})
+
+    def test_lost_person_has_no_fabricated_visible_joints(self):
+        export = self.export(); result = result_for(export)
+        result["frames"][0].update(bbox=None, tracking_status="lost")
+        with self.assertRaises(APIError):
+            self.jobs.import_result({"job_id": export["job_id"], "result": result})
+        for point in result["frames"][0]["keypoints"]:
+            point.update(score=0, in_frame=False)
+        self.assertEqual(self.jobs.import_result({"job_id": export["job_id"], "result": result})["status"], "completed")
+
+    def test_completed_import_retry_is_idempotent_but_different_result_conflicts(self):
+        job, result = self.complete()
+        self.assertEqual(self.jobs.import_result({"job_id": job["job_id"], "result": result})["status"], "completed")
+        result["frames"][0]["keypoints"][0]["x"] = .6
+        with self.assertRaisesRegex(APIError, "different completed result"):
+            self.jobs.import_result({"job_id": job["job_id"], "result": result})
+        self.jobs.close(); self.jobs = HumanPoseJobs(SceneStore(self.store.data_dir))
+        self.assertEqual(self.jobs.get(job["job_id"])["status"], "completed")
+
+    def test_external_download_roundtrip_preserves_original_import_digest(self):
+        job, result = self.complete()
+        download = self.jobs.download(job["job_id"])
+        self.assertEqual(download, result)
+        self.assertEqual(self.jobs.import_result({"job_id": job["job_id"], "result": download})["status"], "completed")
+
+    def test_explicit_calibrated_tracking_metadata_is_preserved_and_not_verified_by_workbench(self):
+        export = self.export(); result = result_for(export)
+        result["tracking"] = {"scope": "calibrated_cross_view_actor", "identity_guaranteed": True,
+                              "cross_view_identity_source": "user_verified_actor_binding", "actor_id": "subject-1"}
+        self.jobs.import_result({"job_id": export["job_id"], "result": result})
+        tracking = self.jobs.get(export["job_id"])["tracking"]
+        self.assertEqual(tracking["scope"], "calibrated_cross_view_actor")
+        self.assertTrue(tracking["identity_guaranteed"])
+        self.assertFalse(tracking["workbench_identity_verified"])
+
+    def test_project_local_result_file_import_rejects_outside_path(self):
+        export = self.export(); result = result_for(export)
+        path = self.project / "external_pose.json"; path.write_text(json.dumps(result))
+        self.assertEqual(self.jobs.import_result({"job_id": export["job_id"], "result_path": str(path)})["status"], "completed")
+        export = self.export(); other = self.root / "foreign.json"; other.write_text(json.dumps(result_for(export)))
+        with self.assertRaisesRegex(APIError, "within this project"):
+            self.jobs.import_result({"job_id": export["job_id"], "result_path": str(other)})
+
+    def test_historical_completed_inline_and_archived_results_survive_migration(self):
+        export = self.export(); job, _ = self.complete(export)
         directory = self.jobs.directory / job["job_id"]
-        disk_job = json.loads((directory / "job.json").read_text())
-        self.assertNotIn("sources", disk_job)
-        self.assertNotIn("frames", disk_job)
-        manifest = json.loads((directory / "input.json").read_text())
-        self.assertEqual(manifest["options"]["auto_detect"], True)
-        self.assertTrue(all("bbox_xywh" not in frame for frame in manifest["frames"]))
-        self.assertEqual([frame["frame_index"] for frame in manifest["frames"]], list(range(4)) + list(range(5)))
-        self.assertEqual([frame["time_seconds"] for frame in manifest["frames"]],
-                         [0, .5, 1, 1.5, 0, .34, .8, 1.2, 1.6])
-        final = self.jobs.get(job["job_id"], frame_offset=8, max_frames=8)
-        self.assertEqual((len(final["frames"]), final["next_frame_offset"]), (1, None))
-        by_view = self.jobs.get(job["job_id"], view_id=second["clip_id"], max_frames=2)
-        self.assertEqual((by_view["result_frame_count"], by_view["next_frame_offset"]), (5, 2))
-        self.assertTrue(all(frame["view_id"] == second["clip_id"] for frame in by_view["frames"]))
-        one = self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"])
-        self.assertEqual(one["frames"][0]["time_sec"], 1.6)
-        self.assertEqual(len(self.jobs.get(job["job_id"], max_frames="all")["frames"]), 9)
-        with self.assertRaisesRegex(APIError, "not found"):
-            self.jobs.get(job["job_id"], reference_id=uuid.uuid4().hex)
-        with self.assertRaisesRegex(APIError, "does not belong"):
-            self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"], view_id=primary["clip_id"])
-        refs = [{"job_id": job["job_id"], "reference_id": second["frames"][4]["id"]}]
-        prepared = prepare_pose_feedback(self.store, self.session, refs)
-        self.assertEqual(prepared[0]["frame"], one["frames"][0])
-        self.assertEqual(prepared[0]["cross_view_identity_source"], "automatic_dominant_person_per_view")
-        self.store.set_reference_clip(self.session, {"frames": [{"data_url": self.data_url}]})
-        self.assertEqual(self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"])["frames"], one["frames"])
-        self.jobs.close()
-        self.jobs = HumanPoseJobs(SceneStore(self.store.data_dir))
-        self.assertEqual(self.jobs.get(job["job_id"], reference_id=second["frames"][4]["id"])["frames"], one["frames"])
-        self.assertEqual(self.jobs.start(payload)["job_id"], job["job_id"])
-
-    def test_one_click_static_fallback_tracks_all_reference_images_without_clip(self):
-        second = self.store.add_reference(self.session, "another-person.png", image_data("blue")[1])
-        job = self.start({"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True})
-        self.assertEqual((job["source_kind"], job["total_frames"], job["result_frame_count"]),
-                         ("static_references", 2, 2))
-        self.assertEqual([frame["reference_id"] for frame in job["frames"]], [self.reference["id"], second["id"]])
-        self.assertEqual([frame["time_sec"] for frame in job["frames"]], [0, 0])
-
-    def test_one_click_rejects_conflicting_options_missing_detector_and_oversize(self):
-        self.clip()
-        payload = {"session_id": self.session, "request_id": uuid.uuid4().hex, "all_views": True}
-        with self.assertRaisesRegex(APIError, "without box"):
-            self.jobs.start(dict(payload, bbox=[.1, .1, .5, .5]))
-        with patch("human_pose.runtime_status", return_value={"configured": True, "automatic_detection_configured": False}):
-            with self.assertRaisesRegex(APIError, "detector"):
-                self.jobs.start(payload)
-        with patch("human_pose.MAX_AUTO_FRAMES", 8), self.assertRaisesRegex(APIError, "at most 8"):
-            self.jobs.start(payload)
-        self.assertEqual(self.jobs.list(self.session)["jobs"], [])
-
-    def test_multi_view_rejects_ambiguous_stale_or_oversize_inputs_before_creating_job(self):
-        primary, second = self.clip()
-        item_a = {"view_id": primary["clip_id"], "reference_id": primary["frames"][0]["id"], "bbox": [.1, .1, .5, .6]}
-        item_b = {"view_id": second["clip_id"], "reference_id": second["frames"][0]["id"], "bbox": [.4, .05, .5, .8]}
-        base = {"session_id": self.session, "request_id": uuid.uuid4().hex,
-                "views": [item_a, item_b], "start_time_sec": 0, "end_time_sec": 1, "sample_fps": 2}
-        cases = [dict(base, views=None), dict(base, views=[item_a]), dict(base, views=[item_a] * 9),
-                 dict(base, views=[item_a, item_a]), dict(base, views=[item_a, dict(item_b, view_id=uuid.uuid4().hex)]),
-                 dict(base, views=[dict(item_a, bbox=None), item_b]),
-                 dict(base, views=[dict(item_a, reference_id=primary["frames"][2]["id"]), item_b]),
-                 dict(base, bbox=[.1, .1, .2, .2]), dict(base, view_id=primary["clip_id"]),
-                 dict(base, end_time_sec=2)]
-        for request in cases:
-            with self.subTest(request=request), self.assertRaises(APIError):
-                self.jobs.start(request)
-        with patch("human_pose.MAX_FRAMES", 4), self.assertRaisesRegex(APIError, "4 samples across all views"):
-            self.jobs.start(base)
-        self.assertEqual(self.jobs.list(self.session)["jobs"], [])
-
-    def test_multi_view_rejects_worker_frames_assigned_to_another_camera(self):
-        primary, second = self.clip()
-        payload = {"session_id": self.session, "request_id": uuid.uuid4().hex,
-                   "views": [{"view_id": primary["clip_id"], "bbox": [.1, .1, .5, .6]},
-                             {"view_id": second["clip_id"], "bbox": [.4, .05, .5, .8]}],
-                   "start_time_sec": 0, "end_time_sec": .5, "sample_fps": 2}
-        job = self.start(payload, "wrong_view")
-        self.assertEqual(job["status"], "failed")
-        self.assertIn("camera view", job["error"])
-        self.assertEqual(job["frames"], [])
-
-    def test_progress_cancel_and_restart_are_durable_and_never_completed(self):
-        primary, _ = self.clip()
-        job = self.start(self.request(reference_id=None, view_id=primary["clip_id"]), "hold")
-        self.assertEqual((job["status"], job["completed_frames"], job["total_frames"]), ("running", 1, 4))
-        with self.assertRaisesRegex(APIError, "active"):
-            self.jobs.start(self.request())
-        cancelled = self.jobs.cancel(job["job_id"])
-        self.assertEqual(cancelled["status"], "cancelled")
-        self.jobs.threads[job["job_id"]].join(timeout=3)
-        self.assertEqual(self.jobs.get(job["job_id"])["status"], "cancelled")
-        self.assertEqual(self.jobs.cancel(job["job_id"])["status"], "cancelled")
-        with self.assertRaisesRegex(APIError, "not completed"):
-            prepare_pose_feedback(self.store, self.session, [{"job_id": job["job_id"], "reference_id": primary["frames"][0]["id"]}])
-        second = self.start(self.request(), "hold")
-        self.jobs.close()
-        self.jobs = HumanPoseJobs(self.store)
-        self.assertEqual(self.jobs.get(second["job_id"])["status"], "interrupted")
-        self.assertEqual(self.jobs.get(job["job_id"])["status"], "cancelled")
-        # Crash-left durable states are marked interrupted even without close().
-        path = self.jobs.directory / second["job_id"] / "job.json"
-        document = json.loads(path.read_text()); document["status"] = "queued"; path.write_text(json.dumps(document))
-        self.jobs.close(); self.jobs = HumanPoseJobs(self.store)
-        self.assertEqual(self.jobs.get(second["job_id"])["status"], "interrupted")
-
-    def test_worker_failures_and_bad_outputs_are_durable_and_recoverable(self):
-        for mode, expected in (("fail", "exited 7"), ("invalid", "joint names"), ("nan", "non-finite")):
-            with self.subTest(mode=mode):
-                job = self.start(mode=mode)
-                self.assertEqual(job["status"], "failed")
-                self.assertIn(expected, job["error"])
-                self.assertEqual(job["frames"], [])
-        completed = self.start()
-        self.assertEqual(completed["status"], "completed")
-
-    def test_feedback_uses_stored_keypoints_and_original_plus_overlay_for_gateway_and_mcp(self):
-        job = self.start()
-        payload = {"scene_revision": 1, "note": "Follow this [[pose:"+job["job_id"]+":"+self.reference["id"]+"]].",
-                   "pose_refs": [{"job_id": job["job_id"], "reference_id": self.reference["id"],
-                                  "keypoints": [{"name": "fake", "x": 999}]}]}
-        original = copy.deepcopy(payload)
-        packet = self.store.submit_feedback(self.session, payload)
-        self.assertEqual(payload, original)
-        estimate = packet["human_pose"][0]
-        self.assertEqual(estimate["frame"]["keypoints"], job["frames"][0]["keypoints"])
-        self.assertEqual(estimate["source"], "vitpose_estimate")
-        self.assertEqual(estimate["coordinate_frame"], "reference_image_normalized")
-        self.assertEqual(estimate["reference_original_url"], self.reference["url"])
-        overlay = self.store.media_dir / estimate["pose_overlay_url"].rsplit("/", 1)[-1]
-        with Image.open(overlay) as image:
-            self.assertEqual(image.size, (160, 120))
-            self.assertEqual(image.getpixel((32, 30)), (0, 183, 176))
-        self.assertEqual((self.store.media_dir / self.reference["url"].rsplit("/", 1)[-1]).read_bytes(), self.data)
-        text, paths = self.gateway._turn_input(packet)
-        self.assertIn(job["track_id"], text)
-        self.assertIn("vitpose", text.lower())
-        self.assertIn(str(overlay), paths)
-        self.assertIn(str(self.store.media_dir / self.reference["url"].rsplit("/", 1)[-1]), paths)
-        with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
-            result = mcp_server._visual_tool_result({"items": [copy.deepcopy(packet)]})
-        self.assertEqual(result.structured_content["items"][0]["human_pose"][0]["frame"]["keypoints"], estimate["frame"]["keypoints"])
-        self.assertGreaterEqual(sum(block.type == "image" for block in result.content), 2)
-        self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(packet["feedback_id"]), packet)
-
-    def test_feedback_rejects_other_sessions_unknown_frames_duplicates_and_limit(self):
-        job = self.start()
+        stored = json.loads((directory / "job.json").read_text())
+        for key in ("external_results", "imported_external", "keypoint_profile", "keypoint_names", "skeleton_edges", "evidence_kind"):
+            stored.pop(key, None)
+        stored.update(automatic=False, frames=job["frames"])
+        _atomic_json(directory / "job.json", stored)
+        self.jobs.close(); self.jobs = HumanPoseJobs(SceneStore(self.store.data_dir))
+        self.assertEqual(self.jobs.get(job["job_id"])["keypoint_names"], JOINT_NAMES)
         ref = {"job_id": job["job_id"], "reference_id": self.reference["id"]}
-        other = self.store.create_session()["session_id"]
-        invalid = [(other, [ref]), (self.session, [dict(ref, reference_id="missing")]),
-                   (self.session, [ref, ref]), (self.session, [ref] * 9),
-                   (self.session, [{"job_id": uuid.uuid4().hex, "reference_id": self.reference["id"]}])]
-        for session, refs in invalid:
-            with self.subTest(refs=refs), self.assertRaises(APIError):
-                prepare_pose_feedback(self.store, session, refs)
-        other_store = SceneStore(self.root / "other-data")
-        with self.assertRaisesRegex(APIError, "this project"):
-            prepare_pose_feedback(other_store, self.session, [ref])
+        self.assertEqual(prepare_pose_feedback(self.store, self.session, [ref])[0]["source"], "vitpose_estimate")
+        stored.update(automatic=True); stored.pop("frames")
+        _atomic_json(directory / "job.json", stored)
+        self.assertEqual(self.jobs.get(job["job_id"])["frames"], job["frames"])
 
-    def test_inline_pose_tokens_require_valid_matching_evidence(self):
-        job = self.start()
-        ref = {"job_id": job["job_id"], "reference_id": self.reference["id"]}
-        token = "[[pose:" + job["job_id"] + ":" + self.reference["id"] + "]]"
-        self.assertEqual(len(prepare_pose_feedback(self.store, self.session, [ref], token)), 1)
-        with self.assertRaisesRegex(APIError, "matching"):
-            prepare_pose_feedback(self.store, self.session, [], token)
-        with self.assertRaisesRegex(APIError, "malformed"):
-            prepare_pose_feedback(self.store, self.session, [ref], "[[pose:broken]]")
-
-    def test_lost_person_retains_raw_estimates_but_does_not_draw_a_skeleton(self):
-        job = self.start(mode="lost")
-        self.assertEqual(job["frames"][0]["tracking_status"], "lost")
-        prepared = prepare_pose_feedback(self.store, self.session,
-            [{"job_id": job["job_id"], "reference_id": self.reference["id"]}])[0]
-        self.assertEqual(prepared["frame"]["keypoints"], job["frames"][0]["keypoints"])
-        with Image.open(io.BytesIO(prepared["_overlay_data"])) as image:
-            self.assertEqual(image.getpixel((32, 30)), (0, 0, 128))
-            colors = {color for _, color in image.getcolors(maxcolors=image.width * image.height)}
-            self.assertNotIn((0, 183, 176), colors)
-
-    def test_all_projects_share_one_worker_slot_and_cancelling_unblocks_next(self):
-        first = self.start(mode="hold")
-        other_store = SceneStore(self.root / "parallel-data")
-        session = other_store.create_session()["session_id"]
-        reference = other_store.add_reference(session, "other.png", self.data_url)
-        other = HumanPoseJobs(other_store)
-        try:
-            with patch.dict("os.environ", {"SCENE_FEEDBACK_POSE_RUNNER": self.runner("hold")}):
-                second = other.start({"session_id": session, "request_id": uuid.uuid4().hex,
-                                      "reference_id": reference["id"], "bbox": [.1, .1, .7, .7]})
-                time.sleep(.25)
-                self.assertEqual(other.get(second["job_id"])["status"], "queued")
-                self.assertFalse((other.directory / second["job_id"] / "input.json").exists())
-                self.jobs.cancel(first["job_id"])
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    current = other.get(second["job_id"])
-                    if current["completed_frames"] == 1:
-                        break
-                    time.sleep(.02)
-                self.assertEqual((current["status"], current["completed_frames"]), ("running", 1))
-                other.cancel(second["job_id"])
-        finally:
-            other.close()
+    def test_old_running_job_marks_interrupted_without_relaunch(self):
+        export = self.export(); path = self.jobs.directory / export["job_id"] / "job.json"
+        stored = json.loads(path.read_text()); stored.update(status="running"); _atomic_json(path, stored)
+        self.jobs.close(); self.jobs = HumanPoseJobs(SceneStore(self.store.data_dir))
+        self.assertEqual(self.jobs.get(export["job_id"])["status"], "interrupted")
 
 
 class HumanPoseHTTPTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.root = Path(self.temporary.name)
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.web = self.root / "web"
-        self.web.mkdir()
-        (self.web / "index.html").write_text("viewer")
-        self.worker = self.root / "worker.py"
-        self.worker.write_text(WORKER)
-        self.runner_patch = patch.dict("os.environ", {"SCENE_FEEDBACK_POSE_RUNNER": self.runner("normal")})
-        self.runner_patch.start()
-        def quiet_start(gateway):
-            gateway.ensure()
-        self.start_patch = patch.object(WorkspaceGateway, "start", quiet_start)
-        self.start_patch.start()
+        self.temporary = tempfile.TemporaryDirectory(); self.root = Path(self.temporary.name)
+        self.project = self.root / "project"; self.project.mkdir()
+        self.web = self.root / "web"; self.web.mkdir(); (self.web / "index.html").write_text("viewer")
+        self.start_patch = patch.object(WorkspaceGateway, "start", lambda gateway: gateway.ensure()); self.start_patch.start()
         def create_target(gateway, _model, **_options):
-            thread_id = str(uuid.uuid4())
-            gateway.store.workspace_thread(thread_id)
-            return {"thread_id": thread_id}
-        self.create_patch = patch.object(WorkspaceGateway, "create_target", create_target)
-        self.create_patch.start()
+            thread_id = str(uuid.uuid4()); gateway.store.workspace_thread(thread_id); return {"thread_id": thread_id}
+        self.create_patch = patch.object(WorkspaceGateway, "create_target", create_target); self.create_patch.start()
         self.server = server_module.make_server(port=0, data_dir=self.root / "data", project_dir=self.project,
                                                web_dir=self.web, external_review=True)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True); self.thread.start()
         self.context = self.server.project_registry.root
         self.session = self.context.store.workspace()["session_id"]
-        _, data_url = image_data()
-        self.reference = self.context.store.add_reference(self.session, "person.png", data_url)
+        _, data_url = image_data(); self.reference = self.context.store.add_reference(self.session, "person.png", data_url)
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=3)
-        self.create_patch.stop()
-        self.start_patch.stop()
-        self.runner_patch.stop()
-        self.temporary.cleanup()
-
-    def runner(self, mode):
-        return json.dumps([sys.executable, str(self.worker), "--manifest", "{manifest}", "--output", "{output}", "--mode", mode])
+        self.server.shutdown(); self.server.server_close(); self.thread.join(timeout=3)
+        self.create_patch.stop(); self.start_patch.stop(); self.temporary.cleanup()
 
     def request(self, method, path, body=None, capability=None, control=None):
         headers = {}
-        if capability is not None:
-            headers["X-Workspace-Capability"] = capability
-        if control is not None:
-            headers["X-Scene-Harness-Key"] = control
-        if body is not None:
-            body = json.dumps(body).encode()
-            headers["Content-Type"] = "application/json"
+        if capability is not None: headers["X-Workspace-Capability"] = capability
+        if control is not None: headers["X-Scene-Harness-Key"] = control
+        if body is not None: body = json.dumps(body).encode(); headers["Content-Type"] = "application/json"
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
-        connection.request(method, path, body, headers)
-        response = connection.getresponse()
-        data = response.read()
+        connection.request(method, path, body, headers); response = connection.getresponse(); data = response.read()
         contents = json.loads(data) if response.getheader("Content-Type", "").startswith("application/json") else data
-        status = response.status
-        connection.close()
-        return status, contents
+        status = response.status; connection.close(); return status, contents
 
-    def payload(self):
-        return {"session_id": self.session, "request_id": uuid.uuid4().hex, "reference_id": self.reference["id"],
-                "bbox": [.1, .15, .6, .7]}
-
-    def wait(self, path, status):
-        deadline = time.monotonic() + 6
-        while time.monotonic() < deadline:
-            code, job = self.request("GET", path)
-            self.assertEqual(code, 200)
-            if job["status"] == status:
-                return job
-            time.sleep(.02)
-        self.fail(f"HTTP pose job did not reach {status}")
-
-    def test_http_async_jobs_require_capability_and_expose_persisted_json(self):
-        payload = self.payload()
-        self.assertEqual(self.request("POST", "/api/workspace/pose", payload)[0], 403)
-        code, created = self.request("POST", "/api/workspace/pose", payload, self.context.store.browser_token)
-        self.assertEqual(code, 202)
-        path = "/api/workspace/pose/" + created["job_id"]
-        job = self.wait(path, "completed")
-        self.assertEqual(len(job["frames"][0]["keypoints"]), 17)
-        code, listed = self.request("GET", "/api/workspace/pose?session_id=" + self.session)
-        self.assertEqual(code, 200)
-        self.assertEqual(listed["jobs"][0]["job_id"], job["job_id"])
-        self.assertNotIn("frames", listed["jobs"][0])
-        self.assertEqual(self.request("GET", "/api/workspace/pose?session_id=" + uuid.uuid4().hex)[0], 404)
-        self.assertEqual(self.request("POST", path + "/cancel", {})[0], 403)
-        self.assertEqual(self.request("POST", path + "/cancel", {}, self.context.store.browser_token)[1]["status"], "completed")
-
-    def test_project_prefix_tokens_job_ids_and_media_do_not_cross_projects(self):
-        code, created = self.request("POST", "/api/workspace/pose", self.payload(), self.context.store.browser_token)
-        self.assertEqual(code, 202)
-        job = self.wait("/api/workspace/pose/" + created["job_id"], "completed")
-        code, result = self.request("POST", "/api/projects", {"name": "other", "model": "gpt-6-astra", "request_id": uuid.uuid4().hex},
-                                    self.context.store.browser_token)
+    def test_import_endpoints_permissions_and_removed_run_cancel_routes(self):
+        self.assertEqual(self.request("POST", "/api/workspace/pose/sources", {})[0], 403)
+        self.assertEqual(self.request("POST", "/api/workspace/pose/sources", {}, capability=self.context.store.browser_token)[0], 403)
+        code, export = self.request("POST", "/api/workspace/pose/sources", {}, control=self.context.store.control_token)
         self.assertEqual(code, 201)
-        child = self.server.project_registry.get(result["project"]["project_id"])
-        prefix = "/p/" + child.project_id
-        self.assertEqual(self.request("GET", prefix + "/api/workspace/pose")[1]["jobs"], [])
-        self.assertEqual(self.request("GET", prefix + "/api/workspace/pose/" + job["job_id"])[0], 404)
-        self.assertEqual(self.request("POST", prefix + "/api/workspace/pose/" + job["job_id"] + "/cancel", {}, child.store.browser_token)[0], 404)
-        self.assertEqual(self.request("POST", prefix + "/api/workspace/pose", self.payload(), self.context.store.browser_token)[0], 403)
-        self.assertEqual(self.request("GET", prefix + self.reference["url"])[0], 404)
-        code, root_jobs = self.request("GET", "/api/workspace/pose", control=self.context.store.control_token)
-        self.assertEqual(code, 200)
-        self.assertEqual(root_jobs["jobs"][0]["job_id"], job["job_id"])
-        code, child_jobs = self.request("GET", "/api/workspace/pose", control=child.store.control_token)
-        self.assertEqual(code, 200)
-        self.assertEqual(child_jobs["jobs"], [])
-        payload = {"scene_revision": child.store.scene()["revision"], "idempotency_key": uuid.uuid4().hex,
-                   "note": "forged other-project result", "pose_refs": [{"job_id": job["job_id"], "reference_id": self.reference["id"]}]}
-        code, rejected = self.request("POST", prefix + "/api/sessions/" + child.store.workspace()["session_id"] + "/feedback",
-                                      payload, child.store.browser_token)
-        self.assertEqual(code, 404, rejected)
+        payload = {"job_id": export["job_id"], "result": result_for(export)}
+        self.assertEqual(self.request("POST", "/api/workspace/pose/import", payload)[0], 403)
+        self.assertEqual(self.request("POST", "/api/workspace/pose/import", payload, capability=self.context.store.browser_token)[0], 200)
+        self.assertEqual(self.request("GET", "/api/workspace/pose/" + export["job_id"])[1]["status"], "completed")
+        self.assertEqual(self.request("GET", "/api/workspace/pose/" + export["job_id"] + "?download=1")[1], payload["result"])
+        self.assertEqual(self.request("POST", "/api/workspace/pose", {}, control=self.context.store.control_token)[0], 404)
+        self.assertEqual(self.request("POST", "/api/workspace/pose/" + export["job_id"] + "/cancel", {}, control=self.context.store.control_token)[0], 404)
 
-    def test_http_cancel_terminates_running_worker_and_keeps_original_job(self):
-        with patch.dict("os.environ", {"SCENE_FEEDBACK_POSE_RUNNER": self.runner("hold")}):
-            _, created = self.request("POST", "/api/workspace/pose", self.payload(), self.context.store.browser_token)
-            path = "/api/workspace/pose/" + created["job_id"]
-            job = self.wait(path, "running")
-            code, cancelled = self.request("POST", path + "/cancel", {}, self.context.store.browser_token)
-            self.assertEqual((code, cancelled["status"]), (200, "cancelled"))
-            self.assertEqual(self.request("GET", path)[1]["status"], "cancelled")
+    def test_browser_cannot_import_local_path_or_read_other_project_job(self):
+        _, export = self.request("POST", "/api/workspace/pose/sources", {}, control=self.context.store.control_token)
+        path = self.project / "pose.json"; path.write_text(json.dumps(result_for(export)))
+        self.assertEqual(self.request("POST", "/api/workspace/pose/import", {"job_id": export["job_id"], "result_path": str(path)},
+                                      capability=self.context.store.browser_token)[0], 403)
+        code, created = self.request("POST", "/api/projects", {"name": "other", "model": "gpt-6-astra", "request_id": uuid.uuid4().hex},
+                                     capability=self.context.store.browser_token)
+        self.assertEqual(code, 201)
+        child = self.server.project_registry.get(created["project"]["project_id"]); prefix = "/p/" + child.project_id
+        self.assertEqual(self.request("GET", prefix + "/api/workspace/pose/" + export["job_id"])[0], 404)
+        payload = {"job_id": export["job_id"], "result": result_for(export)}
+        self.assertEqual(self.request("POST", prefix + "/api/workspace/pose/import", payload, capability=child.store.browser_token)[0], 404)
+        self.assertEqual(self.request("POST", prefix + "/api/workspace/pose/import", payload, capability=self.context.store.browser_token)[0], 403)
 
 
 if __name__ == "__main__":

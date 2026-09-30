@@ -137,7 +137,7 @@ def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) ->
             content.append(_preview_image(Path(crop["path"])))
         for pose in item.get("human_pose", []):
             frame = pose["frame"]
-            label = f"ViTPose estimate {pose['track_id']}; reference {frame['reference_id']}"
+            label = f"{pose.get('evidence_kind', 'observed_2d')} {pose['track_id']}; profile {pose.get('keypoint_profile', 'coco17')}; reference {frame['reference_id']}"
             if "frame_index" in frame:
                 label += f", view {frame['view_name']}, frame {frame['frame_index'] + 1}, {frame['time_sec']:.6f}s"
             for name in ("reference_original", "pose_overlay"):
@@ -249,59 +249,54 @@ def workspace_get_feedback(feedback_id: str) -> CallToolResult:
 
 
 @mcp.tool()
-def workspace_track_human_pose(bbox: list[float] | None = None, reference_id: str | None = None, view_id: str | None = None,
-                              start_time_sec: float | None = None, end_time_sec: float | None = None,
-                              sample_fps: float = 5, confidence_threshold: float = .3,
-                              request_id: str | None = None,
-                              views: list[dict[str, Any]] | None = None,
-                              all_views: bool = False) -> dict[str, Any]:
-    """Start asynchronous ViTPose COCO17 2D tracking.
+def workspace_export_pose_sources(request_id: str | None = None) -> dict[str, Any]:
+    """Export every current reference camera/frame for an external human reconstruction skill.
 
-    Set all_views=True to automatically detect a prominent person in every
-    camera and track every imported source frame, without downsampling. With no
-    clip, this processes every static reference image once. It can take time.
-    Automatic detection does not verify identity across cameras or multiple people.
-    For manual tracking of one image/view, pass bbox normalized [x,y,width,height] and exactly one
-    static reference_id or dynamic view_id. For multiple dynamic cameras, pass
-    views=[{view_id,bbox,reference_id?}, ...] with a separate manually chosen
-    person box in each view. Optional reference_id identifies the first sampled
-    frame for that camera. One time range and sample rate apply to all cameras.
-    Each ROI tracks independently; same-person identity is asserted by the user,
-    not inferred across views. Manual tracking accepts at most 600 samples total.
-    Returns a job_id; read with
-    workspace_get_human_pose. Reuse request_id to retry an uncertain creation.
+    No inference runs here. Returns a server-local manifest_json_path, job_id,
+    track_id and exact source_snapshot_id bound to this project/session/media.
+    Preserve manifest frame IDs, dimensions, view IDs, frame_index and time_seconds.
+    Use capsule-human-tracking to generate evidence, then import its JSON result.
+    Reuse request_id to retry the same export. Scene geometry can change meanwhile;
+    replacing reference media requires a new export.
     """
     ensure_http_server()
-    session_id = _http("GET", "/api/workspace/state")["session_id"]
-    payload = {"session_id": session_id, "request_id": request_id or uuid.uuid4().hex}
-    if all_views:
-        if views is not None or bbox is not None or reference_id is not None or view_id is not None or start_time_sec is not None or end_time_sec is not None or sample_fps != 5 or confidence_threshold != .3:
-            raise ValueError("automatic all_views tracking does not accept boxes, view selection, time range or sampling options")
-        payload["all_views"] = True
-        return _http("POST", "/api/workspace/pose", payload, private=True)
-    payload.update(sample_fps=sample_fps, confidence_threshold=confidence_threshold)
-    if views is not None:
-        if bbox is not None or reference_id is not None or view_id is not None:
-            raise ValueError("multi-view tracking uses views instead of bbox, reference_id or view_id")
-        payload["views"] = views
-    elif bbox is not None:
-        payload["bbox"] = bbox
-    payload.update({key: value for key, value in {"reference_id": reference_id, "view_id": view_id,
-                   "start_time_sec": start_time_sec, "end_time_sec": end_time_sec}.items() if value is not None})
-    return _http("POST", "/api/workspace/pose", payload, private=True)
+    payload = {"request_id": request_id} if request_id is not None else {}
+    return _http("POST", "/api/workspace/pose/sources", payload, private=True, timeout=60)
+
+
+@mcp.tool()
+def workspace_import_human_pose(job_id: str, result_path: str | None = None,
+                                result: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Import validated external 2D observations or explicitly labeled 3D projections.
+
+    Provide exactly one result_path (JSON file within this project on the server)
+    or result object. Echo the exported job_id, track_id, project_id, session_id,
+    source_snapshot_id, schema_version, view_id(s) and exact per-frame identity.
+    Declare evidence_kind observed_2d or projected_3d; normalized joint coordinates
+    cannot be guessed or mapped between named profiles. Optional keypoint_profile,
+    keypoint_names and skeleton_edges support custom joint layouts (default COCO17).
+    No worker, model downloads or GPU inference are part of this tool.
+    """
+    ensure_http_server()
+    if not isinstance(job_id, str) or re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
+        raise ValueError("job_id must be a 32-character hexadecimal ID")
+    if (result_path is None) == (result is None):
+        raise ValueError("provide exactly one result_path or result")
+    payload = {"job_id": job_id, **({"result_path": result_path} if result_path is not None else {"result": result})}
+    return _http("POST", "/api/workspace/pose/import", payload, private=True, timeout=60)
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
 def workspace_get_human_pose(job_id: str | None = None, frame_offset: int = 0, max_frames: int = 8,
                              view_id: str | None = None) -> dict[str, Any]:
-    """Read this project's ViTPose job progress and exact sampled-frame keypoints.
+    """Read imported or historical human-pose evidence for this project.
 
-    Without job_id, list current-session jobs and runtime availability.
+    Without job_id, list current-session exports and imported results.
     Completed jobs include normalized coordinates, confidence, source IDs, view,
     frame, time, camera, and skeleton edges. Read up to max_frames samples
     (default 8, maximum 32) from frame_offset; next_frame_offset paginates them.
     Set view_id to retrieve one camera's samples from a multi-camera job.
-    result_json_path identifies the worker's complete result on disk. Preserve provenance.
+    result_json_path identifies the complete imported result on disk. Preserve profile and evidence_kind provenance.
     """
     ensure_http_server()
     if job_id is None and view_id is not None:
@@ -317,19 +312,8 @@ def workspace_get_human_pose(job_id: str | None = None, frame_offset: int = 0, m
                 raise ValueError("view_id must be a 32-character hexadecimal camera ID")
             parameters["view_id"] = view_id
         result = _http("GET", f"/api/workspace/pose/{job_id}?{urlencode(parameters)}")
-        result["result_json_path"] = str(DATA_DIR / "human_pose" / job_id /
-                                        ("output.json" if result.get("automatic") else "job.json"))
         return result
     return _http("GET", "/api/workspace/pose")
-
-
-@mcp.tool()
-def workspace_cancel_human_pose(job_id: str) -> dict[str, Any]:
-    """Cancel one queued/running ViTPose job in this project; keep completed results."""
-    ensure_http_server()
-    if re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
-        raise ValueError("job_id must be a 32-character hexadecimal ID")
-    return _http("POST", f"/api/workspace/pose/{job_id}/cancel", {}, private=True, timeout=20)
 
 
 @mcp.tool()

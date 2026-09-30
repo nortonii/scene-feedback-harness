@@ -1,0 +1,4 @@
+interface:
+  display_name: "Capsule Human 连续跟踪"
+  short_description: "来源绑定的二维人体观测、固定胶囊人体因果跟踪与 Blender 交付"
+  default_prompt: "Use $capsule-human-tracking to validate source-bound workbench 2D human evidence, refine fixed-geometry human motion from previous-frame increments, and deliver a validated Blender scene with before/after review."

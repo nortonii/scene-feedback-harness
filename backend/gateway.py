@@ -92,6 +92,8 @@ class WorkspaceGateway:
         result["inline_references_supported"] = True
         result["dynamic_scenes_supported"] = True
         result["human_pose_supported"] = self.pose_jobs is not None
+        result["human_pose_inference_supported"] = False
+        result["human_pose_mode"] = "external_results"
         result["desktop_available"] = self.external_review and bool(
             result.get("thread_id") or getattr(self.adapter, "thread_id", None) or self.desktop_seed_thread_id
         )
@@ -1563,7 +1565,7 @@ class WorkspaceGateway:
         if feedback.get("annotations"):
             lines.append("标记数据：" + json.dumps(feedback["annotations"], ensure_ascii=False))
         if feedback.get("human_pose"):
-            lines.append("用户引用的人体关键点（ViTPose 二维推理估计，每个机位独立追踪；自动任务按机位选主要人物，手动任务按用户框选；跨机位身份未验证；不是人工标记或三维动作约束）：")
+            lines.append("用户引用的人体关节证据：按 evidence_kind 区分二维观测和三维投影；按声明的 keypoint_profile 解读关节，不把投影当成实测，不自行猜测跨机位身份。")
             for pose in feedback["human_pose"]:
                 lines.append(json.dumps({key: value for key, value in pose.items() if not key.endswith("_url")}, ensure_ascii=False))
         lines += ["", "附件顺序："]
@@ -1599,7 +1601,7 @@ class WorkspaceGateway:
             else:
                 label += " · " + frame["reference_name"]
             add("人体关键点来源原帧：" + label, pose["reference_original_url"])
-            add("ViTPose 估计骨架（青色，区别于人工提示）：" + label, pose["pose_overlay_url"])
+            add(("三维关节投影参考（青色）：" if pose.get("evidence_kind") == "projected_3d" else "二维关节证据（青色）：") + label, pose["pose_overlay_url"])
         for frame in feedback.get("dynamic_frames", []):
             lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
             frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""

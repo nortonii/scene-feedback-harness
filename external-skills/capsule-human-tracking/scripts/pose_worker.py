@@ -1,25 +1,19 @@
-"""ViTPose runtime adapter and per-camera single-person inference worker.
+"""Standalone, per-camera ViTPose observer for exported workbench sources.
 
-The HTTP process imports this module without loading Torch or a checkpoint.
-Inference happens in a separately configured Python process or runner.
+Source validation runs before importing Torch or loading any checkpoint.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
-import shutil
-import sys
 import tempfile
 from typing import Any, Callable
 
 
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MODEL = Path.home() / "data/arctic-official/models/vitpose-plus-base"
 COCO_NAMES = (
     "nose", "left_eye", "right_eye", "left_ear", "right_ear",
     "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
@@ -33,118 +27,6 @@ MODEL_FILES = ("config.json", "preprocessor_config.json", "model.safetensors")
 DETECTOR_FILENAME = "fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth"
 DETECTOR_SHA256 = "907ea3f91ff92242bc1baea8049276a3e76bca48ce7560bd268cc029f37977b5"
 MAX_AUTO_FRAMES = 8 * 600
-
-
-def _runner_template() -> list[str] | None:
-    value = os.environ.get("SCENE_FEEDBACK_POSE_RUNNER")
-    if not value:
-        return None
-    try:
-        command = json.loads(value)
-    except ValueError as exc:
-        raise ValueError("SCENE_FEEDBACK_POSE_RUNNER must be a JSON argv array") from exc
-    if not isinstance(command, list) or not command or any(not isinstance(item, str) or not item or "\0" in item for item in command):
-        raise ValueError("SCENE_FEEDBACK_POSE_RUNNER must be a nonempty JSON argv array of strings")
-    if not any("{manifest}" in item for item in command) or not any("{output}" in item for item in command):
-        raise ValueError("pose runner argv must include both {manifest} and {output}")
-    return command
-
-
-def _executable_exists(value: str) -> bool:
-    return bool(shutil.which(os.path.expanduser(value)))
-
-
-def _model_path() -> Path:
-    return Path(os.environ.get("SCENE_FEEDBACK_POSE_MODEL", str(DEFAULT_MODEL))).expanduser()
-
-
-def _detector_path() -> Path:
-    return Path(os.environ.get("SCENE_FEEDBACK_POSE_DETECTOR",
-                               str(Path.home() / ".cache/torch/hub/checkpoints" / DETECTOR_FILENAME))).expanduser()
-
-
-def _missing_dependencies(python: str) -> list[str]:
-    dependencies = ("torch", "transformers", "PIL", "numpy", "scipy", "cv2")
-    if os.path.abspath(python) == os.path.abspath(sys.executable):
-        return [name for name in dependencies if importlib.util.find_spec(name) is None]
-    # Inspect an explicitly selected environment's packages, without importing
-    # Torch, starting its interpreter or touching CUDA during an HTTP request.
-    executable = Path(shutil.which(os.path.expanduser(python)) or python)
-    prefix = executable.parent.parent
-    sites = list(prefix.glob("lib/python*/site-packages")) + list(prefix.glob("lib/python*/dist-packages"))
-    configuration = prefix / "pyvenv.cfg"
-    if configuration.is_file():
-        values = dict(line.split("=", 1) for line in configuration.read_text(encoding="utf-8").splitlines() if "=" in line)
-        values = {key.strip(): value.strip() for key, value in values.items()}
-        if values.get("include-system-site-packages", "").lower() == "true" and values.get("home"):
-            base = Path(values["home"]).parent
-            sites += list(base.glob("lib/python*/site-packages")) + list(base.glob("lib/python*/dist-packages"))
-    if prefix == Path("/usr"):
-        sites += list(Path("/usr/local/lib").glob("python*/dist-packages"))
-        sites += [Path("/usr/lib/python3/dist-packages")]
-    return [name for name in dependencies if not any((site / name).exists() or list(site.glob(name + ".*.so")) for site in sites)]
-
-
-def runtime_status() -> dict[str, Any]:
-    """Check configured paths/argv only; never warm up a model in the server."""
-    try:
-        runner = _runner_template()
-        if runner is not None:
-            if not _executable_exists(runner[0]):
-                return {"configured": False, "runtime_label": "configured runner", "message": "pose runner executable is unavailable"}
-            for argument in runner[1:]:
-                if argument.endswith(".py") and "{" not in argument and not Path(argument).expanduser().is_file():
-                    return {"configured": False, "runtime_label": "configured runner", "message": "pose runner script is unavailable"}
-            return {"configured": True, "automatic_detection_configured": True,
-                    "runtime_label": "configured runner",
-                    "message": "runner configured; checkpoint and device are checked when a job starts"}
-        python = os.environ.get("SCENE_FEEDBACK_POSE_PYTHON", sys.executable)
-        if not _executable_exists(python):
-            return {"configured": False, "runtime_label": "local ViTPose", "message": "configured pose Python is unavailable"}
-        missing = _missing_dependencies(python)
-        if missing:
-            return {"configured": False, "runtime_label": "local ViTPose", "message": "pose Python is missing: " + ", ".join(missing)}
-        model = _model_path()
-        missing_files = [name for name in MODEL_FILES if not (model / name).is_file()]
-        if missing_files:
-            return {"configured": False, "runtime_label": "local ViTPose", "message": "ViTPose checkpoint is missing: " + ", ".join(missing_files)}
-        detector = _detector_path()
-        detector_ready = detector.is_file() and detector.stat().st_size > 70_000_000 and not _missing_optional_dependency(python, "torchvision")
-        return {"configured": True, "automatic_detection_configured": detector_ready,
-                "automatic_detection_message": "person detector checkpoint and torchvision found" if detector_ready else
-                    "automatic tracking requires torchvision and a local person detector checkpoint",
-                "runtime_label": "local ViTPose+ Base",
-                "message": "dependencies and checkpoint files found; device checked when a job starts"}
-    except (ValueError, OSError) as exc:
-        return {"configured": False, "runtime_label": "ViTPose", "message": str(exc)}
-
-
-def _missing_optional_dependency(python: str, name: str) -> bool:
-    """Keep the manual ViTPose mode usable when torchvision is not installed."""
-    if os.path.abspath(python) == os.path.abspath(sys.executable):
-        return importlib.util.find_spec(name) is None
-    executable = Path(shutil.which(os.path.expanduser(python)) or python)
-    prefix = executable.parent.parent
-    sites = list(prefix.glob("lib/python*/site-packages")) + list(prefix.glob("lib/python*/dist-packages"))
-    configuration = prefix / "pyvenv.cfg"
-    if configuration.is_file():
-        values = dict(line.split("=", 1) for line in configuration.read_text(encoding="utf-8").splitlines() if "=" in line)
-        values = {key.strip(): value.strip() for key, value in values.items()}
-        if values.get("include-system-site-packages", "").lower() == "true" and values.get("home"):
-            base = Path(values["home"]).parent
-            sites += list(base.glob("lib/python*/site-packages")) + list(base.glob("lib/python*/dist-packages"))
-    return not any((site / name).exists() or list(site.glob(name + ".*.so")) for site in sites)
-
-
-def command_for_job(manifest_path: Path, output_path: Path) -> list[str]:
-    manifest = str(Path(manifest_path).expanduser().resolve())
-    output = str(Path(output_path).expanduser().resolve())
-    runner = _runner_template()
-    if runner is not None:
-        return [argument.replace("{manifest}", manifest).replace("{output}", output) for argument in runner]
-    return [os.environ.get("SCENE_FEEDBACK_POSE_PYTHON", sys.executable),
-            str(ROOT / "scripts/run_pose_worker.py"), "--manifest", manifest, "--output", output,
-            "--model-path", str(_model_path())]
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -180,7 +62,7 @@ def clip_bbox(box: Any, width: int, height: int) -> list[float]:
     right, bottom = min(float(width), x + w), min(float(height), y + h)
     if right - left < 2 or bottom - top < 2:
         raise ValueError("human bbox must intersect the image by at least 2 pixels per side")
-    # Keep normalized boxes valid for the job manager, including a crop that
+    # Keep normalized boxes valid for workbench import, including a crop that
     # moves against an image boundary. Expansion stays inside the same ROI
     # neighborhood and never falls back to a whole-image person box.
     minimum_w, minimum_h = max(2.0, width * 0.0100000001), max(2.0, height * 0.0100000001)
@@ -193,13 +75,17 @@ def clip_bbox(box: Any, width: int, height: int) -> list[float]:
     return [left, top, right - left, bottom - top]
 
 
-def validate_manifest(manifest_path: Path) -> dict[str, Any]:
+def validate_manifest(manifest_path: Path, *, auto_detect: bool | None = None) -> dict[str, Any]:
     path = Path(manifest_path).resolve(strict=True)
     if path.stat().st_size > 12 * 1024 * 1024:
         raise ValueError("pose manifest exceeds 12 MiB")
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("schema_version", 1) not in (1, 2):
         raise ValueError("pose manifest must be a schema_version 1 or 2 object")
+    for binding in ("project_id", "session_id", "source_snapshot_id"):
+        value = manifest.get(binding)
+        if not isinstance(value, str) or not value or len(value) > 200:
+            raise ValueError("exported workbench manifest requires " + binding)
     version = manifest.get("schema_version", 1)
     for name in ("job_id", "track_id"):
         if not isinstance(manifest.get(name), str) or not manifest[name] or len(manifest[name]) > 200:
@@ -220,8 +106,13 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
         raise ValueError("pose options must be an object")
     if not isinstance(options.get("auto_detect", False), bool):
         raise ValueError("auto_detect must be boolean")
-    automatic = options.get("auto_detect", False)
     frames = manifest.get("frames")
+    if auto_detect is not None and type(auto_detect) is not bool:
+        raise ValueError("auto_detect override must be boolean")
+    # A workbench export names immutable source frames, not an algorithm. A
+    # caller choosing a detector can infer its ROIs without editing that export.
+    automatic = auto_detect if auto_detect is not None else options.get("auto_detect", False) or (
+        isinstance(frames, list) and bool(frames) and all("bbox_xywh" not in frame for frame in frames if isinstance(frame, dict)))
     frame_limit = MAX_AUTO_FRAMES if automatic else 600
     if not isinstance(frames, list) or not 1 <= len(frames) <= frame_limit:
         raise ValueError(f"pose job must contain 1 to {frame_limit} frames")
@@ -234,6 +125,13 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
     for frame in frames:
         if not isinstance(frame, dict):
             raise ValueError("pose frames must be objects")
+        if not isinstance(frame.get("ref_id"), str) or not frame["ref_id"]:
+            raise ValueError("each frame needs its exact exported ref_id")
+        source_digest = frame.get("image_sha256")
+        if not isinstance(source_digest, str) or len(source_digest) != 64 or any(char not in "0123456789abcdef" for char in source_digest):
+            raise ValueError("each frame needs its exported image_sha256")
+        if frame.get("image_orientation") != "exif_oriented_display":
+            raise ValueError("source frame must declare exif_oriented_display orientation")
         current_view = frame.get("view_id", view_ids[0] if version == 1 else None)
         if not isinstance(current_view, str) or not current_view or len(current_view) > 200:
             raise ValueError("pose frame needs a valid view_id")
@@ -258,6 +156,12 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
         source = source.resolve(strict=True)
         if not source.is_file():
             raise ValueError("pose image must be a file")
+        actual_digest = hashlib.sha256()
+        with source.open("rb") as image_stream:
+            for chunk in iter(lambda: image_stream.read(1024 * 1024), b""):
+                actual_digest.update(chunk)
+        if actual_digest.hexdigest() != source_digest:
+            raise ValueError("exported source image_sha256 changed: " + frame["ref_id"])
         frame["image_path"] = str(source)
         # Dimensions are checked after the image is decoded. Check presence and
         # finite xywh now, before loading a costly checkpoint.
@@ -379,14 +283,22 @@ def _empty_keypoints() -> list[dict[str, Any]]:
 
 
 def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | None = None,
+                  detector_path: Path | None = None,
+                  auto_detect: bool | None = None,
                   progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Load checkpoints once and infer every source frame with independent ROIs."""
-    manifest = validate_manifest(manifest_path)
+    if auto_detect is None:
+        auto_detect = detector_path is not None
+    manifest = validate_manifest(manifest_path, auto_detect=auto_detect)
     options = manifest.get("options", {})
     threshold = float(options.get("score_threshold", 0.3))
     update_roi = options.get("update_roi", True)
-    automatic = options.get("auto_detect", False)
-    model_directory = Path(model_path or manifest.get("model_path") or _model_path()).expanduser().resolve(strict=True)
+    automatic = auto_detect
+    if model_path is None:
+        raise ValueError("provide --model-path for a local ViTPose+ Base checkpoint")
+    if automatic and detector_path is None:
+        raise ValueError("provide --detector-path for the local person detector checkpoint")
+    model_directory = Path(model_path).expanduser().resolve(strict=True)
     if not all((model_directory / name).is_file() for name in MODEL_FILES):
         raise ValueError("ViTPose+ Base checkpoint must contain config, processor config and safetensors weights")
     import torch
@@ -415,7 +327,7 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
     if automatic:
         from torchvision.models.detection import (FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
                                                    fasterrcnn_mobilenet_v3_large_320_fpn)
-        detector_path = _detector_path().resolve(strict=True)
+        detector_path = Path(detector_path).expanduser().resolve(strict=True)
         detector_digest = hashlib.sha256()
         with detector_path.open("rb") as checkpoint:
             for chunk in iter(lambda: checkpoint.read(2 * 1024 * 1024), b""):
@@ -456,7 +368,8 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
                 box = previous_box
             if box is None:
                 keypoints = _empty_keypoints()
-                result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id") if key in frame}
+                result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id",
+                                                       "image_sha256", "image_orientation", "camera") if key in frame}
                 result.update({"view_id": current_view, "track_id": manifest["track_id"],
                                "width": width, "height": height, "bbox_xywh": None, "bbox": None,
                                "keypoints": keypoints, "tracking_status": "lost", "roi_status": "no_person_detected"})
@@ -482,7 +395,8 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
         tracked = tracking_quality(keypoints)
         roi_status = ("detected" if previous is None else "re_detected") if detected else (
             "updated" if tracked and update_roi else "held_low_confidence" if not tracked else "fixed")
-        result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id") if key in frame}
+        result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id",
+                                               "image_sha256", "image_orientation", "camera") if key in frame}
         result.update({"view_id": current_view, "track_id": manifest["track_id"],
                        "width": width, "height": height, "bbox_xywh": box,
                        "bbox": {"x": box[0] / width, "y": box[1] / height, "width": box[2] / width, "height": box[3] / height},
@@ -494,6 +408,13 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
         emit({"type": "progress", "completed_frames": completed, "total_frames": len(manifest["frames"])})
     multi_view = manifest.get("schema_version", 1) == 2
     result = {"schema_version": 2 if multi_view else 1, "job_id": manifest["job_id"], "track_id": manifest["track_id"],
+              "project_id": manifest["project_id"], "session_id": manifest["session_id"],
+              "source_snapshot_id": manifest["source_snapshot_id"], "evidence_kind": "observed_2d",
+              "provenance": {"kind": "image_inference", "method": "Faster R-CNN person detection and ViTPose+ Base COCO17" if automatic else "ViTPose+ Base COCO17 on supplied ROI",
+                             "source_artifact": str(model_directory / "model.safetensors"),
+                             **({"detector_artifact": str(detector_path)} if automatic else {})},
+              "keypoint_profile": "coco17", "keypoint_names": list(COCO_NAMES),
+              "skeleton_edges": [list(edge) for edge in COCO_EDGES],
               **({"view_ids": manifest["view_ids"]} if multi_view else {"view_id": manifest["view_id"]}),
               "model": {"name": "ViTPose+ Base", "path": str(model_directory), "dataset": "COCO", "dataset_index": 0,
                         "checkpoint_sha256": digest.hexdigest(), "source": "local_checkpoint",

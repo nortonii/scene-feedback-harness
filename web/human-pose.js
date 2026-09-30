@@ -1,34 +1,17 @@
 export const COCO_EDGES = [[0,1],[0,2],[1,3],[2,4],[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
 export const POSE_COLORS = ['#087f8c','#b65320','#6856aa','#287a46','#be4066'];
 
-export function rectangleBBox(coordinates) {
-  const values = [coordinates?.x, coordinates?.y, coordinates?.x2, coordinates?.y2];
-  if (!values.every(Number.isFinite)) return null;
-  const [x,y,x2,y2] = values.map((value) => Math.max(0, Math.min(1, value)));
-  const bbox = [Math.min(x,x2), Math.min(y,y2), Math.abs(x2-x), Math.abs(y2-y)];
-  return validBBox(bbox) ? bbox : null;
+export function poseEvidenceLabel(result) {
+  if (result?.evidence_kind === 'projected_3d') return '三维投影参考';
+  const kind=result?.provenance?.kind;
+  const inferred=kind === 'image_inference' || (!kind && /vitpose/i.test(result?.model?.name || ''));
+  return inferred ? '二维估计' : '二维观测';
 }
+
 export function validBBox(bbox) {
   return Array.isArray(bbox) && bbox.length === 4 && bbox.every(Number.isFinite) &&
     bbox[0] >= 0 && bbox[1] >= 0 && bbox[2] > 0.01 && bbox[3] > 0.01 &&
     bbox[0]+bbox[2] <= 1.000001 && bbox[1]+bbox[3] <= 1.000001;
-}
-export function sampledPoseFrameCount(frames, start, end, fps) {
-  if (![start,end,fps].every(Number.isFinite) || end < start || fps <= 0) return 0;
-  let count=0, nextTime=-Infinity;
-  for (const frame of Array.isArray(frames) ? frames : []) {
-    if (!Number.isFinite(frame?.time_sec) || frame.time_sec < start-1e-6 || frame.time_sec > end+1e-6) continue;
-    if (frame.time_sec+1e-6 >= nextTime) { count++; nextTime=frame.time_sec+1/fps; }
-  }
-  return count;
-}
-export function firstPoseFrame(view, start) {
-  return Array.isArray(view?.frames) && Number.isFinite(start)
-    ? view.frames.find((frame) => Number.isFinite(frame?.time_sec) && frame.time_sec >= start-1e-6) || null
-    : null;
-}
-export function sampledPoseViewCount(views, start, end, fps) {
-  return Array.isArray(views) ? views.reduce((sum, view) => sum + sampledPoseFrameCount(view?.frames, start, end, fps), 0) : 0;
 }
 export function poseToken(jobId, referenceId) {
   if (![jobId, referenceId].every((value) => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value))) return null;

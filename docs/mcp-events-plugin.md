@@ -2,7 +2,9 @@
 
 仓库现在也是一个 Agent Plugins 包：根目录 `plugin.json` 提供身份，
 `mcp.json` 连接项目专用的 MCP，`skills/visual-feedback/` 提供审图流程。
-插件保留参考图、3D 场景、标注、动态机位和人体追踪工作台。
+插件负责参考图、3D 场景、标注、动态机位和外部二维人体结果的查看与引用。
+人体追踪推理与重建位于独立的 [capsule skill](../external-skills/capsule-human-tracking/SKILL.md)，
+不随工作台插件安装。
 
 ## 两个可以分别验证的步骤
 
@@ -94,8 +96,9 @@ python3 scripts/build_plugin.py --source dist/local-plugin --output dist/project
 ZIP 内只有一个 `scene-feedback-harness/` 目录，包含插件身份、技能、桥接程序、
 工作台运行源文件和说明。文件排序与时间戳固定；不打包 `.venv`、`.git`、测试、
 素材、工作台数据或本地 marketplace 清单。配置脚本单独生成供本地安装使用的
-清单，重建该安装目录的 ZIP 时仍会排除它。接收机器仍需安装 Python 依赖并启动工作台服务；人体推理环境
-按 README 单独配置。打包不会替用户托管或注册服务。
+清单，重建该安装目录的 ZIP 时仍会排除它。接收机器仍需安装 Python 依赖并启动工作台服务。
+推理 worker、推理依赖清单和独立 capsule skill 不进入此 ZIP；重建任务按 skill 配置自己的推理环境。
+打包不会替用户托管或注册服务。
 
 ## 接入支持 Events 的宿主
 

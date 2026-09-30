@@ -42,7 +42,7 @@ WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confir
 WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 PROJECT_ROUTE = re.compile(r"^/p/([0-9a-f]{32})(/.*)?$")
-POSE_ROUTE = re.compile(r"^/api/workspace/pose/([0-9a-f]{32})(/cancel)?$")
+POSE_ROUTE = re.compile(r"^/api/workspace/pose/([0-9a-f]{32})$")
 
 
 class _DataDirLock:
@@ -352,13 +352,19 @@ def _make_server_unlocked(
             if self.command == "GET" and path == "/api/workspace/pose":
                 session_id = query.get("session_id", [None])[0] or gateway.state()["session_id"]
                 return self._send_json(200, gateway.pose_jobs.list(session_id))
-            if self.command == "POST" and path == "/api/workspace/pose":
+            if self.command == "POST" and path == "/api/workspace/pose/sources":
+                self._require_control_key()
+                return self._send_json(201, gateway.pose_jobs.export_sources(self._read_json()))
+            if self.command == "POST" and path == "/api/workspace/pose/import":
                 self._require_pose_access()
-                return self._send_json(202, gateway.pose_jobs.start(self._read_json()))
+                payload = self._read_json()
+                if "result_path" in payload:
+                    self._require_control_key()
+                return self._send_json(200, gateway.pose_jobs.import_result(payload))
             pose_match = POSE_ROUTE.fullmatch(path)
             if pose_match:
-                job_id, cancel = pose_match.groups()
-                if self.command == "GET" and not cancel:
+                job_id = pose_match.group(1)
+                if self.command == "GET":
                     offset_text = query.get("frame_offset", ["0"])
                     limit_text = query.get("max_frames", [None])
                     reference_ids = query.get("reference_id", [None])
@@ -383,13 +389,9 @@ def _make_server_unlocked(
                     if download[0] == "1":
                         if limit is not None or offset or reference_id is not None or view_id is not None:
                             raise APIError(400, "pose download cannot be combined with frame filters")
-                        limit = "all"
+                        return self._send_json(200, gateway.pose_jobs.download(job_id))
                     return self._send_json(200, gateway.pose_jobs.get(job_id, frame_offset=offset, max_frames=limit,
                                                                        reference_id=reference_id, view_id=view_id))
-                if self.command == "POST" and cancel:
-                    self._require_pose_access()
-                    self._read_json()
-                    return self._send_json(200, gateway.pose_jobs.cancel(job_id))
             if self.command == "POST" and path == "/api/workspace/targets":
                 self._require_browser_capability()
                 payload = self._read_json()
@@ -603,7 +605,7 @@ def _make_server_unlocked(
                     "SCENE_FEEDBACK_DATA_DIR": str(context.store.data_dir),
                     "SCENE_FEEDBACK_PROJECT_DIR": str(context.project_dir),
                     "SCENE_FEEDBACK_WEB_DIR": str(web_root),
-                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-vitpose-one-click"},
+                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-external-pose-results"},
             "tool_timeout_sec": 120, "required": True,
         }}}
         context.gateway.browser_url = lambda session_id: browser_url(session_id, server.server_port, context, prefixed=True)

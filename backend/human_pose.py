@@ -1,30 +1,25 @@
-"""Project-local asynchronous ViTPose jobs and immutable visual evidence.
+"""Lightweight exchange of externally generated 2D human-pose evidence.
 
-Automatic jobs cover every imported camera/frame and detect one dominant
-person independently per view. Neither mode infers cross-camera identity.
+This module exports exact reference snapshots, validates imported named joint
+results and serves overlays. Inference belongs to the reconstruction skill.
 """
-
 from __future__ import annotations
 
 import copy
+import hashlib
 import io
 import json
 import math
 import os
 from pathlib import Path
 import re
-import signal
-import subprocess
-import sys
 import tempfile
 import threading
 from typing import Any
 import uuid
 
-from core import APIError, _now
+from core import APIError, _now, _safe_json
 from dynamic import MAX_CLIP_FRAMES, number, reference_views
-from pose_worker import command_for_job, runtime_status
-
 
 JOINT_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_shoulder", "right_shoulder",
                "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hip", "right_hip",
@@ -32,13 +27,9 @@ JOINT_NAMES = ["nose", "left_eye", "right_eye", "left_ear", "right_ear", "left_s
 SKELETON_EDGES = [[0, 1], [0, 2], [1, 3], [2, 4], [5, 6], [5, 7], [7, 9], [6, 8], [8, 10],
                   [5, 11], [6, 12], [11, 12], [11, 13], [13, 15], [12, 14], [14, 16]]
 ID = re.compile(r"^[0-9a-f]{32}$")
-ACTIVE = {"queued", "running"}
-# All projects on this server share the runner, so they cannot overcommit its GPU.
-_RUNNER_SLOT = threading.Semaphore(1)
-MAX_FRAMES = 600
 MAX_VIEWS = 8
-MAX_AUTO_FRAMES = MAX_VIEWS * MAX_CLIP_FRAMES
-
+MAX_RESULT_FRAMES = MAX_VIEWS * MAX_CLIP_FRAMES
+MAX_RESULT_BYTES = 256 * 1024 * 1024
 
 def _atomic_json(path: Path, document: dict) -> None:
     fd, temporary = tempfile.mkstemp(prefix="pose-", suffix=".tmp", dir=path.parent)
@@ -145,21 +136,39 @@ def _display_dimensions(path: Path) -> tuple[int, int]:
         return width, height
 
 
+def _joint_profile(result: dict) -> tuple[str, list[str], list[list[int]]]:
+    profile = result.get("keypoint_profile", "coco17")
+    if not isinstance(profile, str) or not profile.strip() or len(profile) > 96:
+        raise APIError(400, "keypoint_profile must be a short profile name")
+    names = result.get("keypoint_names", JOINT_NAMES if profile == "coco17" else None)
+    if (not isinstance(names, list) or not 1 <= len(names) <= 256
+            or any(not isinstance(name, str) or not name.strip() or len(name) > 96 or any(ord(char) < 32 for char in name) for name in names)
+            or len(set(names)) != len(names)):
+        raise APIError(400, "keypoint_names must contain 1 to 256 unique named joints")
+    if profile == "coco17" and names != JOINT_NAMES:
+        raise APIError(400, "coco17 profile must preserve the standard named joint order")
+    edges = result.get("skeleton_edges", SKELETON_EDGES if names == JOINT_NAMES else None)
+    if (not isinstance(edges, list) or len(edges) > 768
+            or any(not isinstance(edge, list) or len(edge) != 2 or any(type(index) is not int or not 0 <= index < len(names) for index in edge)
+                   or edge[0] == edge[1] for edge in edges)
+            or len({tuple(sorted(edge)) for edge in edges}) != len(edges)):
+        raise APIError(400, "skeleton_edges must contain distinct valid pairs of declared joint indices")
+    return profile, copy.deepcopy(names), copy.deepcopy(edges)
+
+
 class HumanPoseJobs:
+    """Passive result store; the historical name keeps old persisted jobs readable."""
+
     def __init__(self, store: Any):
         self.store = store
         self.directory = store.data_dir / "human_pose"
         self.directory.mkdir(exist_ok=True)
         self.lock = threading.RLock()
         self.closed = False
-        self.threads: dict[str, threading.Thread] = {}
-        self.stops: dict[str, threading.Event] = {}
-        self.processes: dict[str, subprocess.Popen] = {}
-        # A restart must not pretend that an in-flight worker completed.
         for path in self.directory.glob("*/job.json"):
             document = json.loads(path.read_text(encoding="utf-8"))
-            if document.get("status") in ACTIVE:
-                document.update(status="interrupted", error="服务已重启，请重新框选或重新开始追踪。", finished_at=_now())
+            if document.get("status") in {"queued", "running"}:
+                document.update(status="interrupted", error="内置追踪已移至 capsule-human-tracking skill。请由 skill 重新运行并导入结果。", finished_at=_now())
                 _atomic_json(path, document)
 
     def list(self, session_id: str) -> dict:
@@ -167,7 +176,8 @@ class HumanPoseJobs:
         with self.lock:
             jobs = [_summary(json.loads(path.read_text(encoding="utf-8"))) for path in self.directory.glob("*/job.json")]
         jobs = sorted((job for job in jobs if job["session_id"] == session_id), key=lambda job: job["created_at"], reverse=True)
-        return {**runtime_status(), "session_id": session_id, "jobs": jobs}
+        return {"session_id": session_id, "jobs": jobs, "mode": "external_results", "inference_supported": False,
+                "source_export_supported": True, "result_import_supported": True}
 
     def get(self, job_id: str, frame_offset: int = 0, max_frames: int | str | None = None,
             reference_id: str | None = None, view_id: str | None = None) -> dict:
@@ -228,390 +238,257 @@ class HumanPoseJobs:
                     "next_frame_offset": next_offset,
                     "result_json_path": str(self.directory / job_id / ("output.json" if job.get("automatic") else "job.json"))
                         if job["status"] == "completed" else None,
-                    "keypoint_names": JOINT_NAMES, "skeleton_edges": SKELETON_EDGES}
+                    "keypoint_profile": job.get("keypoint_profile", "coco17"),
+                    "keypoint_names": job.get("keypoint_names", JOINT_NAMES),
+                    "skeleton_edges": job.get("skeleton_edges", SKELETON_EDGES)}
 
-    def start(self, payload: Any) -> dict:
-        if not isinstance(payload, dict):
-            raise APIError(400, "pose request must be an object")
-        session_id = payload.get("session_id")
-        if not isinstance(session_id, str) or not ID.fullmatch(session_id):
-            raise APIError(400, "pose request must identify an existing session")
-        session = self.store.get_session(session_id)
-        if session["status"] != "open":
-            raise APIError(409, "session is closed")
-        request_id = payload.get("request_id")
-        if not isinstance(request_id, str) or not ID.fullmatch(request_id):
-            raise APIError(400, "request_id must be a 32-character hexadecimal ID")
-        try:
-            digest = json.dumps(payload, sort_keys=True, allow_nan=False, ensure_ascii=False)
-        except (TypeError, ValueError) as exc:
-            raise APIError(400, "pose request must contain finite JSON values") from exc
-        # Retry the exact request even after a worker becomes unavailable.
+    def download(self, job_id: str) -> dict:
+        """Keep exported external JSON byte semantics for safe idempotent reimport."""
         with self.lock:
-            for path in self.directory.glob("*/job.json"):
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                if existing.get("request_id") == request_id:
-                    if existing.get("request_digest") != digest:
-                        raise APIError(409, "pose request_id was already used for a different request")
-                    return _summary(existing)
-            if self.closed:
-                raise APIError(503, "pose runner is shutting down")
-            capability = runtime_status()
-            if not capability["configured"]:
-                raise APIError(503, capability.get("message", "ViTPose runner is not configured"))
-            if any(json.loads(path.read_text(encoding="utf-8")).get("status") in ACTIVE for path in self.directory.glob("*/job.json")):
-                raise APIError(409, "this project already has an active human pose job")
-            if "all_views" in payload:
-                if payload["all_views"] is not True:
-                    raise APIError(400, "all_views must be true for automatic whole-reference tracking")
-                if not capability.get("automatic_detection_configured", False):
-                    raise APIError(503, capability.get("automatic_detection_message", "automatic person detector is unavailable"))
-                return self._start_automatic_locked(payload, session, request_id, digest)
-            reference_id, view_id = payload.get("reference_id"), payload.get("view_id")
-            multi_requested = "views" in payload
-            multi_views = payload.get("views")
-            if multi_requested:
-                if reference_id is not None or view_id is not None or "bbox" in payload:
-                    raise APIError(400, "multi-view pose requests use views instead of top-level reference_id, view_id or bbox")
-                if not isinstance(multi_views, list) or not 2 <= len(multi_views) <= MAX_VIEWS:
-                    raise APIError(400, "multi-view pose requests need 2 to 8 camera views")
-                selected_views = []
-                seen = set()
-                for item in multi_views:
-                    if not isinstance(item, dict) or not isinstance(item.get("view_id"), str) or not ID.fullmatch(item["view_id"]):
-                        raise APIError(400, "each pose view needs a valid view_id")
-                    if item["view_id"] in seen:
-                        raise APIError(400, "pose camera views cannot be repeated")
-                    seen.add(item["view_id"])
-                    if "reference_id" in item and (not isinstance(item["reference_id"], str) or not ID.fullmatch(item["reference_id"])):
-                        raise APIError(400, "pose view reference_id must identify its first sampled frame")
-                    selected_views.append({"view_id": item["view_id"], "bbox": _bbox(item.get("bbox")),
-                                           **({"reference_id": item["reference_id"]} if "reference_id" in item else {})})
-                bbox = None
-            else:
-                if (reference_id is None) == (view_id is None):
-                    raise APIError(400, "choose exactly one static reference_id or dynamic view_id")
-                if view_id is not None and (not isinstance(view_id, str) or not ID.fullmatch(view_id)):
-                    raise APIError(400, "pose view_id must identify a reference camera")
-                bbox = _bbox(payload.get("bbox"))
-                selected_views = []
-            fps = number(payload.get("sample_fps", 5), "pose sample_fps", minimum=.1, maximum=60)
-            threshold = number(payload.get("confidence_threshold", .3), "pose confidence threshold", maximum=1)
-            provenance: dict = {}
-            if reference_id is not None:
-                reference = next((ref for ref in session.get("reference_images", []) if ref["id"] == reference_id), None)
-                if reference is None:
-                    raise APIError(400, "static pose reference is not in this session")
-                if any(key in payload for key in ("start_time_sec", "end_time_sec")):
-                    raise APIError(400, "static pose requests cannot have a time range")
-                sources = [{"reference_id": reference["id"], "reference_name": reference["name"], "reference_url": reference["url"]}]
-                if reference.get("camera"):
-                    sources[0]["camera"] = copy.deepcopy(reference["camera"])
-                provenance.update(reference_id=reference_id, reference_name=reference["name"])
-            else:
-                clip = session.get("reference_clip")
-                available = {view["clip_id"]: view for view in reference_views(clip)}
-                requested = selected_views if multi_requested else [{"view_id": view_id, "bbox": bbox}]
-                if any(item["view_id"] not in available for item in requested):
-                    raise APIError(400, "pose view_id is not a current reference camera")
-                # Every requested camera must cover the same explicit interval.
-                duration = min(available[item["view_id"]]["duration_sec"] for item in requested)
-                start = number(payload.get("start_time_sec", 0), "pose range start", maximum=duration)
-                end = number(payload.get("end_time_sec", duration), "pose range end", minimum=start, maximum=duration)
-                sources = []
-                view_metadata = []
-                for item in requested:
-                    current_view_id = item["view_id"]
-                    view = available[current_view_id]
-                    # First sample is the first real frame at/after start; no
-                    # synthesized frame or cross-camera timestamp is implied.
-                    candidates = [frame for frame in view["frames"] if start - 1e-6 <= frame["time_sec"] <= end + 1e-6]
-                    if not candidates:
-                        raise APIError(400, "pose range contains no reference frames in view " + view["name"])
-                    selected = []
-                    next_time = candidates[0]["time_sec"]
-                    for frame in candidates:
-                        if frame["time_sec"] + 1e-6 >= next_time:
-                            selected.append(frame)
-                            next_time = frame["time_sec"] + 1 / fps
-                    if item.get("reference_id") is not None and item["reference_id"] != selected[0]["id"]:
-                        raise APIError(400, "pose view reference_id is not its first sampled frame; refresh the selected box")
-                    if len(sources) + len(selected) > MAX_FRAMES:
-                        raise APIError(400, f"pose tracking exceeds {MAX_FRAMES} samples across all views; shorten the range or lower sample_fps")
-                    view_metadata.append({"view_id": current_view_id, "view_name": view["name"],
-                                          "reference_id": selected[0]["id"], "bbox": item["bbox"],
-                                          "sampled_frames": len(selected)})
-                    sources.extend({"reference_id": frame["id"], "reference_name": frame["name"], "reference_url": frame["url"],
-                                    "frame_index": frame["frame_index"], "time_sec": frame["time_sec"], "view_id": current_view_id,
-                                    "view_name": view["name"], "clip_id": clip["clip_id"],
-                                    **({"seed_bbox": item["bbox"]} if multi_requested else {}),
-                                    **({"camera": copy.deepcopy(frame["camera"])} if frame.get("camera") else {})} for frame in selected)
-                if multi_requested:
-                    provenance.update(multi_view=True, views=view_metadata, view_ids=[item["view_id"] for item in view_metadata],
-                                      clip_id=clip["clip_id"], start_time_sec=start, end_time_sec=end)
-                else:
-                    provenance.update(view_id=view_id, view_name=view["name"], clip_id=clip["clip_id"], start_time_sec=start, end_time_sec=end)
-            for source in sources:
-                source["width"], source["height"] = _display_dimensions(_image_path(self.store, source["reference_url"]))
-                source["image_orientation"] = "exif_oriented_display"
-            job_id = uuid.uuid4().hex
-            job = {"schema_version": 2 if multi_requested else 1, "job_id": job_id, "request_id": request_id, "request_digest": digest,
-                   "session_id": session_id, "track_id": "human_" + job_id[:8], "status": "queued",
-                   **({"bbox": bbox} if not multi_requested else {}),
-                   "sample_fps": fps, "confidence_threshold": threshold, "completed_frames": 0, "total_frames": len(sources),
-                   "created_at": _now(), "sources": sources, **provenance}
-            directory = self.directory / job_id
-            directory.mkdir()
-            _atomic_json(directory / "job.json", job)
-            self.stops[job_id] = threading.Event()
-            thread = threading.Thread(target=self._run, args=(job_id,), daemon=True, name="vitpose-" + job_id[:8])
-            self.threads[job_id] = thread
-            thread.start()
-            return _summary(job)
+            job = _load_job(self.store, job_id)
+            if job.get("imported_external") and job["status"] == "completed":
+                return json.loads((self.directory / job_id / "output.json").read_text(encoding="utf-8"))
+            return self.get(job_id, max_frames="all")
 
-    def _start_automatic_locked(self, payload: dict, session: dict, request_id: str, digest: str) -> dict:
-        if set(payload) - {"session_id", "request_id", "all_views"}:
-            raise APIError(400, "automatic pose tracking uses all current references without box, range or sampling options")
+    def _current_sources(self, session_id: str) -> tuple[list[dict], list[dict], str]:
+        session = self.store.get_session(session_id)
         clip = session.get("reference_clip")
-        sources: list[dict] = []
-        view_metadata: list[dict] = []
+        sources, views = [], []
         if clip:
             for view in reference_views(clip):
                 frames = view.get("frames", [])
                 if not frames:
                     continue
-                view_metadata.append({"view_id": view["clip_id"], "view_name": view["name"],
-                                      "reference_id": frames[0]["id"], "sampled_frames": len(frames)})
+                views.append({"view_id": view["clip_id"], "view_name": view["name"],
+                              "reference_id": frames[0]["id"], "sampled_frames": len(frames)})
                 sources.extend({"reference_id": frame["id"], "reference_name": frame["name"],
                                 "reference_url": frame["url"], "frame_index": frame["frame_index"],
                                 "time_sec": frame["time_sec"], "view_id": view["clip_id"],
                                 "view_name": view["name"], "clip_id": clip["clip_id"],
                                 **({"camera": copy.deepcopy(frame["camera"])} if frame.get("camera") else {})}
                                for frame in frames)
-            source_kind = "dynamic_clip"
         else:
             for reference in session.get("reference_images", []):
-                view_metadata.append({"view_id": reference["id"], "view_name": reference["name"],
-                                      "reference_id": reference["id"], "sampled_frames": 1})
+                views.append({"view_id": reference["id"], "view_name": reference["name"],
+                              "reference_id": reference["id"], "sampled_frames": 1})
                 sources.append({"reference_id": reference["id"], "reference_name": reference["name"],
                                 "reference_url": reference["url"], "frame_index": 0, "time_sec": 0,
                                 "view_id": reference["id"], "view_name": reference["name"],
                                 **({"camera": copy.deepcopy(reference["camera"])} if reference.get("camera") else {})})
-            source_kind = "static_references"
         if not sources:
-            raise APIError(400, "no reference frames are available for automatic human tracking")
-        if len(view_metadata) > MAX_VIEWS or len(sources) > MAX_AUTO_FRAMES:
-            raise APIError(400, f"automatic pose tracking supports at most {MAX_VIEWS} views and {MAX_AUTO_FRAMES} imported frames")
+            raise APIError(400, "no reference frames are available to export")
+        if len(views) > MAX_VIEWS or len(sources) > MAX_RESULT_FRAMES:
+            raise APIError(400, f"pose exchange supports at most {MAX_VIEWS} views and {MAX_RESULT_FRAMES} frames")
+        images = {}
         for source in sources:
-            source["width"], source["height"] = _display_dimensions(_image_path(self.store, source["reference_url"]))
+            path = _image_path(self.store, source["reference_url"])
+            if path not in images:
+                images[path] = (*_display_dimensions(path), hashlib.sha256(path.read_bytes()).hexdigest())
+            source["width"], source["height"], source["image_sha256"] = images[path]
             source["image_orientation"] = "exif_oriented_display"
-        multi_view = len(view_metadata) > 1
-        job_id = uuid.uuid4().hex
-        job = {"schema_version": 2 if multi_view else 1, "job_id": job_id, "request_id": request_id,
-               "request_digest": digest, "session_id": session["session_id"], "track_id": "human_" + job_id[:8],
-               "status": "queued", "automatic": True, "all_views": True, "multi_view": multi_view,
-               "source_kind": source_kind, "sampling": "all_imported_frames", "sample_fps": None,
-               "confidence_threshold": .3, "completed_frames": 0, "total_frames": len(sources),
-               "views": view_metadata, "view_ids": [view["view_id"] for view in view_metadata],
-               **({"view_id": view_metadata[0]["view_id"], "view_name": view_metadata[0]["view_name"]} if not multi_view else {}),
-               **({"clip_id": clip["clip_id"]} if clip else {}), "created_at": _now()}
-        directory = self.directory / job_id
-        directory.mkdir()
-        _atomic_json(directory / "sources.json", {"sources": sources})
-        _atomic_json(directory / "job.json", job)
-        self.stops[job_id] = threading.Event()
-        thread = threading.Thread(target=self._run, args=(job_id,), daemon=True, name="vitpose-" + job_id[:8])
-        self.threads[job_id] = thread
-        thread.start()
-        return _summary(job)
-
-    def _update(self, job_id: str, **changes: Any) -> dict:
-        with self.lock:
-            job = _load_job(self.store, job_id)
-            if job["status"] in ACTIVE:
-                job.update(changes)
-                _atomic_json(self.directory / job_id / "job.json", job)
-            return job
+        return sources, views, "dynamic_clip" if clip else "static_references"
 
     @staticmethod
-    def _terminate(process: subprocess.Popen) -> None:
-        if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                return
-            try:
-                process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=5)
+    def _snapshot_id(project_id: str, session_id: str, sources: list[dict]) -> str:
+        document = {"project_id": project_id, "session_id": session_id, "sources": sources}
+        return hashlib.sha256(json.dumps(document, sort_keys=True, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
-    def _run(self, job_id: str) -> None:
-        stop = self.stops[job_id]
-        acquired = False
-        process = None
-        watchdog = None
-        try:
-            while not stop.is_set():
-                if _RUNNER_SLOT.acquire(timeout=.2):
-                    acquired = True
-                    break
-            if stop.is_set():
-                return
-            job = self._update(job_id, status="running", started_at=_now())
+    def export_sources(self, payload: Any) -> dict:
+        if not isinstance(payload, dict) or set(payload) - {"session_id", "request_id"}:
+            raise APIError(400, "pose source export accepts only session_id and request_id")
+        workspace = self.store.workspace()
+        session_id = payload.get("session_id", workspace["session_id"])
+        if session_id != workspace["session_id"]:
+            raise APIError(409, "pose source export must use this project's current session")
+        session = self.store.get_session(session_id)
+        if session["status"] != "open":
+            raise APIError(409, "session is closed")
+        request_id = payload.get("request_id", uuid.uuid4().hex)
+        if not isinstance(request_id, str) or not ID.fullmatch(request_id):
+            raise APIError(400, "request_id must be a 32-character hexadecimal ID")
+        with self.lock, self.store.lock:
+            if self.closed:
+                raise APIError(503, "pose result store is shutting down")
+            for path in self.directory.glob("*/job.json"):
+                existing = json.loads(path.read_text(encoding="utf-8"))
+                if existing.get("request_id") == request_id:
+                    if not existing.get("external_results") or existing["session_id"] != session_id:
+                        raise APIError(409, "pose request_id already belongs to another export")
+                    return self._export_response(existing)
+            sources, views, kind = self._current_sources(session_id)
+            snapshot = self._snapshot_id(workspace["project_id"], session_id, sources)
+            job_id = uuid.uuid4().hex
+            multi = len(views) > 1
+            job = {"schema_version": 2 if multi else 1, "job_id": job_id, "request_id": request_id,
+                   "project_id": workspace["project_id"], "session_id": session_id, "source_snapshot_id": snapshot,
+                   "track_id": "human_" + job_id[:8], "status": "awaiting_import", "external_results": True,
+                   "automatic": True, "all_views": True, "multi_view": multi, "source_kind": kind,
+                   "sampling": "all_imported_frames", "sample_fps": None, "confidence_threshold": .3,
+                   "completed_frames": 0, "total_frames": len(sources), "views": views,
+                   "view_ids": [view["view_id"] for view in views], "created_at": _now(),
+                   **({"view_id": views[0]["view_id"], "view_name": views[0]["view_name"]} if not multi else {})}
             directory = self.directory / job_id
-            frames = []
-            for source in _sources(self.store, job):
-                frame = {"image_path": str(_image_path(self.store, source["reference_url"])), "ref_id": source["reference_id"],
-                         "width": source["width"], "height": source["height"],
-                         "frame_index": source.get("frame_index", 0), "time_seconds": source.get("time_sec", 0),
-                         **({"view_id": source["view_id"]} if job.get("multi_view") else {})}
-                if not job.get("automatic"):
-                    x, y, width, height = source.get("seed_bbox", job.get("bbox"))
-                    frame["bbox_xywh"] = [x * source["width"], y * source["height"], width * source["width"], height * source["height"]]
-                frames.append(frame)
-            manifest = {"schema_version": 2 if job.get("multi_view") else 1, "job_id": job_id, "track_id": job["track_id"],
-                        **({"view_ids": job["view_ids"]} if job.get("multi_view") else
-                           {"view_id": job["view_id"] if job.get("automatic") else job.get("view_id", "reference:" + frames[0]["ref_id"])}),
-                        "options": {"device": "auto", "update_roi": True, "auto_detect": bool(job.get("automatic")),
-                                    "score_threshold": job["confidence_threshold"]}, "frames": frames}
+            directory.mkdir()
+            frames = [{"image_path": str(_image_path(self.store, source["reference_url"])),
+                       "ref_id": source["reference_id"], "view_id": source["view_id"],
+                       "frame_index": source["frame_index"], "time_seconds": source["time_sec"],
+                       "width": source["width"], "height": source["height"],
+                       "image_sha256": source["image_sha256"], "image_orientation": source["image_orientation"],
+                       **({"camera": copy.deepcopy(source["camera"])} if source.get("camera") else {})} for source in sources]
+            manifest = {key: job[key] for key in ("schema_version", "job_id", "track_id", "project_id", "session_id", "source_snapshot_id")}
+            manifest.update(**({"view_ids": job["view_ids"]} if multi else {"view_id": job["view_id"]}),
+                            project_dir=workspace["project_dir"], coordinate_frame="reference_image_normalized", frames=frames)
+            _atomic_json(directory / "sources.json", {"sources": sources})
             _atomic_json(directory / "input.json", manifest)
-            output = directory / "output.json"
-            with (directory / "worker.log").open("wb") as log:
-                with self.lock:
-                    if stop.is_set():
-                        return
-                    command = [sys.executable, str(Path(__file__).with_name("pose_launcher.py")), str(os.getpid()), "--",
-                               *command_for_job(directory / "input.json", output)]
-                    process = subprocess.Popen(command, stdout=subprocess.PIPE,
-                                               stderr=log, text=True, start_new_session=True)
-                    self.processes[job_id] = process
-                def timed_out() -> None:
-                    self._update(job_id, status="failed", error="ViTPose 追踪超时，请检查 worker 日志后重试。", finished_at=_now())
-                    stop.set()
-                    self._terminate(process)
-                watchdog = threading.Timer(14400 if job.get("automatic") else 1800, timed_out)
-                watchdog.daemon = True
-                watchdog.start()
-                for line in process.stdout:
-                    if stop.is_set():
-                        break
-                    if len(line) > 8192:
-                        continue
-                    try:
-                        progress = json.loads(line)
-                    except ValueError:
-                        continue
-                    count = progress.get("completed_frames") if isinstance(progress, dict) else None
-                    if type(count) is int and job["completed_frames"] <= count <= job["total_frames"]:
-                        job = self._update(job_id, completed_frames=count)
-                if stop.is_set():
-                    self._terminate(process)
-                    return
-                code = process.wait(timeout=30)
-                if code:
-                    detail = (directory / "worker.log").read_text(encoding="utf-8", errors="replace")[-1400:]
-                    raise RuntimeError(f"ViTPose worker exited {code}: {detail}")
-            result = json.loads(output.read_text(encoding="utf-8"))
+            _atomic_json(directory / "job.json", job)
+            return self._export_response(job)
+
+    def _export_response(self, job: dict) -> dict:
+        path = self.directory / job["job_id"] / "input.json"
+        return {**_summary(job), "project_dir": self.store.workspace()["project_dir"],
+                "manifest_json_path": str(path), "manifest": json.loads(path.read_text(encoding="utf-8"))}
+
+    def import_result(self, payload: Any) -> dict:
+        if (not isinstance(payload, dict) or set(payload) - {"job_id", "session_id", "result", "result_path"}
+                or ("result" in payload) == ("result_path" in payload)):
+            raise APIError(400, "pose import needs job_id and exactly one result or result_path")
+        with self.lock, self.store.lock:
+            if self.closed:
+                raise APIError(503, "pose result store is shutting down")
+            job = _load_job(self.store, payload.get("job_id"))
+            workspace = self.store.workspace()
+            if (not job.get("external_results") or job["session_id"] != workspace["session_id"]
+                    or job["project_id"] != workspace["project_id"]
+                    or payload.get("session_id", job["session_id"]) != job["session_id"]):
+                raise APIError(409, "pose import does not belong to this project's current exported sources")
+            if "result_path" in payload:
+                value = payload["result_path"]
+                if not isinstance(value, str) or not value:
+                    raise APIError(400, "result_path must be a project-local JSON path")
+                project = Path(workspace["project_dir"]).resolve()
+                path = Path(value).expanduser()
+                path = (project / path if not path.is_absolute() else path).resolve()
+                if not path.is_relative_to(project) or not path.is_file():
+                    raise APIError(400, "result_path must identify a file within this project")
+                if path.stat().st_size > MAX_RESULT_BYTES:
+                    raise APIError(413, "pose result file is too large")
+                try:
+                    result = json.loads(path.read_text(encoding="utf-8"))
+                except (ValueError, UnicodeError) as exc:
+                    raise APIError(400, "pose result file must contain valid JSON") from exc
+            else:
+                result = payload["result"]
+            try:
+                encoded = json.dumps(result, sort_keys=True, ensure_ascii=False, allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise APIError(400, "pose result must contain finite JSON values") from exc
+            if len(encoded.encode("utf-8")) > MAX_RESULT_BYTES:
+                raise APIError(413, "pose result is too large")
+            digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            if job["status"] == "completed":
+                if job.get("result_digest") != digest:
+                    raise APIError(409, "this pose export already has a different completed result")
+                return _summary(job)
+            if job["status"] != "awaiting_import":
+                raise APIError(409, "pose export is not awaiting an external result")
+            sources, _, _ = self._current_sources(job["session_id"])
+            if self._snapshot_id(workspace["project_id"], job["session_id"], sources) != job["source_snapshot_id"]:
+                raise APIError(409, "pose reference sources changed after export; export current sources again")
             normalized = self._validate_result(job, result)
-            tracking = result.get("tracking", {})
-            if not isinstance(tracking, dict):
-                raise ValueError("pose output tracking metadata must be an object")
-            if job.get("multi_view"):
-                tracking = {**tracking, "scope": "per_view_independent",
-                            "cross_view_identity_source": "automatic_dominant_person_per_view" if job.get("automatic") else "user_designated_boxes",
-                            "identity_guaranteed": False}
-            if job.get("automatic"):
-                _store_frame_archive(directory, normalized)
-            self._update(job_id, status="completed", completed_frames=len(normalized),
-                         **({"result_frame_count": len(normalized)} if job.get("automatic") else {"frames": normalized}),
-                         model=result.get("model", {}), tracking=tracking, finished_at=_now(), error=None)
-        except Exception as exc:
-            self._update(job_id, status="failed", error=str(exc)[:1800], finished_at=_now())
-        finally:
-            if watchdog is not None:
-                watchdog.cancel()
-            if process is not None:
-                self._terminate(process)
-                if process.stdout:
-                    process.stdout.close()
-            with self.lock:
-                self.processes.pop(job_id, None)
-            if acquired:
-                _RUNNER_SLOT.release()
+            profile, names, edges = _joint_profile(result)
+            provenance = result.get("provenance", {})
+            if not isinstance(provenance, dict):
+                raise APIError(400, "pose provenance must be an object")
+            _safe_json(provenance)
+            model, tracking = result.get("model", {}), result.get("tracking", {})
+            if not isinstance(model, dict) or not isinstance(tracking, dict):
+                raise APIError(400, "pose model and tracking metadata must be objects")
+            _safe_json(model)
+            _safe_json(tracking)
+            if "identity_guaranteed" in tracking and type(tracking["identity_guaranteed"]) is not bool:
+                raise APIError(400, "tracking identity_guaranteed must be a boolean")
+            for key in ("scope", "cross_view_identity_source"):
+                if key in tracking and (not isinstance(tracking[key], str) or not 1 <= len(tracking[key]) <= 200):
+                    raise APIError(400, f"tracking {key} must be a short string")
+            tracking = copy.deepcopy(tracking)
+            tracking.setdefault("scope", "per_view_independent")
+            tracking.setdefault("identity_guaranteed", False)
+            tracking.setdefault("cross_view_identity_source", "independent_external_tracks" if result["evidence_kind"] == "observed_2d" else "projected_3d_geometry")
+            tracking["workbench_identity_verified"] = False
+            threshold = number(result.get("confidence_threshold", .3), "pose display confidence threshold", maximum=1)
+            directory = self.directory / job["job_id"]
+            _atomic_json(directory / "output.json", result)
+            _store_frame_archive(directory, normalized)
+            job.update(status="completed", imported_external=True, completed_frames=len(normalized),
+                       result_frame_count=len(normalized), model=model, tracking=tracking,
+                       evidence_kind=result["evidence_kind"], confidence_threshold=threshold, keypoint_profile=profile,
+                       keypoint_names=names, skeleton_edges=edges, provenance=provenance,
+                       result_digest=digest, finished_at=_now(), error=None)
+            _atomic_json(directory / "job.json", job)
+            return _summary(job)
 
     def _validate_result(self, job: dict, result: Any) -> list[dict]:
-        if not isinstance(result, dict) or result.get("job_id") != job["job_id"] or result.get("track_id") != job["track_id"]:
-            raise ValueError("pose output belongs to another tracking job")
-        if job.get("multi_view") and result.get("view_ids") not in (None, job["view_ids"]):
-            raise ValueError("pose output camera view list does not match the requested views")
-        sources = _sources(self.store, job)
-        predictions = result.get("frames")
+        bindings = ("job_id", "track_id", "project_id", "session_id", "source_snapshot_id")
+        if not isinstance(result, dict) or any(result.get(key) != job[key] for key in bindings):
+            raise APIError(400, "pose result belongs to another exported project/session/source snapshot")
+        if type(result.get("schema_version")) is not int or result["schema_version"] != job["schema_version"]:
+            raise APIError(400, "pose result schema_version must match the exported manifest")
+        if (job["multi_view"] and result.get("view_ids") != job["view_ids"]
+                or not job["multi_view"] and result.get("view_id") != job["view_id"]):
+            raise APIError(400, "pose result cameras do not match the exported manifest")
+        if result.get("evidence_kind") not in {"observed_2d", "projected_3d"}:
+            raise APIError(400, "pose evidence_kind must declare observed_2d or projected_3d")
+        _, joint_names, _ = _joint_profile(result)
+        predictions, sources = result.get("frames"), _sources(self.store, job)
         if not isinstance(predictions, list) or len(predictions) != len(sources):
-            raise ValueError("pose output frame count does not match requested images")
+            raise APIError(400, "pose result frame count must match all exported images")
         frames = []
         for source, prediction in zip(sources, predictions):
-            if (not isinstance(prediction, dict) or prediction.get("ref_id") != source["reference_id"]
-                    or prediction.get("width") != source["width"] or prediction.get("height") != source["height"]):
-                raise ValueError("pose output source or image dimensions do not match")
-            if job.get("multi_view") and prediction.get("view_id") != source["view_id"]:
-                raise ValueError("pose output camera view does not match the requested source")
-            if ("frame_index" in prediction and prediction["frame_index"] != source.get("frame_index", 0) or
-                    "time_seconds" in prediction and prediction["time_seconds"] != source.get("time_sec", 0)):
-                raise ValueError("pose output frame time/index does not match the requested source")
+            if not isinstance(prediction, dict):
+                raise APIError(400, "pose frame must be an object")
+            exact = {"ref_id": source["reference_id"], "view_id": source["view_id"],
+                     "width": source["width"], "height": source["height"],
+                     "frame_index": source["frame_index"], "time_seconds": source["time_sec"],
+                     "image_sha256": source["image_sha256"], "image_orientation": source["image_orientation"]}
+            if (any(prediction.get(key) != value for key, value in exact.items())
+                    or any(type(prediction.get(key)) is not int for key in ("width", "height", "frame_index"))
+                    or type(prediction.get("time_seconds")) not in (int, float)):
+                raise APIError(400, "pose result frame IDs, camera, dimensions and timestamps must exactly match export")
             points = prediction.get("keypoints")
-            if not isinstance(points, list) or len(points) != len(JOINT_NAMES):
-                raise ValueError("ViTPose output must contain 17 COCO keypoints")
+            if not isinstance(points, list) or len(points) != len(joint_names):
+                raise APIError(400, "pose result points must match the declared named joint profile")
             normalized = []
-            for name, point in zip(JOINT_NAMES, points):
+            for name, point in zip(joint_names, points):
                 if not isinstance(point, dict) or point.get("name") != name:
-                    raise ValueError("pose output has unexpected joint names/order")
+                    raise APIError(400, "pose result has unexpected joint names/order")
                 values = [point.get(key) for key in ("x", "y", "score")]
-                if any(type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1 for value in values):
-                    raise ValueError("pose output has non-finite or unnormalized keypoints")
+                if any(type(value) not in (int, float) or not 0 <= value <= 1 or not math.isfinite(value) for value in values):
+                    raise APIError(400, "pose result requires finite normalized coordinates and scores")
+                if type(point.get("in_frame")) is not bool:
+                    raise APIError(400, "pose result requires a boolean in_frame for each joint")
                 normalized.append({"name": name, "x": values[0], "y": values[1], "score": values[2],
-                                   "in_frame": point.get("in_frame", True) is True,
+                                   "in_frame": point["in_frame"],
                                    **({"raw_score": point["raw_score"]} if type(point.get("raw_score")) in (int, float) and math.isfinite(point["raw_score"]) else {})})
+            status = prediction.get("tracking_status")
+            if status not in {"tracked", "lost"}:
+                raise APIError(400, "pose tracking_status must be tracked or lost")
             roi = prediction.get("bbox")
             if isinstance(roi, dict):
                 roi = [roi.get(key) for key in ("x", "y", "width", "height")]
-            if roi is None and not job.get("automatic"):
-                roi = source.get("seed_bbox", job.get("bbox"))
-            valid_count = sum(point["score"] >= job["confidence_threshold"] and point["in_frame"] for point in normalized)
-            if roi is None and prediction.get("tracking_status") != "lost":
-                raise ValueError("tracked automatic frame needs an actual person ROI")
-            if roi is None and any(point["score"] > 0 or point["in_frame"] for point in normalized):
-                raise ValueError("no-person frame cannot contain inferred visible keypoints")
-            frames.append({**copy.deepcopy(source), "keypoints": normalized, "bbox": _bbox(roi) if roi is not None else None,
-                           "tracking_status": prediction.get("tracking_status", "tracked" if valid_count >= 5 else "lost"),
-                           "roi_status": prediction.get("roi_status"),
+            if roi is None and (status != "lost" or any(point["score"] > 0 or point["in_frame"] for point in normalized)):
+                raise APIError(400, "no-person frame must be lost with no visible or confident keypoints")
+            roi_status = prediction.get("roi_status")
+            if roi_status is not None and (not isinstance(roi_status, str) or len(roi_status) > 120):
+                raise APIError(400, "roi_status must be a short string")
+            frames.append({**copy.deepcopy(source), "keypoints": normalized,
+                           "bbox": _bbox(roi) if roi is not None else None, "tracking_status": status,
+                           "roi_status": roi_status,
                            **({"detector_score": prediction["detector_score"]} if type(prediction.get("detector_score")) in (int, float) and math.isfinite(prediction["detector_score"]) else {})})
         return frames
-
-    def cancel(self, job_id: str, *, interrupted: bool = False) -> dict:
-        with self.lock:
-            job = _load_job(self.store, job_id)
-            if job["status"] not in ACTIVE:
-                return _summary(job)
-            status = "interrupted" if interrupted else "cancelled"
-            job = self._update(job_id, status=status, error="服务重启中，追踪已中断。" if interrupted else None, finished_at=_now())
-            self.stops[job_id].set()
-            process = self.processes.get(job_id)
-        if process is not None:
-            self._terminate(process)
-        return _summary(job)
 
     def close(self) -> None:
         with self.lock:
             self.closed = True
-            ids = list(self.stops)
-        for job_id in ids:
-            self.cancel(job_id, interrupted=True)
-        for thread in self.threads.values():
-            thread.join(timeout=10)
 
 
 def prepare_pose_feedback(store: Any, session_id: str, references: Any, note: str = "") -> list[dict]:
@@ -656,18 +533,24 @@ def prepare_pose_feedback(store: Any, session_id: str, references: Any, note: st
         seen.add(key)
         image = _image_path(store, frame["reference_url"])
         # Preserve actual inference-frame evidence even if the current clip changed.
-        prepared.append({"job_id": job["job_id"], "track_id": job["track_id"], "source": "vitpose_estimate",
+        prepared.append({"job_id": job["job_id"], "track_id": job["track_id"], "source": ("projected_3d_geometry" if job.get("evidence_kind") == "projected_3d" else "external_pose_estimate") if job.get("imported_external") else "vitpose_estimate",
+                         "evidence_kind": job.get("evidence_kind", "observed_2d"),
+                         "keypoint_profile": job.get("keypoint_profile", "coco17"),
+                         "keypoint_names": copy.deepcopy(job.get("keypoint_names", JOINT_NAMES)),
+                         "provenance": copy.deepcopy(job.get("provenance", {})),
                          **({"multi_view": True, "view_ids": copy.deepcopy(job["view_ids"]),
-                             "cross_view_identity_source": "automatic_dominant_person_per_view" if job.get("automatic") else "user_designated_boxes"} if job.get("multi_view") else {}),
+                             "cross_view_identity_source": job.get("tracking", {}).get("cross_view_identity_source", "independent_external_tracks") if job.get("imported_external") else "automatic_dominant_person_per_view" if job.get("automatic") else "user_designated_boxes"} if job.get("multi_view") else {}),
                          "coordinate_frame": "reference_image_normalized", "confidence_threshold": job["confidence_threshold"],
                          "model": copy.deepcopy(job.get("model", {})), "tracking": copy.deepcopy(job.get("tracking", {})), "frame": copy.deepcopy(frame),
                          "reference_original_url": frame["reference_url"],
-                         "_overlay_data": _render_overlay(image, frame, job["confidence_threshold"]),
-                         "skeleton_edges": SKELETON_EDGES})
+                         "_overlay_data": _render_overlay(image, frame, job["confidence_threshold"], job.get("skeleton_edges", SKELETON_EDGES),
+                                                          job.get("evidence_kind", "observed_2d")),
+                         "skeleton_edges": copy.deepcopy(job.get("skeleton_edges", SKELETON_EDGES))})
     return prepared
 
 
-def _render_overlay(path: Path, frame: dict, threshold: float) -> bytes:
+def _render_overlay(path: Path, frame: dict, threshold: float, edges: list[list[int]] | None = None,
+                    evidence_kind: str = "observed_2d") -> bytes:
     from PIL import Image, ImageDraw, ImageOps
     with Image.open(path) as opened:
         image = ImageOps.exif_transpose(opened).convert("RGB")
@@ -677,7 +560,7 @@ def _render_overlay(path: Path, frame: dict, threshold: float) -> bytes:
     line_width = max(2, round(min(width, height) / 200))
     def visible(point: dict) -> bool:
         return frame.get("tracking_status") != "lost" and point["score"] >= threshold and point.get("in_frame", True)
-    for first, second in SKELETON_EDGES:
+    for first, second in edges if edges is not None else SKELETON_EDGES:
         if visible(points[first]) and visible(points[second]):
             draw.line([(points[index]["x"] * width, points[index]["y"] * height) for index in (first, second)],
                       fill="#00b7b0", width=line_width)
@@ -687,7 +570,7 @@ def _render_overlay(path: Path, frame: dict, threshold: float) -> bytes:
             x, y = point["x"] * width, point["y"] * height
             draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill="#00b7b0", outline="white")
     draw.rectangle((4, 4, 255, 25), fill="white")
-    draw.text((8, 8), "ViTPose / estimated COCO17 keypoints", fill="#005f5b")
+    draw.text((8, 8), "Projected 3D joints" if evidence_kind == "projected_3d" else "Estimated 2D joints", fill="#005f5b")
     output = io.BytesIO()
     image.save(output, "PNG")
     return output.getvalue()

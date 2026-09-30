@@ -136,29 +136,15 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
-## 인체 키포인트: 모든 카메라와 참고 프레임을 한 번에 추적
+## 인체 결과: capsule skill에서 생성하고 작업대에서 검토
 
-참고 영역 도구 모음의 `人体追踪`을 누르면 바로 시작합니다. 옆의 `结果`에서 진행률과 완료 작업을 볼 수 있습니다. 현재 동적 클립의 **모든 카메라와 가져온 모든 참고 프레임**에 인물 검출과 ViTPose가 실행됩니다. 인물 영역, 카메라, 시간 구간, 샘플링 속도를 지정할 필요가 없습니다. 동적 클립이 없으면 현재 세션의 정적 참고 이미지 전체를 처리합니다. 비동기 작업은 완료 프레임 수와 전체 진행률을 보여 줍니다. 동적 참고의 한도는 카메라 8개, 카메라마다 600프레임, 총 **4800프레임**입니다. “모든 프레임”은 작업대에 가져온 참고 프레임을 뜻하며, 동영상에서 추출할 때 건너뛴 원본 프레임을 복원하지는 않습니다. 시간에 맞춰 비교하려면 카메라마다 `time_sec` 시작점이 같아야 합니다.
+인체 추적과 재구성은 별도의 [capsule-human-tracking skill](external-skills/capsule-human-tracking/SKILL.md)이 실행합니다. `人体结果` 패널은 2D 증거의 표시, 가져오기, 인용을 담당합니다. 작업대 플러그인은 ViTPose를 실행하거나 추론 환경과 모델 가중치를 설치하지 않습니다.
 
-완료 후에는 현재 카메라와 시점에 맞는 원본 프레임의 COCO17 2D 골격과 실제 출처 프레임을 표시합니다. 결과를 확인하거나 모든 카메라가 포함된 JSON을 다운로드하고, `引用人体`로 `[[pose:JOB_ID:REFERENCE_ID]]`를 통합 프롬프트에 넣을 수 있습니다. 한 피드백은 완료 작업이나 카메라의 샘플을 최대 8개 인용할 수 있습니다. 서버는 **추론 원본 프레임, 청록색 추정 골격 이미지, 신뢰도, 인물 영역, 카메라, 프레임 번호, 시간과 기존 보정 정보**를 전송합니다. 빨간 수동 표식과 구분되며 원본은 바뀌지 않습니다. 피드백 저장에 성공하면 이번 인용만 지우고 작업 이력은 유지합니다.
+재구성 작업은 `workspace_export_pose_sources`로 현재 참고 프레임을 저장하고, skill에서 실제 이미지를 처리하거나 기존 2D 추적을 검증한 뒤 `workspace_import_human_pose`로 결과를 보냅니다. 해당 JSON을 패널에서 가져올 수도 있습니다. 출처는 프로젝트, 세션, 카메라, 프레임, 시간, 이미지에 연결됩니다. 다른 프로젝트나 교체된 참고 이미지의 결과는 거부하며, 이미지가 동일한 경우 장면 형상 변경만으로 무효화하지 않습니다.
 
-결과는 장면별로 저장되며 카메라마다 독립된 2D 궤적을 가집니다. 카메라를 바꾸면 해당 카메라의 골격만 보입니다. `view_id`로 개별 조회하거나 전체 JSON을 받을 수 있고, 클립 교체 후에도 예전 증거를 읽을 수 있습니다. 장면별 활성 작업은 하나, 서비스 전체 추론 슬롯도 하나입니다. 긴 작업의 진행률은 저장되며 MCP에서 취소할 수 있습니다. 서비스를 다시 시작하면 미완료 작업을 중단으로 기록하므로 다시 시작해야 합니다.
+카메라나 시간을 바꾸면 해당 원본 프레임의 골격을 표시합니다. 결과에 관절 이름과 연결을 명시할 수 있고, 이전 COCO17 완료 결과도 계속 읽을 수 있습니다. 실제 2D 관측, 추론 추정, 기존 3D 모델의 투영을 구분합니다. 투영을 실제 추적 관측으로 표시하지 않습니다.
 
-이 기능은 **ViTPose+ Base 단일 인물 COCO17 2D 추정**입니다. 각 카메라에서 가장 두드러진 사람 한 명을 자동으로 찾아 따라가며, 놓치면 다시 검출합니다. 화면의 모든 사람을 추적하지는 않습니다. 여러 사람, 가림, 재검출 후에는 다른 사람으로 바뀔 수 있고 **카메라 사이에서 동일 인물이라는 보장도 없습니다**. 관절 융합이나 3D 자세 삼각측량은 하지 않습니다. 낮은 신뢰도, 이미지 밖, 인물을 놓친 골격은 그리지 않습니다. 손가락 관절이나 Blender 리그 자동 조작도 제공하지 않습니다. 결과를 원본과 대조하세요. JSON 좌표는 각 원본 이미지 기준으로 정규화되며 크기와 출처를 보존합니다.
-
-### 선택적 추론 환경
-
-HTTP 서비스는 모델을 로드하지 않고 별도 프로세스에서 추론합니다. 추론 환경에는 `torch`, ABI가 호환되는 `torchvision`, `transformers`, `Pillow`, `numpy`, `scipy`, `opencv-python`과 `config.json`, `preprocessor_config.json`, `model.safetensors`가 들어 있는 로컬 ViTPose+ Base 모델이 필요합니다. 자동 인물 선택에는 로컬 Faster R-CNN MobileNet V3 320 COCO 가중치도 필요합니다. 실행 중인 서비스는 가중치를 자동 다운로드하지 않습니다. 시작 전에 설정하세요.
-
-의존성: [requirements-pose.txt](backend/requirements-pose.txt), [ViTPose+ Base 가중치](https://huggingface.co/usyd-community/vitpose-plus-base), [Transformers ViTPose 문서](https://huggingface.co/docs/transformers/model_doc/vitpose), [PyTorch 검출기 문서](https://docs.pytorch.org/vision/2.0/models/generated/torchvision.models.detection.fasterrcnn_mobilenet_v3_large_320_fpn.html)와 [공식 검출기 가중치](https://download.pytorch.org/models/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth).
-
-```bash
-export SCENE_FEEDBACK_POSE_PYTHON=/absolute/path/to/pose-env/bin/python
-export SCENE_FEEDBACK_POSE_MODEL=/absolute/path/to/vitpose-plus-base
-export SCENE_FEEDBACK_POSE_DETECTOR=/absolute/path/to/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth
-```
-
-의존성이나 가중치가 없으면 이유를 표시하며 일반 표식과 피드백은 설정 없이 이용할 수 있습니다. 사용자 `SCENE_FEEDBACK_POSE_RUNNER`는 JSON 인수 배열이며 `{manifest}`, `{output}` 자리표시자가 필수입니다. 이전 RTX 5060 검증에서 ViTPose 추론, 피드백 이미지 및 MCP 이미지 전송을 확인했습니다.
+`引用人体`를 누르면 `[[pose:JOB_ID:REFERENCE_ID]]`가 공통 프롬프트에 삽입됩니다. 피드백마다 최대 8개 샘플을 인용하며 원본, 골격, 신뢰도, 카메라, 프레임, 시간, 기존 보정 정보를 함께 보냅니다. 저장된 증거는 유지되고 전송 성공 후 현재 인용은 비웁니다. 카메라 간 인물 대응, 삼각측량, 3D 맞춤은 명시적 보정과 관절 구조를 사용하는 재구성 skill이 담당합니다.
 
 ## 빠른 체험: 방과 캐비닛
 
@@ -252,9 +238,9 @@ LAN_IP=192.168.1.10
 | `workspace_open` | 이 프로젝트의 작업대 주소를 반환하거나 엽니다 |
 | `workspace_get_context` | 현재 참고 이미지, 장면 버전 및 프로젝트 문맥을 읽습니다 |
 | `workspace_get_feedback` | 제출된 피드백과 실제 이미지를 읽습니다 |
-| `workspace_track_human_pose` | `all_views=true`로 모든 카메라의 가져온 프레임 전체를 추적하고, 동적 클립이 없으면 모든 정적 이미지를 처리; 기존 수동 영역 및 단일 카메라 인수도 사용 가능; job_id 즉시 반환 |
-| `workspace_get_human_pose` | 환경·진행률·COCO17 결과 읽기; `view_id`로 한 카메라만 필터링하고 `frame_offset` / `max_frames`로 페이지 구분(기본 8프레임, 최대 32); 전체 JSON의 로컬 경로 반환 |
-| `workspace_cancel_human_pose` | 현재 장면의 대기·실행 중 작업 취소, 완료 결과 유지 |
+| `workspace_export_pose_sources` | 외부 capsule skill용으로 모든 현재 카메라와 참고 프레임의 출처 저장 |
+| `workspace_import_human_pose` | 출처에 연결된 2D 인체 결과를 검증하고 가져오기; 추론 실행 없음 |
+| `workspace_get_human_pose` | 가져온 결과와 기존 완료 결과를 카메라, 원본 프레임 또는 페이지별로 읽기 |
 | `workspace_publish_scene` | 새 GLB를 검증하고 게시하며, 예상 버전을 확인하고 페이지에 새로고침을 알립니다 |
 | `workspace_set_reference_clip` | 단일·여러 카메라 매니페스트를 가져오거나 프로젝트 동영상을 FFmpeg로 샘플링. `append_view=True`로 카메라 추가 |
 | `workspace_request_feedback` | 기본 모드: 페이지에서 검토를 요청하고 즉시 반환합니다. 답변은 다음 사용자 메시지가 됩니다 |

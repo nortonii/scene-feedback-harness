@@ -464,10 +464,7 @@ def main():
         results.append(name)
         print("PASS " + name, flush=True)
 
-    with tempfile.TemporaryDirectory(prefix="focus-browser-", dir=temp_parent) as temporary, patch(
-        "human_pose.runtime_status", return_value={"configured": False, "runtime_label": "isolated fixture",
-                                                  "message": "隔离测试：人体追踪服务未启动。"}
-    ), patch("human_pose.HumanPoseJobs.start", side_effect=AssertionError("Pose jobs must never start in this UI fixture")) as pose_start:
+    with tempfile.TemporaryDirectory(prefix="focus-browser-", dir=temp_parent) as temporary:
         temporary = Path(temporary)
         seed = SceneStore(temporary / "data")
         session = seed.create_session(reference_images=[str(ROOT / "examples/room_demo/reference.png")])
@@ -635,24 +632,15 @@ def main():
 
                 expect(page.locator("#projects-dialog-button")).to_be_visible()
                 page.locator("#human-pose-panel summary").click()
-                expect(page.locator("#human-pose-runtime")).to_contain_text("隔离测试", timeout=10000)
-                expect(page.locator("#human-pose-run")).to_be_disabled()
-                page.locator("#human-pose-draw").click()
-                reference = page.locator("#reference-image").bounding_box()
-                page.mouse.move(reference["x"] + reference["width"] * .10, reference["y"] + reference["height"] * .20)
-                page.mouse.down()
-                page.mouse.move(reference["x"] + reference["width"] * .30, reference["y"] + reference["height"] * .40, steps=6)
-                page.mouse.up()
-                page.wait_for_function("""() => {
-                  const key='astra-visual-draft:' + new URL(location.href).searchParams.get('session_id');
-                  return !!JSON.parse(localStorage.getItem(key) || '{}').humanSeed;
-                }""")
+                expect(page.locator("#human-pose-panel summary")).to_have_text("人体结果")
+                expect(page.locator("#human-pose-import")).to_be_enabled()
+                expect(page.locator("#human-pose-jobs")).to_contain_text("capsule")
+                expect(page.locator("#human-pose-run, #human-pose-draw, #human-pose-runtime")).to_have_count(0)
                 expect(page.locator("#annotation-count")).to_have_text("1")
-                page.locator("#human-pose-panel summary").click()
-                expect(page.locator("#human-pose-run")).to_be_disabled()
+                assert "humanSeed" not in draft(page)
                 assert page.locator("#human-pose-overlay").evaluate("el => getComputedStyle(el).pointerEvents") == "none"
                 page.keyboard.press("Escape")
-                passed("human pose ROI remains separate from feedback marks and unavailable runtime cannot start a job")
+                passed("passive human result import remains separate from feedback marks with no inference or ROI controls")
 
                 composer = page.locator("#feedback-note")
                 composer.focus()
@@ -708,7 +696,7 @@ def main():
                 fresh = draft(page)
                 assert fresh["annotations"] == [] and fresh["snapshot"] is None
                 assert fresh["selectedId"] is None and fresh["sceneView"] == "live"
-                assert fresh["poseRefs"] == [] and fresh["humanSeed"] is None
+                assert fresh["poseRefs"] == [] and "humanSeed" not in fresh
                 assert fresh["referencedSceneNodes"] == []
                 packet = store.list_all_feedback()[0]
                 assert len(packet["annotations"]) == 1 and packet["scene_original_url"]
@@ -719,7 +707,7 @@ def main():
                 expect(page.locator("#undo-annotation")).to_be_disabled()
                 assert draft(page)["snapshot"] is None
                 assert store.list_all_feedback()[0] == packet
-                passed("acknowledged send clears draft, marks, snapshot, pose seed and undo history across reload while saved evidence remains immutable")
+                passed("acknowledged send clears draft, marks, snapshot, pose references and undo history across reload while saved evidence remains immutable")
 
                 page.locator("#activity-dialog-button").click()
                 expect(page.locator("#activity-dialog")).to_be_visible()
@@ -781,7 +769,8 @@ def main():
                     expect(page.locator("#projects-dialog-button")).to_be_visible()
                     expect(page.locator("#human-pose-panel summary")).to_be_visible()
                     page.locator("#human-pose-panel summary").click()
-                    expect(page.locator("#human-pose-run")).to_be_disabled()
+                    expect(page.locator("#human-pose-import")).to_be_enabled()
+                    expect(page.locator("#human-pose-run, #human-pose-draw")).to_have_count(0)
                     pose_box = page.locator(".human-pose-controls").bounding_box()
                     assert pose_box["x"] >= -1 and pose_box["x"] + pose_box["width"] <= width + 1, pose_box
                     assert pose_box["y"] >= -1 and pose_box["y"] + pose_box["height"] <= height + 1, pose_box
@@ -805,7 +794,7 @@ def main():
                 passed("long unread counts fit the shared header at narrow widths and resize grip leaves header buttons clickable")
                 verify_project_isolation(page, server, screenshots)
                 passed("real project creation and switching isolate scene assets, saved feedback, chat, drafts and collapsed preferences with mocked Codex I/O")
-                assert not pose_requests and not pose_start.called
+                assert not pose_requests, "Browsing the passive result panel must never POST inference, import or cancellation"
                 assert not errors, errors
                 assert server.workspace_gateway.adapter is None
                 assert server.server_port != 18769
