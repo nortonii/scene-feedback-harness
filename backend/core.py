@@ -22,11 +22,11 @@ from typing import Any
 
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 INLINE_REFERENCE_RE = re.compile(
-    r"\[\[(?:(?P<simple_kind>object|annotation):(?P<simple_id>[A-Za-z0-9_-]{1,64})"
+    r"\[\[(?:(?P<simple_kind>object|annotation|image):(?P<simple_id>[A-Za-z0-9_-]{1,64})"
     r"|node:(?P<node_object>[A-Za-z][A-Za-z0-9_-]{0,63}):"
     r"(?P<node_path>[0-9]{1,5}(?:/[0-9]{1,5}){0,31}))\]\]"
 )
-INLINE_REFERENCE_START_RE = re.compile(r"\[\[(?:object|annotation|node):")
+INLINE_REFERENCE_START_RE = re.compile(r"\[\[(?:object|annotation|node|image):")
 CLIENT_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ASSET_RE = re.compile(r"^/assets/[0-9a-f]{32}\.glb$")
 COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -35,6 +35,7 @@ MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024
 MAX_REFERENCE_BYTES = 25 * 1024 * 1024
 MAX_REFERENCES = 8
 MAX_CROPS = 8
+MAX_IMAGE_REFS = 8
 
 
 class APIError(Exception):
@@ -954,16 +955,150 @@ class SceneStore:
         _safe_json(normalized)
         return normalized
 
+    def _prepare_image_refs(self, session: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Validate independently frozen images before writing any evidence."""
+        from dynamic import number, reference_views, shared_duration
+        from PIL import Image, ImageOps
+
+        refs = payload.get("image_refs", [])
+        if not isinstance(refs, list) or len(refs) > MAX_IMAGE_REFS:
+            raise APIError(400, "image_refs must contain at most 8 dragged images")
+        clip = session.get("reference_clip")
+        views = {view["clip_id"]: view for view in reference_views(clip)}
+        static = {ref["id"]: ref for ref in session.get("reference_images", [])}
+        dynamic = {frame["id"]: (view, index, frame) for view in views.values() for index, frame in enumerate(view["frames"])}
+        objects = {obj["id"]: obj for obj in self.state["scene"]["objects"]}
+        allowed = {"id", "pane", "label", "original_data_url", "annotated_data_url", "image_width", "image_height",
+                   "scene_revision", "camera", "reference_id", "clip_id", "view_id", "time_sec", "frame_index",
+                   "selected_object_ids", "selected_scene_nodes"}
+        seen: set[str] = set()
+        prepared = []
+
+        def dimensions(data: bytes) -> tuple[int, int]:
+            with Image.open(io.BytesIO(data)) as image:
+                return ImageOps.exif_transpose(image).size
+
+        for item in refs:
+            if not isinstance(item, dict) or set(item) - allowed:
+                raise APIError(400, "dragged image contains unsupported fields")
+            image_id = item.get("id")
+            if not isinstance(image_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", image_id) or image_id in seen:
+                raise APIError(400, "image_refs IDs must be URL-safe and unique")
+            seen.add(image_id)
+            pane, label = item.get("pane"), item.get("label")
+            if not isinstance(pane, str) or pane not in {"reference", "scene"} or not isinstance(label, str) or not 1 <= len(label.strip()) <= 180 or any(ord(char) < 32 for char in label):
+                raise APIError(400, "dragged image needs a pane and short label")
+            width, height = item.get("image_width"), item.get("image_height")
+            if type(width) is not int or type(height) is not int or not 1 <= width <= 32768 or not 1 <= height <= 32768:
+                raise APIError(400, "dragged image dimensions must be positive integers")
+            original = self._decode_image_data_url(item.get("original_data_url"))
+            if dimensions(original) != (width, height):
+                raise APIError(400, "dragged image dimensions do not match its captured pixels")
+            images = {}
+            if item.get("annotated_data_url") is not None:
+                annotated = self._decode_image_data_url(item["annotated_data_url"])
+                if dimensions(annotated) != (width, height):
+                    raise APIError(400, "annotated dragged image dimensions do not match its original capture")
+                images["annotated"] = annotated
+            result: dict[str, Any] = {"id": image_id, "pane": pane, "label": label.strip(), "image_width": width, "image_height": height}
+            reference_id = item.get("reference_id")
+            if reference_id is not None and (not isinstance(reference_id, str) or reference_id not in static and reference_id not in dynamic):
+                raise APIError(400, "dragged image reference_id must belong to this session's current sources")
+            if reference_id is not None:
+                result["reference_id"] = reference_id
+            if pane == "reference":
+                if reference_id is None:
+                    raise APIError(400, "reference dragged image requires reference_id")
+                if any(key in item for key in ("scene_revision", "camera", "selected_object_ids", "selected_scene_nodes")):
+                    raise APIError(400, "reference dragged image cannot contain scene capture metadata")
+                if reference_id in dynamic:
+                    view, index, reference = dynamic[reference_id]
+                    if item.get("clip_id") != clip["clip_id"] or item.get("view_id") != view["clip_id"]:
+                        raise APIError(400, "dragged reference clip/view does not match its exact source frame")
+                    time_sec = number(item.get("time_sec"), "dragged reference time_sec")
+                    if abs(time_sec - reference["time_sec"]) > 1e-6:
+                        raise APIError(400, "dragged reference time_sec does not match its exact source frame")
+                    if "frame_index" in item and (type(item["frame_index"]) is not int or item["frame_index"] != index):
+                        raise APIError(400, "dragged reference frame_index does not match its source ordinal")
+                    result.update(clip_id=clip["clip_id"], view_id=view["clip_id"], view_name=view["name"], time_sec=time_sec, frame_index=index)
+                else:
+                    reference = static[reference_id]
+                    if any(key in item for key in ("clip_id", "view_id", "time_sec", "frame_index")):
+                        raise APIError(400, "static dragged reference cannot name a clip frame")
+                source_path = self.media_dir / reference["url"].rsplit("/", 1)[-1]
+                if not source_path.is_file():
+                    raise APIError(409, "dragged reference original source is missing")
+                source_width, source_height = dimensions(source_path.read_bytes())
+                if abs(width * source_height - height * source_width) > 2 * max(source_width, source_height):
+                    raise APIError(400, "dragged reference capture must preserve the source aspect ratio")
+                result.update(original_url=reference["url"], reference_name=reference["name"],
+                              source_image_width=source_width, source_image_height=source_height)
+                if reference.get("camera"):
+                    result["reference_camera"] = copy.deepcopy(reference["camera"])
+                images["display_original"] = original
+            else:
+                revision = item.get("scene_revision")
+                current_revision = self.state["scene"]["revision"]
+                if type(revision) is not int or not 1 <= revision <= current_revision:
+                    raise APIError(400, "dragged scene revision must identify an already published scene")
+                stale = revision != current_revision
+                if stale and payload.get("confirm_stale") is not True:
+                    raise APIError(409, "confirm stale dragged scene evidence before submitting",
+                                   detail={"code": "feedback_revision_conflict", "current_scene_revision": current_revision})
+                camera = item.get("camera")
+                _safe_json(camera)
+                if not isinstance(camera, dict) or not camera or len(json.dumps(camera)) > 16_000:
+                    raise APIError(400, "dragged scene camera must be a small nonempty object")
+                vectors = {key: _vector(camera.get(key), "dragged scene camera." + key)
+                           for key in ("position", "target", "up")}
+                if vectors["position"] == vectors["target"] or not any(vectors["up"]):
+                    raise APIError(400, "dragged scene camera needs a distinct target and nonzero up vector")
+                number(camera.get("fov"), "dragged scene camera.fov", minimum=.001, maximum=179.999)
+                number(camera.get("aspect"), "dragged scene camera.aspect", minimum=.0001, maximum=10000)
+                selected = item.get("selected_object_ids", [])
+                if not isinstance(selected, list) or len(selected) > 100 or any(not isinstance(value, str) or not ID_RE.fullmatch(value) or not stale and value not in objects for value in selected):
+                    raise APIError(400, "dragged image selection contains invalid object IDs")
+                if len(set(selected)) != len(selected):
+                    raise APIError(400, "dragged image selected IDs must be unique")
+                models = {key for key, obj in objects.items() if obj["type"] == "model"}
+                if stale:
+                    models.update(selected)
+                nodes = item.get("selected_scene_nodes", [])
+                if not isinstance(nodes, list) or len(nodes) > 64:
+                    raise APIError(400, "dragged image selected_scene_nodes must contain at most 64 nodes")
+                nodes = [self._scene_node(node, models) for node in nodes]
+                if any(node["parent_object_id"] not in selected for node in nodes) or len({(node["parent_object_id"], tuple(node["node_path"])) for node in nodes}) != len(nodes):
+                    raise APIError(400, "dragged image nodes must be unique and belong to its selection")
+                result.update(scene_revision=revision, camera=copy.deepcopy(camera), selected_object_ids=list(selected), selected_scene_nodes=nodes)
+                if stale:
+                    result["from_stale_snapshot"] = True
+                if any(key in item for key in ("clip_id", "view_id")):
+                    if not clip or item.get("clip_id") != clip["clip_id"] or not isinstance(item.get("view_id"), str) or item["view_id"] not in views:
+                        raise APIError(400, "dragged scene clip/view must match the current session")
+                    if reference_id in dynamic and dynamic[reference_id][0]["clip_id"] != item["view_id"]:
+                        raise APIError(400, "dragged scene view does not match its reference frame")
+                    result.update(clip_id=clip["clip_id"], view_id=item["view_id"], view_name=views[item["view_id"]]["name"])
+                if "time_sec" in item:
+                    result["time_sec"] = number(item["time_sec"], "dragged scene time_sec", maximum=shared_duration(clip) if clip else 86400)
+                if "frame_index" in item:
+                    raise APIError(400, "scene screenshot frame_index is not a reference frame ordinal")
+                images["original"] = original
+            _safe_json(result)
+            prepared.append({"image": result, "images": images})
+        return prepared
+
     @staticmethod
     def _inline_references(note: str, scene_objects: dict[str, dict[str, Any]],
                            object_ids: set[str], annotations: list[dict[str, Any]],
                            referenced_scene_nodes: list[dict[str, Any]],
-                           *, stale_snapshot: bool) -> list[dict[str, Any]]:
+                           *, stale_snapshot: bool, image_refs: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Resolve tokens in the user's prose against this frozen submission."""
         matches = list(INLINE_REFERENCE_RE.finditer(note))
         matched_starts = {match.start() for match in matches}
         if any(match.start() not in matched_starts for match in INLINE_REFERENCE_START_RE.finditer(note)):
-            raise APIError(400, "invalid inline reference; use [[object:ID]], [[annotation:ID]], or [[node:OBJECT_ID:PATH]]")
+            raise APIError(400, "invalid inline reference; use object, annotation, node or image tokens")
+        images_by_id = {item["id"]: item for item in image_refs or []}
+        used_images: set[str] = set()
         annotations_by_id: dict[str, list[dict[str, Any]]] = {}
         for annotation in annotations:
             annotation_id = annotation.get("id")
@@ -1001,6 +1136,11 @@ class SceneStore:
                     detail = "ambiguous" if candidates else "unknown"
                     raise APIError(400, f"inline annotation reference {reference_id} is {detail}")
                 entry["annotation"] = copy.deepcopy(candidates[0])
+            elif kind == "image":
+                if reference_id not in images_by_id:
+                    raise APIError(400, f"inline image reference {reference_id} has no submitted frozen image")
+                used_images.add(reference_id)
+                entry["image"] = copy.deepcopy(images_by_id[reference_id])
             else:
                 node_object = match.group("node_object")
                 node_path_text = match.group("node_path")
@@ -1016,6 +1156,8 @@ class SceneStore:
             resolved.append(entry)
         if used_nodes != set(nodes_by_path):
             raise APIError(400, "referenced_scene_nodes contains a node not cited in note")
+        if used_images != set(images_by_id):
+            raise APIError(400, "image_refs contains an image not cited in note")
         return resolved
 
     def submit_feedback(self, session_id: str, payload: Any) -> dict[str, Any]:
@@ -1108,9 +1250,11 @@ class SceneStore:
             note = payload.get("note", "")
             if not isinstance(note, str) or len(note) > 10_000:
                 raise APIError(400, "note must be text up to 10000 characters")
+            prepared_images = self._prepare_image_refs(session, payload)
             inline_references = self._inline_references(
                 note, scene_objects, object_ids, normalized_annotations, referenced_scene_nodes,
                 stale_snapshot=stale_snapshot,
+                image_refs=[item["image"] for item in prepared_images],
             )
             object_prompts = payload.get("object_prompts", [])
             if not isinstance(object_prompts, list) or len(object_prompts) > 24:
@@ -1184,6 +1328,12 @@ class SceneStore:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
             feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "inline_references": inline_references, "object_prompts": normalized_prompts, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes, "referenced_scene_nodes": referenced_scene_nodes}
+            if prepared_images:
+                feedback["image_refs"] = [{**item["image"], **{name + "_url": self._write_media(data) for name, data in item["images"].items()}} for item in prepared_images]
+                saved_images = {item["id"]: item for item in feedback["image_refs"]}
+                for inline in feedback["inline_references"]:
+                    if inline["kind"] == "image":
+                        inline["image"] = copy.deepcopy(saved_images[inline["id"]])
             if prepared_pose:
                 feedback["human_pose"] = [{**{key: value for key, value in item.items() if key != "_overlay_data"},
                                            "pose_overlay_url": self._write_media(item["_overlay_data"])} for item in prepared_pose]

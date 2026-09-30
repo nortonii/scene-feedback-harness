@@ -83,6 +83,10 @@ def _feedback_with_local_paths(result: dict[str, Any], data_dir: Path | None = N
             reference["path"] = str(_image_path(reference["url"], data_dir))
         for crop in item.get("crops", []):
             crop["path"] = str(_image_path(crop["url"], data_dir))
+        for image in item.get("image_refs", []):
+            for name in ("original", "display_original", "annotated"):
+                if image.get(name + "_url"):
+                    image[name + "_path"] = str(_image_path(image[name + "_url"], data_dir))
         for pose in item.get("human_pose", []):
             for name in ("reference_original", "pose_overlay"):
                 pose[name + "_path"] = str(_image_path(pose[name + "_url"], data_dir))
@@ -135,6 +139,16 @@ def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) ->
         for crop in item.get("crops", []):
             content.append(TextContent(type="text", text=f"{crop['source'].title()} detail crop: {crop['path']}"))
             content.append(_preview_image(Path(crop["path"])))
+        for image in item.get("image_refs", []):
+            caption = f"[[image:{image['id']}]] {image['label']}; pane {image['pane']}"
+            if "scene_revision" in image:
+                caption += f"; independently frozen scene revision {image['scene_revision']}"
+            if "frame_index" in image:
+                caption += f"; view {image['view_id']}, source frame {image['frame_index'] + 1}, {image['time_sec']:.6f}s"
+            for name in ("original", "display_original", "annotated"):
+                if image.get(name + "_path"):
+                    content.append(TextContent(type="text", text=f"{caption}: {name.replace('_', ' ')}; camera/dimensions/source metadata are in structured content"))
+                    content.append(_preview_image(Path(image[name + "_path"])))
         for pose in item.get("human_pose", []):
             frame = pose["frame"]
             label = f"{pose.get('evidence_kind', 'observed_2d')} {pose['track_id']}; profile {pose.get('keypoint_profile', 'coco17')}; reference {frame['reference_id']}"

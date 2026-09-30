@@ -90,6 +90,7 @@ class WorkspaceGateway:
         result["events_cursor"] = result.pop("event_seq")
         result["object_prompts_supported"] = True
         result["inline_references_supported"] = True
+        result["image_references_supported"] = True
         result["dynamic_scenes_supported"] = True
         result["human_pose_supported"] = self.pose_jobs is not None
         result["human_pose_inference_supported"] = False
@@ -1564,7 +1565,7 @@ class WorkspaceGateway:
         if feedback.get("inline_references"):
             lines.append("用户原话中的引用（对应本次提交时的场景对象、查看器节点或标记；原话仍以用户表述为准）：")
             for item in feedback["inline_references"]:
-                target_key = {"object": "object", "annotation": "annotation", "node": "scene_node"}.get(item.get("kind"), "")
+                target_key = {"object": "object", "annotation": "annotation", "node": "scene_node", "image": "image"}.get(item.get("kind"), "")
                 target = item.get(target_key)
                 lines.append(f"{item['token']} → " + json.dumps(target, ensure_ascii=False))
                 if item.get("from_stale_snapshot"):
@@ -1618,6 +1619,16 @@ class WorkspaceGateway:
                 add(label, feedback[key])
         for crop in feedback.get("crops", []):
             add(f"{crop['source']} 局部放大图", crop["url"])
+        for image in feedback.get("image_refs", []):
+            lines.append("提示中引用的独立图像证据：" + json.dumps({key: value for key, value in image.items() if not key.endswith("_url")}, ensure_ascii=False))
+            label = f"[[image:{image['id']}]] · {image['label']}"
+            add("引用图像原图：" + label, image["original_url"])
+            if image.get("display_original_url"):
+                add("用户拖入时的干净显示图：" + label, image["display_original_url"])
+            if image.get("annotated_url"):
+                add("引用图像上的用户标记：" + label, image["annotated_url"])
+            if image.get("from_stale_snapshot"):
+                lines.append(f"该图片固定于场景版本 {image['scene_revision']}，独立于本轮反馈版本 {feedback['scene_revision']}；请按图片自己的相机解读。")
         for pose in feedback.get("human_pose", []):
             frame = pose["frame"]
             label = pose["track_id"]
