@@ -24,15 +24,18 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 
 ## 从侧边栏上传压缩包
 
-上一版 `0.1.0` 是未经侧边栏实际验收的本地插件源码包。`0.1.1` 补齐详细介绍、
-方形 logo 和输入框图标，并在 ZIP 中生成同一插件根目录下的
-`.codex-plugin/plugin.json` 与 `.mcp.json` 兼容文件。源文件仍以 `plugin.json`
-和 `mcp.json` 为准，配置项目时会同时更新兼容文件。
+`0.1.0` 与 `0.1.1` 只覆盖了本地加载验证。进一步调用 Codex 桌面后端的
+私有插件新建接口时，旧包返回 HTTP 400：`Expected a single plugin archive`。
+旧包把仓库的 `.agents/plugins/marketplace.json` 一起装入了单插件归档；这个清单
+属于本地市场发现配置，上传包不应携带。`0.1.2` 从分发包中排除市场清单，同时
+保留完整 MCP、技能、详细介绍、图标，以及 `.codex-plugin/plugin.json` 和
+`.mcp.json` 兼容文件。仓库及配置出的本地安装目录仍可使用本地市场清单。
 
-请选择新的 `0.1.1` ZIP 重试。如果界面只提示「无法添加插件」，该提示本身不能
-证明是哪条规则失败；应保留具体校验错误或上传请求的响应，继续定位。
-官方 [上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)
-列出了详细介绍、logo、输入框图标及包内资源的校验要求。
+请使用 `0.1.2` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
+上传请求的响应；本地 `plugin/read` 成功不能代替云端归档导入验证。
+官方 [包结构说明](https://developers.openai.com/plugins/build/plugins) 区分了
+单插件分发包和本地市场目录；[上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)
+中的公共目录上架要求也不能直接作为个人侧边栏错误的原因。
 
 上传成功与 MCP 可运行是两个验收步骤。原始 ZIP 中的本地 stdio MCP 没有默认
 项目；安装环境需要读取实际工作台的数据目录并按下文配置。若宿主运行在云端，
@@ -40,10 +43,10 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 及真实连接设置。不要将控制令牌放进上传包，也不要把移除 MCP 的技能包当作
 已经接入视觉反馈工具的版本。
 
-当前官方 [上传流程](https://developers.openai.com/plugins/deploy/submission)
-要求带 MCP 的目录提交在初次 ZIP 中保留 MCP 声明并完成服务连接。
-侧边栏个人安装、公共目录提交和本地 marketplace 的验收要求可能不同；
-本版本已覆盖本地包检查，侧边栏是否成功导入仍以该界面的实际结果为准。
+需要在 ChatGPT 注册 MCP 连接时，使用「创建 MCP 应用」并提供可访问的 HTTPS
+端点或 Secure MCP Tunnel，见 [连接与测试](https://developers.openai.com/plugins/deploy/connect-chatgpt)。
+公共目录上架另有 [提交流程](https://developers.openai.com/plugins/deploy/submission)。
+个人侧边栏安装、本地市场安装、公共目录上架和事件回调应分别验收。
 
 ## 安装到本地 Codex
 
@@ -90,7 +93,8 @@ python3 scripts/build_plugin.py --source dist/local-plugin --output dist/project
 
 ZIP 内只有一个 `scene-feedback-harness/` 目录，包含插件身份、技能、桥接程序、
 工作台运行源文件和说明。文件排序与时间戳固定；不打包 `.venv`、`.git`、测试、
-素材或工作台数据。接收机器仍需安装 Python 依赖并启动工作台服务；人体推理环境
+素材、工作台数据或本地 marketplace 清单。配置脚本单独生成供本地安装使用的
+清单，重建该安装目录的 ZIP 时仍会排除它。接收机器仍需安装 Python 依赖并启动工作台服务；人体推理环境
 按 README 单独配置。打包不会替用户托管或注册服务。
 
 ## 接入支持 Events 的宿主

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
-from build_plugin import COMPAT_MANIFEST, FIXED_FILES, MCP_SCHEMA, NAME, PLUGIN_SCHEMA, runtime_files, sync_compatibility, validate_package, write_zip
-from configure_plugin import configure
+import configure_plugin
+from build_plugin import COMPAT_MANIFEST, FIXED_FILES, MARKETPLACE_CATALOG_PATHS, MCP_SCHEMA, NAME, PLUGIN_SCHEMA, runtime_files, sync_compatibility, validate_package, write_zip
+from configure_plugin import authoring_catalog, configure
 
 
 class PluginPackageTests(unittest.TestCase):
@@ -70,6 +74,84 @@ class PluginPackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Disallowed"):
             validate_package({**self.files, "../escape.py": b"invalid"})
 
+    def test_repository_marketplace_is_excluded_from_single_plugin_zip(self):
+        catalog = self.root / ".agents" / "plugins" / "marketplace.json"
+        catalog.parent.mkdir(parents=True)
+        content = json.dumps({"name": "local-review", "plugins": [{"name": NAME, "source": "../../"}]}).encode()
+        catalog.write_bytes(content)
+        files = runtime_files(self.root)
+        self.assertEqual(files, self.files)
+        self.assertEqual(catalog.read_bytes(), content)
+        archive_path = self.root / "single-plugin.zip"
+        write_zip(files, archive_path)
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertFalse(any(name.endswith("marketplace.json") for name in archive.namelist()))
+
+    def test_nested_marketplace_catalogs_are_rejected(self):
+        for catalog in MARKETPLACE_CATALOG_PATHS:
+            for prefix in ((), ("web", "vendor")):
+                relative = "/".join((*prefix, *catalog))
+                with self.subTest(catalog=relative):
+                    files = {**self.files, relative: b'{"plugins": []}'}
+                    with self.assertRaisesRegex(ValueError, "single-plugin archive"):
+                        validate_package(files)
+                    output = self.root / "invalid.zip"
+                    with self.assertRaisesRegex(ValueError, "single-plugin archive"):
+                        write_zip(files, output)
+                    self.assertFalse(output.exists())
+            # Recursive runtime collection must catch a catalog hidden in assets,
+            # skills or web rather than letting it enter a distributable ZIP.
+            for directory in ("web", "skills", "assets"):
+                path = self.root / directory / Path(*catalog)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{"plugins": []}')
+                with self.assertRaisesRegex(ValueError, "single-plugin archive"):
+                    runtime_files(self.root)
+                path.unlink()
+
+    def test_authoring_catalog_copies_valid_source_or_generates_for_extracted_package(self):
+        generated = authoring_catalog(self.root)
+        self.assertEqual(generated["plugins"][0]["source"], {"source": "local", "path": "./"})
+        catalog = self.root / ".agents" / "plugins" / "marketplace.json"
+        catalog.parent.mkdir(parents=True)
+        generated["interface"]["displayName"] = "Existing local catalog"
+        catalog.write_text(json.dumps(generated))
+        self.assertEqual(authoring_catalog(self.root), generated)
+        generated["plugins"][0]["source"]["path"] = "../../another-plugin"
+        catalog.write_text(json.dumps(generated))
+        with self.assertRaisesRegex(ValueError, "only the configured plugin"):
+            authoring_catalog(self.root)
+        catalog.write_text("[]")
+        with self.assertRaisesRegex(ValueError, "only the configured plugin"):
+            authoring_catalog(self.root)
+
+    def test_configuration_cli_writes_authoring_catalog_separately_from_runtime_zip(self):
+        data, project = self.root / "data", self.root / "project"
+        data.mkdir()
+        project.mkdir()
+        modes = {
+            "local": ["--project-id", "a" * 32, "--data-dir", str(data),
+                      "--project-dir", str(project), "--port", "18769"],
+            "hosted": ["--app-id", "plugin_asdk_app_registered_test"],
+        }
+        for mode, arguments in modes.items():
+            with self.subTest(mode=mode):
+                output = self.root / mode
+                argv = ["configure_plugin.py", *arguments, "--output", str(output)]
+                with patch.object(configure_plugin, "ROOT", self.root), \
+                        patch.object(configure_plugin, "runtime_files", return_value=self.files), \
+                        patch("sys.argv", argv), redirect_stdout(io.StringIO()):
+                    self.assertEqual(configure_plugin.main(), 0)
+                catalog = output / ".agents" / "plugins" / "marketplace.json"
+                self.assertEqual(json.loads(catalog.read_bytes()), authoring_catalog(self.root))
+                files = runtime_files(output)
+                self.assertNotIn(".agents/plugins/marketplace.json", files)
+                validate_package(files)
+                archive_path = self.root / f"{mode}.zip"
+                write_zip(files, archive_path)
+                with zipfile.ZipFile(archive_path) as archive:
+                    self.assertFalse(any(name.endswith("marketplace.json") for name in archive.namelist()))
+
     def test_local_configuration_preserves_project_identity_without_token(self):
         data, project = self.root / "data", self.root / "project"
         data.mkdir()
@@ -87,6 +169,12 @@ class PluginPackageTests(unittest.TestCase):
         for url in ("http://192.168.3.157:18769/p/" + "a" * 32 + "/mcp", "https://example.com/p/" + "b" * 32 + "/mcp"):
             with self.assertRaises(ValueError):
                 configure(self.files, project_id="a" * 32, data_dir=data, project_dir=project, port=18769, mcp_url=url)
+        local = self.root / "local"
+        for relative, content in result.items():
+            path = local / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        self.assertEqual(runtime_files(local), result)
 
     def test_hosted_mapping_has_no_local_server_or_registration_side_effect(self):
         result = configure(self.files, app_id="plugin_asdk_app_registered_test")

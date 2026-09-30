@@ -16,12 +16,17 @@ NAME = "scene-feedback-harness"
 PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 COMPAT_MANIFEST = ".codex-plugin/plugin.json"
+MARKETPLACE_CATALOG_PATHS = (
+    (".agents", "plugins", "marketplace.json"),
+    (".claude-plugin", "marketplace.json"),
+    (".codex-plugin", "marketplace.json"),
+)
 FIXED_FILES = (
     "plugin.json", "mcp.json", "LICENSE", "README.md", "README.en.md",
     "README.ja.md", "README.ko.md", "README.ru.md", "CHANGELOG.md", "CONTRIBUTING.md", "preview.png",
     "docs/mcp-events-plugin.md", "scripts/plugin_bridge.py",
     "scripts/run_pose_worker.py", "scripts/build_plugin.py",
-    "scripts/configure_plugin.py", ".agents/plugins/marketplace.json",
+    "scripts/configure_plugin.py",
 )
 
 
@@ -148,6 +153,11 @@ def validate_package(files: dict[str, bytes]) -> None:
         raise ValueError("Hosted package must not include a legacy local bridge")
     for name in files:
         path = Path(name)
+        # Catalogs describe a collection of plugins. They belong in the source
+        # checkout, never inside an archive submitted as one plugin. Check
+        # suffixes too, since runtime directories can contain nested catalogs.
+        if any(path.parts[-len(catalog):] == catalog for catalog in MARKETPLACE_CATALOG_PATHS):
+            raise ValueError(f"A single-plugin archive cannot contain a marketplace catalog: {name}")
         if path.is_absolute() or ".." in path.parts or any(part in {".venv", ".git", "__pycache__", "data", "tests"} for part in path.parts):
             raise ValueError(f"Disallowed package path: {name}")
         if path.name in {"control_token", "auth.json", "connection.json"}:

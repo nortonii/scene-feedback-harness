@@ -9,7 +9,39 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
-from build_plugin import ROOT, json_bytes, runtime_files, sync_compatibility, validate_package
+from build_plugin import NAME, ROOT, json_bytes, runtime_files, sync_compatibility, validate_package
+
+
+def authoring_catalog(root: Path = ROOT) -> dict:
+    """Make a local installation catalog separately from distributable files."""
+    path = root / ".agents" / "plugins" / "marketplace.json"
+    if path.exists():
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Local authoring catalog must be a regular file")
+        try:
+            catalog = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise ValueError("Local authoring catalog must be valid JSON") from exc
+    else:
+        # A single-plugin ZIP intentionally omits the repository's catalog.
+        # Regenerate it when the user configures an extracted package locally.
+        catalog = {
+            "name": "scene-feedback-local",
+            "interface": {"displayName": "Scene Feedback Local"},
+            "plugins": [{
+                "name": NAME, "source": {"source": "local", "path": "./"},
+                "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+                "category": "Productivity",
+            }],
+        }
+    plugins = catalog.get("plugins") if isinstance(catalog, dict) else None
+    if (not isinstance(catalog, dict) or catalog.get("name") != "scene-feedback-local" or not isinstance(plugins, list)
+            or len(plugins) != 1 or not isinstance(plugins[0], dict)
+            or plugins[0].get("name") != NAME
+            or plugins[0].get("source") != {"source": "local", "path": "./"}
+            or plugins[0].get("policy") != {"installation": "AVAILABLE", "authentication": "ON_INSTALL"}):
+        raise ValueError("Local authoring catalog must reference only the configured plugin directory")
+    return catalog
 
 
 def configure(files: dict[str, bytes], *, project_id: str | None = None,
@@ -81,6 +113,7 @@ def main() -> int:
         files = configure(runtime_files(), project_id=args.project_id, data_dir=args.data_dir,
                           project_dir=args.project_dir, port=args.port,
                           mcp_url=args.mcp_url, app_id=args.app_id)
+        catalog = authoring_catalog(ROOT)
     except ValueError as exc:
         parser.error(str(exc))
     output.mkdir(parents=True, exist_ok=True)
@@ -88,6 +121,9 @@ def main() -> int:
         path = output / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
+    catalog_path = output / ".agents" / "plugins" / "marketplace.json"
+    catalog_path.parent.mkdir(parents=True, exist_ok=True)
+    catalog_path.write_bytes(json_bytes(catalog))
     mode = "hosted connection mapping" if args.app_id else "local project bridge"
     print(f"Configured {output} ({mode}; no credentials copied)")
     return 0
