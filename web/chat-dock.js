@@ -17,6 +17,9 @@ export function setupChatDock({getState}) {
   let resizeDrag = null;
   let resizeFrame = 0;
   let lastHeightBounds = {min:1, max:window.innerHeight};
+  let launcherStatus = '';
+  const visibilityTransitions = new Map();
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   const historyVisible = () => !!dock && !collapsed && !historyCollapsed;
   const atLatest = () => !conversation ||
@@ -43,7 +46,8 @@ export function setupChatDock({getState}) {
       unreadCount.classList.toggle('hidden', !unread);
     }
     if (launcher) {
-      launcher.setAttribute('aria-label', '打开会话' + (unread ? '，' + unread + ' 条新消息' : ''));
+      launcher.setAttribute('aria-label', '打开会话' + (launcherStatus ? '，' + launcherStatus : '') +
+        (unread ? '，' + unread + ' 条新消息' : ''));
       launcher.classList.toggle('has-unread', !!unread);
     }
     if (historyToggle) {
@@ -152,9 +156,46 @@ export function setupChatDock({getState}) {
     persist();
   }
 
-  function applyLayout() {
-    dock?.classList.toggle('hidden', collapsed);
-    launcher?.classList.toggle('hidden', !collapsed);
+  function setVisible(element, visible, animate) {
+    if (!element) return;
+    const previous = visibilityTransitions.get(element);
+    if (animate && previous?.visible === visible) return;
+    // Read the current frame before cancelling, so reversing a transition does
+    // not jump back to its starting position or leave a late hide callback.
+    const style = getComputedStyle(element);
+    const offset = element === dock ? '0 8px' : '0 4px';
+    const start = {
+      opacity:element.classList.contains('hidden') ? '0' : style.opacity,
+      translate:element.classList.contains('hidden') ? offset : style.translate,
+    };
+    previous?.animation?.cancel();
+    element.inert = !visible;
+    element.setAttribute('aria-hidden', String(!visible));
+    element.classList.toggle('is-closing', !visible);
+    if (!animate || reducedMotion.matches || typeof element.animate !== 'function') {
+      element.classList.toggle('hidden', !visible);
+      element.classList.remove('is-transitioning');
+      visibilityTransitions.set(element, {visible});
+      return;
+    }
+    element.classList.remove('hidden');
+    element.classList.add('is-transitioning');
+    const animation = element.animate([start, {
+      opacity:visible ? '1' : '0', translate:visible ? '0 0' : offset,
+    }], {duration:visible ? 260 : 190, easing:'cubic-bezier(.22, 1, .36, 1)', fill:'both'});
+    visibilityTransitions.set(element, {visible, animation});
+    animation.finished.then(() => {
+      if (visibilityTransitions.get(element)?.animation !== animation) return;
+      element.classList.toggle('hidden', !visible);
+      element.classList.remove('is-transitioning');
+      visibilityTransitions.set(element, {visible});
+      animation.cancel();
+    }, () => { /* A reversed transition continues from its current frame. */ });
+  }
+
+  function applyLayout({animate=false}={}) {
+    setVisible(dock, !collapsed, animate);
+    setVisible(launcher, collapsed, animate);
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
@@ -181,7 +222,7 @@ export function setupChatDock({getState}) {
   function open({focus=false}={}) {
     if (collapsed) {
       collapsed = false;
-      applyLayout();
+      applyLayout({animate:true});
       persist();
     }
     if (focus) byId('feedback-note')?.focus({preventScroll:true});
@@ -218,15 +259,21 @@ export function setupChatDock({getState}) {
         waiting:'反馈已排队', disconnected:'Codex 连接中断', delivery_uncertain:'送达待核实',
         error:'Codex 执行出错', waiting_for_mcp:'等待 MCP 读取', external_idle:'等待 MCP 读取'})[status] || '正在连接';
     const compactStatus = byId('chat-status');
+    const running = !failed && state.sessionStatus === 'open' && (state.submitting || status === 'running');
     if (compactStatus) {
       compactStatus.textContent = label;
       compactStatus.title = state.networkError || state.agent?.error || byId('agent-status')?.textContent || label;
       compactStatus.classList.toggle('error', failed);
-      compactStatus.classList.toggle('running', !failed && (state.submitting || status === 'running'));
+      compactStatus.classList.toggle('running', running);
       compactStatus.classList.toggle('queued', !failed && ['awaiting_approval', 'waiting'].includes(status));
     }
     launcher?.classList.toggle('has-attention', failed || status === 'awaiting_approval');
-    if (launcher) launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
+    launcherStatus = label;
+    if (launcher) {
+      launcher.classList.toggle('is-running', running);
+      launcher.setAttribute('aria-busy', String(running));
+      launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
+    }
     updateCounts();
   }
 
@@ -276,6 +323,9 @@ export function setupChatDock({getState}) {
     persist();
   });
   window.addEventListener('blur', () => finishResize());
+  reducedMotion.addEventListener('change', () => {
+    if (reducedMotion.matches) applyLayout();
+  });
   window.addEventListener('resize', scheduleHeightUpdate);
   window.visualViewport?.addEventListener('resize', scheduleHeightUpdate);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
@@ -291,7 +341,7 @@ export function setupChatDock({getState}) {
     finishResize();
     rememberScroll();
     collapsed = true;
-    applyLayout();
+    applyLayout({animate:true});
     persist();
     launcher?.focus({preventScroll:true});
   });

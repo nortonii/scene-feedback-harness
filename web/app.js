@@ -6,6 +6,8 @@ import { setupMinimalLayout } from './layout.js';
 import { setupWorkspaceControls } from './workspace-controls.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { eraserHitsAnnotation } from './eraser.js';
+import { assignAnnotationNames } from './annotation-names.js';
+import { drawAnnotationName, hitsAnnotationName } from './annotation-labels.js';
 import { createFrameImageCache } from './frame-image-cache.js';
 import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
 import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, drawPoseSkeleton, POSE_COLORS } from './human-pose.js';
@@ -102,7 +104,7 @@ const state = {
   humanPendingRequest:null, humanError:null, humanJobsSignature:null,
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
-  annotations:[], mode:'select', groupId:'', drag:null, textPending:null,
+  annotations:[], annotationNameCounters:{}, selectedAnnotationId:null, mode:'select', groupId:'', drag:null, textPending:null,
   sceneSnapshots:[], snapshot:null, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
   referencePanning:null, spacePan:false,
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
@@ -123,6 +125,11 @@ const frameImages = {
 
 let minimalLayout = null;
 let workspaceControls = null;
+let annotationReferenceDrag = null;
+const annotationDragGhost = document.createElement('div');
+annotationDragGhost.className = 'annotation-drag-ghost hidden';
+annotationDragGhost.setAttribute('aria-hidden', 'true');
+document.body.append(annotationDragGhost);
 const annotationHistory = createAnnotationHistory();
 const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#eae9e3');
@@ -206,12 +213,21 @@ async function api(path, options={}) {
 }
 
 function storageKey() { return 'astra-visual-draft:' + state.sessionId; }
+function ensureAnnotationNames() {
+  const named = assignAnnotationNames(state.annotations, state.annotationNameCounters);
+  state.annotations = named.annotations;
+  state.annotationNameCounters = named.counters;
+  if (state.sessionId) {
+    try { localStorage.setItem('astra-annotation-names:' + state.sessionId, JSON.stringify(named.counters)); }
+    catch { /* Naming still works for this page when storage is unavailable. */ }
+  }
+}
 function saveDraft() {
   clearTimeout(state.timelineSaveTimer); state.timelineSaveTimer = null;
   if (!state.sessionId || state.sceneRevision === null || state.playing) return;
   try {
     localStorage.setItem(storageKey(), JSON.stringify({
-      annotations:state.annotations, selectedId:state.selectedId,
+      annotations:state.annotations, annotationNameCounters:state.annotationNameCounters, annotationMode:state.mode, selectedId:state.selectedId,
       selectedSceneNode:state.selectedSceneNode,
       lastPickedDetailNode:state.lastPickedDetailNode,
       selectionLevel:state.selectionLevel,
@@ -236,6 +252,15 @@ function saveDraft() {
 function restoreDraft() {
   try {
     const draft = JSON.parse(localStorage.getItem(storageKey()) || '{}');
+    let counters = {};
+    try { counters = JSON.parse(localStorage.getItem('astra-annotation-names:' + state.sessionId) || '{}'); }
+    catch { /* A broken naming preference must not discard the visual draft. */ }
+    state.annotationNameCounters = {...draft.annotationNameCounters};
+    for (const [type, value] of Object.entries(counters || {})) {
+      const saved = state.annotationNameCounters[type];
+      const previous = Number.isSafeInteger(saved) && saved >= 0 && saved <= 1e9 ? saved : 0;
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 1e9 && value > previous) state.annotationNameCounters[type] = value;
+    }
     if (Array.isArray(draft.annotations)) state.annotations = draft.annotations.filter((a) => a && labels[a.type] && ['reference','scene'].includes(a.pane) && a.coordinates);
     state.selectedId = typeof draft.selectedId === 'string' ? draft.selectedId : null;
     state.selectedSceneNode = draft.selectedSceneNode && Array.isArray(draft.selectedSceneNode.node_path)
@@ -261,6 +286,7 @@ function restoreDraft() {
     if (draft.snapshot?.data_url?.startsWith('data:image/jpeg;base64,') && Number.isInteger(draft.snapshot.scene_revision)) {
       state.snapshot = draft.snapshot;
       state.sceneView = draft.sceneView === 'live' ? 'live' : 'snapshot';
+      state.mode = ['select','point','rectangle','line','arrow','text','freehand','erase'].includes(draft.annotationMode) ? draft.annotationMode : 'rectangle';
     } else if (!draft.sceneSnapshotIds?.length) {
       // Old drafts had scene marks without a fixed image; they cannot be mapped reliably.
       state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
@@ -293,6 +319,7 @@ function restoreDraft() {
       state.firstFrame = false;
     }
   } catch { /* Ignore a stale or corrupt local draft. */ }
+  ensureAnnotationNames();
 }
 
 function editable() { return state.workspaceReady && Number.isInteger(state.sceneRevision) && state.sessionStatus === 'open' && !state.sceneLoading && !state.submitting && !state.uploading && !state.pendingSubmission && !state.creatingProject && !state.navigatingProject; }
@@ -354,7 +381,7 @@ function removeAnnotation(annotationId) {
   renderAnnotations(); drawOverlays(); saveDraft();
 }
 function setSession(session) {
-  if (state.sessionId !== session.session_id) annotationHistory.clear();
+  if (state.sessionId !== session.session_id) { annotationHistory.clear(); state.annotationNameCounters = {}; state.selectedAnnotationId = null; }
   state.sessionId = session.session_id;
   restoreComparePreferences();
   state.sessionStatus = session.status || 'open';
@@ -2081,6 +2108,7 @@ function captureLiveScene({includeSize=false}={}) {
 }
 function enterSnapshotAnnotation() {
   if (!editable() || state.sceneView === 'snapshot') return;
+  if (state.mode === 'select') state.mode = 'rectangle';
   prepareSceneAnnotation();
 }
 async function openSavedSnapshot() {
@@ -2097,6 +2125,7 @@ function freezeScene() {
   if (dynamicEnabled()) { ensureDynamicMoment({showSnapshot:true}); return; }
   if (state.sceneSnapshots.length >= 8) { announce('最多保留 8 张截图，请先删除一张再截取。', true); return; }
   const before = annotationEditState();
+  if (state.mode === 'select') state.mode = 'rectangle';
   settleOrbit();
   const shot = captureLiveScene({includeSize:true});
   state.snapshot = {
@@ -2248,8 +2277,6 @@ function renderSceneView({persist=true}={}) {
   const hasSnapshot = !!state.snapshot;
   if (!hasSnapshot) state.sceneView = 'live';
   const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
-  // Reload, undo and saved moments must also enter a usable annotation mode.
-  if (showingSnapshot && state.mode === 'select') state.mode = 'rectangle';
   if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
   ui.browse.setAttribute('aria-pressed', String(!showingSnapshot));
@@ -3355,7 +3382,8 @@ function updateSceneHint() {
       ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
       : '直接在渲染图上圈画，自动保留当前截图';
   } else if (state.mode === 'select') {
-    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「3D 浏览」可继续选择';
+    const selected = selectedAnnotation();
+    ui.sceneHint.textContent = selected?.pane === 'scene' ? selected.name + ' · Backspace 删除 · 拖到会话引用' : '点击标记选中 · 拖到会话引用 · 3D 浏览可旋转场景';
   } else {
     ui.sceneHint.textContent = '在场景上' +
       ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
@@ -3371,15 +3399,15 @@ function updateMode() {
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
   const drawing = state.mode !== 'select' && editable();
-  ui.referenceCanvas.style.pointerEvents = drawing ? 'auto' : 'none';
-  ui.sceneCanvas.style.pointerEvents = drawing && state.sceneView === 'snapshot' ? 'auto' : 'none';
-  const cursor = drawing ? (state.mode === 'erase' ? '' : 'crosshair') : 'default';
+  ui.referenceCanvas.style.pointerEvents = editable() ? 'auto' : 'none';
+  ui.sceneCanvas.style.pointerEvents = editable() && state.sceneView === 'snapshot' ? 'auto' : 'none';
+  const cursor = drawing ? (state.mode === 'erase' ? '' : 'crosshair') : 'pointer';
   ui.referenceCanvas.style.cursor = cursor;
   ui.sceneCanvas.style.cursor = cursor;
   renderer.domElement.style.cursor = drawing && state.sceneView === 'live' ? (state.mode === 'erase' ? 'not-allowed' : 'crosshair') : '';
-  ui.referenceHint.textContent = state.mode === 'erase' ? '划过标记擦除整条 · 可撤销' : '在图片上圈出想让 Codex 注意的地方';
+  updateAnnotationSelectionHint();
   controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
-  ui.referenceHint.classList.toggle('hidden', !drawing || !activeReference());
+  ui.referenceHint.classList.toggle('hidden', !activeReference());
   updateSceneHint();
   state.drag = null;
   drawOverlays();
@@ -3390,10 +3418,14 @@ function setMode(mode) {
   state.mode = mode;
   if (mode !== 'select') pauseTimeline();
   hideTextEditor();
-  if (mode === 'select' && state.sceneView === 'snapshot') {
-    state.sceneView = 'live';
-    renderSceneView();
-  } else updateMode();
+  finishAnnotationReferenceDrag();
+  if (mode !== 'select') state.selectedAnnotationId = null;
+  updateMode(); saveDraft();
+}
+function browseScene() {
+  if (!editable()) return;
+  state.sceneView = 'live'; state.selectedAnnotationId = null;
+  setMode('select'); renderSceneView();
 }
 function updateSelectionLevelControls() {
   document.querySelectorAll('[data-selection-level]').forEach((button) => {
@@ -3415,7 +3447,7 @@ function setSelectionLevel(level) {
     state.selectedSceneNode = nodeReference(state.selectedId, detail, level);
     renderSelection();
   }
-  setMode('select');
+  browseScene();
   updateSceneHint();
   saveDraft();
 }
@@ -3456,6 +3488,7 @@ function addAnnotation(annotation) {
     if (frameIndex !== null) item.frame_index = frameIndex;
   }
   state.annotations.push(item);
+  ensureAnnotationNames();
   recordAnnotationEdit(before);
   renderAnnotations();
   drawOverlays();
@@ -3481,6 +3514,104 @@ function annotationVisibleInPane(annotation, pane) {
   if (annotation.reference_image_id !== state.activeReferenceId) return false;
   return !annotation.frame_id || (!state.playing && annotation.frame_id === state.snapshot?.id && Math.abs(annotation.time_sec - state.time) < 1e-6);
 }
+function selectedAnnotation() {
+  const mark = state.annotations.find(mark => mark.id === state.selectedAnnotationId);
+  return mark && annotationVisibleInPane(mark,mark.pane) ? mark : null;
+}
+function updateAnnotationSelectionHint() {
+  const mark = selectedAnnotation();
+  ui.referenceHint.textContent = state.mode === 'erase' ? '划过标记擦除整条 · 可撤销'
+    : state.mode !== 'select' ? '在图片上圈出想让 Codex 注意的地方'
+    : mark?.pane === 'reference' ? mark.name + ' · Backspace 删除 · 拖到会话引用'
+    : '点击标记选中 · 拖到会话引用 · 空白处拖动平移';
+  for (const button of ui.annotationList.querySelectorAll('[data-annotation-id]')) {
+    button.setAttribute('aria-pressed', String(button.dataset.annotationId === mark?.id));
+  }
+  for (const [canvas,pane,label] of [[ui.referenceCanvas,'reference','参考图片标注层'],[ui.sceneCanvas,'scene','场景截图标注层']]) {
+    canvas.setAttribute('aria-label', label + (mark?.pane === pane ? '，已选中 ' + mark.name : ''));
+  }
+  updateSceneHint();
+}
+function annotationReferenceLabel(annotation) {
+  const ref = [...state.references,...referenceViews().flatMap(view => view.frames)].find(item => item.id === annotation.reference_image_id);
+  const location = [annotation.pane === 'reference' ? '参考图' + (ref?.name ? ' ' + ref.name : '') : '',annotationTimeLabel(annotation)].filter(Boolean).join(' · ');
+  return annotation.name + (location ? '（' + location + '）' : '');
+}
+function insertAnnotationReference(annotation) {
+  return insertNoteReference(annotationReferenceLabel(annotation), `[[annotation:${annotation.id}]]`);
+}
+async function revealAnnotation(annotation) {
+  if (!editable()) return;
+  if (annotation.frame_id) await openMoment(annotation.frame_id);
+  else if (annotation.pane === 'scene') openSceneSnapshot(annotation.snapshot_id);
+  else {
+    pauseTimeline(); state.clipEnabled = false; state.activeReferenceId = annotation.reference_image_id;
+    state.referenceZoom = 1; state.referencePan = {x:0,y:0};
+    renderReferenceStrip(); showActiveReference();
+  }
+  setMode('select');
+  state.selectedAnnotationId = annotation.id;
+  minimalLayout?.closeReferences(); drawOverlays(); saveDraft();
+  (annotation.pane === 'scene' ? ui.sceneCanvas : ui.referenceCanvas).focus({preventScroll:true});
+}
+function selectAnnotationFromPointer(event,pane) {
+  if (pane === 'scene' && state.sceneView !== 'snapshot') return;
+  const canvas = event.currentTarget;
+  const point = pointFromPointer(event,canvas), rect = canvas.getBoundingClientRect();
+  const zoom = rect.width / canvas.clientWidth;
+  const scale = Math.max(1,Math.min(canvas.clientWidth,canvas.clientHeight)/550)*zoom;
+  const context = canvas.getContext('2d');
+  context.save(); context.font = 'bold ' + Math.round(13*scale/zoom) + 'px ' + annotationFontFamily;
+  const mark = [...state.annotations].reverse().find(mark => {
+    if (!annotationVisibleInPane(mark,pane)) return false;
+    const textWidth = mark.type === 'text' ? Math.min(context.measureText(String(mark.text||'').slice(0,100)).width,canvas.clientWidth-12)*zoom : 0;
+    return eraserHitsAnnotation(mark,point,point,{width:rect.width,height:rect.height,scale,textWidth,radius:5}) ||
+      hitsAnnotationName(context,mark,point,point,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius:3});
+  });
+  context.restore();
+  state.selectedAnnotationId = mark?.id || null;
+  canvas.focus({preventScroll:true}); drawOverlays();
+  if (!mark) return;
+  event.preventDefault(); event.stopPropagation();
+  canvas.setPointerCapture(event.pointerId);
+  annotationReferenceDrag = {pointerId:event.pointerId,canvas,id:mark.id,x:event.clientX,y:event.clientY,dragging:false};
+}
+function overAnnotationDropTarget(event) {
+  const dock = id('chat-dock');
+  if (dock.inert || dock.classList.contains('hidden')) return false;
+  const rect = dock.getBoundingClientRect();
+  return event.clientX >= rect.left && event.clientX <= rect.right && event.clientY >= rect.top && event.clientY <= rect.bottom;
+}
+function moveAnnotationReferenceDrag(event) {
+  const drag = annotationReferenceDrag;
+  if (!drag || drag.pointerId !== event.pointerId) return false;
+  if (!editable() || !selectedAnnotation()) { finishAnnotationReferenceDrag(); return true; }
+  if (!drag.dragging && Math.hypot(event.clientX-drag.x,event.clientY-drag.y) < 6) return true;
+  if (!drag.dragging) { drag.dragging = true; minimalLayout?.openChat(); }
+  event.preventDefault(); event.stopPropagation();
+  const mark = selectedAnnotation(), over = overAnnotationDropTarget(event);
+  document.body.classList.add('dragging-annotation-reference');
+  id('chat-dock').classList.add('annotation-drop-target');
+  id('chat-dock').classList.toggle('annotation-drop-over',over);
+  annotationDragGhost.classList.remove('hidden');
+  annotationDragGhost.textContent = mark.name + (over ? ' · 松开引用' : ' · 拖到会话引用');
+  annotationDragGhost.style.left = clamp(event.clientX+14,8,window.innerWidth-annotationDragGhost.offsetWidth-8) + 'px';
+  annotationDragGhost.style.top = clamp(event.clientY+14,8,window.innerHeight-40) + 'px';
+  return true;
+}
+function finishAnnotationReferenceDrag(event=null) {
+  const drag = annotationReferenceDrag;
+  if (!drag) return;
+  annotationReferenceDrag = null;
+  if (drag.canvas.hasPointerCapture(drag.pointerId)) drag.canvas.releasePointerCapture(drag.pointerId);
+  const mark = state.annotations.find(mark => mark.id === drag.id);
+  const dropped = event && event.pointerId === drag.pointerId && drag.dragging && overAnnotationDropTarget(event);
+  annotationDragGhost.classList.add('hidden');
+  document.body.classList.remove('dragging-annotation-reference');
+  id('chat-dock').classList.remove('annotation-drop-target','annotation-drop-over');
+  if (dropped && mark && editable() && annotationVisibleInPane(mark,mark.pane)) insertAnnotationReference(mark);
+}
+
 function sweepEraser(to, canvas) {
   const drag = state.drag;
   const rect = canvas.getBoundingClientRect();
@@ -3492,12 +3623,15 @@ function sweepEraser(to, canvas) {
   for (const mark of state.annotations) {
     if (drag.erased.has(mark.id) || !annotationVisibleInPane(mark, drag.pane)) continue;
     const textWidth = mark.type === 'text' ? Math.min(context.measureText(String(mark.text || '').slice(0,100)).width, canvas.clientWidth - 12) * zoom : 0;
-    if (eraserHitsAnnotation(mark, drag.end, to, {width:rect.width, height:rect.height, scale, textWidth, radius:workspaceControls.eraserRadius()})) drag.erased.add(mark.id);
+    const radius = workspaceControls.eraserRadius();
+    if (eraserHitsAnnotation(mark, drag.end, to, {width:rect.width, height:rect.height, scale, textWidth, radius}) ||
+        hitsAnnotationName(context,mark,drag.end,to,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius})) drag.erased.add(mark.id);
   }
   context.restore(); drag.end = to;
 }
 function annotationPointerDown(event, pane) {
-  if (!editable() || state.mode === 'select' || state.spacePan || event.button !== 0) return;
+  if (!editable() || state.spacePan || event.button !== 0) return;
+  if (state.mode === 'select') { selectAnnotationFromPointer(event,pane); return; }
   if (pane === 'reference' && !activeReference()) return;
   const canvas = event.currentTarget;
   // Preserve the clicked pixel before saving a moment can resize the timeline.
@@ -3522,6 +3656,7 @@ function annotationPointerDown(event, pane) {
   drawOverlays();
 }
 function annotationPointerMove(event) {
+  if (moveAnnotationReferenceDrag(event)) return;
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   if (state.drag.type === 'erase') {
     if (!editable()) { state.drag = null; drawOverlays(); return; }
@@ -3535,6 +3670,7 @@ function annotationPointerMove(event) {
   drawOverlays();
 }
 function annotationPointerUp(event) {
+  if (annotationReferenceDrag?.pointerId === event.pointerId) { finishAnnotationReferenceDrag(event); return; }
   if (!editable()) { state.drag = null; drawOverlays(); return; }
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   const drag = state.drag;
@@ -3588,14 +3724,14 @@ function saveTextAnnotation() {
   hideTextEditor();
 }
 
-function drawAnnotation(ctx, annotation, width, height, preview=false) {
+function drawAnnotation(ctx, annotation, width, height, preview=false, selected=false) {
   const p = annotation.coordinates || {};
   const x = clamp(Number(p.x) || 0, 0, 1) * width;
   const y = clamp(Number(p.y) || 0, 0, 1) * height;
   const x2 = clamp(Number(p.x2) || 0, 0, 1) * width;
   const y2 = clamp(Number(p.y2) || 0, 0, 1) * height;
   const stale = false;
-  const color = stale ? '#8a8a83' : '#bd4c37';
+  const color = selected ? '#171715' : stale ? '#8a8a83' : '#bd4c37';
   const scale = Math.max(1, Math.min(width, height) / 550);
   ctx.save();
   ctx.strokeStyle = color;
@@ -3652,6 +3788,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false) {
     ctx.fillText(circled[Number(annotation.group_id)], x - 3 * scale, y - 12 * scale);
   }
   ctx.restore();
+  if (!preview) drawAnnotationName(ctx,annotation,width,height,selected);
 }
 function prepareCanvas(canvas) {
   // clientWidth is the bitmap's untransformed size. Using the transformed
@@ -3672,13 +3809,16 @@ function prepareCanvas(canvas) {
   return {context, width:logicalWidth, height:logicalHeight};
 }
 function drawOverlays() {
+  if (!selectedAnnotation()) state.selectedAnnotationId = null;
+  updateAnnotationSelectionHint();
   for (const pane of ['reference','scene']) {
     const canvas = pane === 'reference' ? ui.referenceCanvas : ui.sceneCanvas;
+    canvas.dataset.selectedAnnotation = selectedAnnotation()?.pane === pane ? state.selectedAnnotationId : '';
     const surface = prepareCanvas(canvas);
     if (!surface) continue;
     for (const annotation of state.annotations) {
       if (!annotationVisibleInPane(annotation, pane) || state.drag?.erased?.has(annotation.id)) continue;
-      drawAnnotation(surface.context, annotation, surface.width, surface.height);
+      drawAnnotation(surface.context, annotation, surface.width, surface.height, false, annotation.id === state.selectedAnnotationId);
     }
     if (state.drag?.pane === pane && state.drag.type !== 'erase') {
       drawAnnotation(surface.context, {
@@ -3692,6 +3832,7 @@ function drawOverlays() {
   drawHumanPoseOverlay();
 }
 function renderAnnotations() {
+  ensureAnnotationNames();
   updateSubmitLabel();
   ui.annotationList.replaceChildren();
   ui.annotationCount.textContent = String(state.annotations.length);
@@ -3713,24 +3854,20 @@ function renderAnnotations() {
     glyph.textContent = glyphs[annotation.type] || '●';
     const copy = document.createElement('div');
     copy.className = 'annotation-copy';
-    const title = document.createElement('strong');
+    const title = document.createElement('button');
+    title.type = 'button'; title.className = 'annotation-select';
+    title.dataset.annotationId = annotation.id;
+    title.setAttribute('aria-pressed', String(annotation.id === state.selectedAnnotationId));
     const ref = [...state.references, ...referenceViews().flatMap((view) => view.frames)].find((item) => item.id === annotation.reference_image_id);
     title.textContent = (annotation.group_id ? circled[Number(annotation.group_id)] + ' ' : '') +
       (annotation.pane === 'reference' ? '参考图 · ' + (ref?.name || '图片') : '当前场景') +
-      ' · ' + (labels[annotation.type] || annotation.type) + (annotationTimeLabel(annotation) ? ' · ' + annotationTimeLabel(annotation) : '');
+      ' · ' + annotation.name + (annotationTimeLabel(annotation) ? ' · ' + annotationTimeLabel(annotation) : '');
     const subtitle = document.createElement('small');
     const stale = annotation.pane === 'scene' && annotation.scene_revision !== state.sceneRevision;
     subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
     if (stale) subtitle.classList.add('stale-label');
-    if (annotation.snapshot_id && !annotation.frame_id) {
-      title.style.cursor = 'pointer'; title.title = '打开这条标记所在的截图';
-      title.addEventListener('click', () => { openSceneSnapshot(annotation.snapshot_id); minimalLayout?.closeReferences(); });
-    }
-    if (annotation.frame_id) {
-      title.style.cursor = 'pointer';
-      title.title = '回到这条标记的时刻';
-      title.addEventListener('click', () => openMoment(annotation.frame_id));
-    }
+    title.title = '选中 ' + annotation.name;
+    title.addEventListener('click', () => revealAnnotation(annotation));
     copy.append(title, subtitle);
     const cite = document.createElement('button');
     cite.type = 'button';
@@ -3739,11 +3876,7 @@ function renderAnnotations() {
     cite.title = '在提示中引用这条标记';
     cite.disabled = !editable();
     cite.addEventListener('mousedown', (event) => event.preventDefault());
-    cite.addEventListener('click', () => insertNoteReference(
-      (annotation.group_id ? '标记' + circled[Number(annotation.group_id)] : '这条' + (labels[annotation.type] || '标记')) +
-        (annotationTimeLabel(annotation) ? '（' + annotationTimeLabel(annotation) + '）' : ''),
-      `[[annotation:${annotation.id}]]`
-    ));
+    cite.addEventListener('click', () => insertAnnotationReference(annotation));
     const remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'annotation-remove';
@@ -3856,8 +3989,7 @@ function insertNoteText(text, {replaceSelection=true}={}) {
   minimalLayout?.closeReferences();
   minimalLayout?.openChat();
   ui.note.setRangeText(insertion, start, end, 'end');
-  // Return to live picking after inserting a reference. The frozen annotated
-  // image remains available through the Back to annotation button.
+  // Selecting or quoting a mark preserves the current screenshot.
   setMode('select');
   ui.note.focus();
   saveDraft();
@@ -3871,11 +4003,7 @@ function insertAllAnnotationReferences() {
   const existing = new Set([...ui.note.value.matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
   const references = state.annotations.flatMap((annotation, index) => {
     if (existing.has(annotation.id)) return [];
-    const number = circled[Number(annotation.group_id)] || String(index + 1);
-    const pane = annotation.pane === 'reference' ? '参考图' : '场景';
-    const kind = labels[annotation.type] || '标记';
-    const timeLabel = annotationTimeLabel(annotation);
-    return [`标记${number}（${pane}·${kind}${timeLabel ? ' · ' + timeLabel : ''}） [[annotation:${annotation.id}]]`];
+    return [annotationReferenceLabel(annotation) + ` [[annotation:${annotation.id}]]`];
   });
   if (!references.length) {
     minimalLayout?.closeReferences(); minimalLayout?.openChat({focus:true});
@@ -4333,8 +4461,8 @@ function bindEvents() {
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
   ui.savedSnapshot.addEventListener('click', openSavedSnapshot);
   ui.captureScene.addEventListener('click', freezeScene);
-  ui.browse.addEventListener('click', () => { if (editable()) setMode('select'); });
-  ui.newSceneBadge.addEventListener('click', () => { if (editable()) setMode('select'); });
+  ui.browse.addEventListener('click', browseScene);
+  ui.newSceneBadge.addEventListener('click', browseScene);
   ui.snapshotButton.addEventListener('click', enterSnapshotAnnotation);
   ui.compareToggle?.addEventListener('click', toggleCompare);
   ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
@@ -4347,9 +4475,14 @@ function bindEvents() {
     canvas.addEventListener('pointermove', annotationPointerMove);
     canvas.addEventListener('pointerup', annotationPointerUp);
     canvas.addEventListener('pointercancel', () => {
+      finishAnnotationReferenceDrag();
       state.drag = null;
       drawOverlays();
     });
+  }
+  for (const canvas of [ui.referenceCanvas,ui.sceneCanvas]) {
+    canvas.tabIndex = 0;
+    canvas.addEventListener('lostpointercapture', () => finishAnnotationReferenceDrag());
   }
   ui.note.addEventListener('input', saveDraft);
   ui.note.addEventListener('keydown', (event) => {
@@ -4397,13 +4530,13 @@ function bindEvents() {
   });
   id('frame-button').addEventListener('click', () => {
     if (!editable()) return;
-    setMode('select');
+    browseScene();
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
     if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
     else if (state.selectedId) frameBox(objectBox(state.selectedId));
     else frameAll();
   });
-  id('reset-button').addEventListener('click', () => { if (editable()) { setMode('select'); frameAll(); } });
+  id('reset-button').addEventListener('click', () => { if (editable()) { browseScene(); frameAll(); } });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
   ui.annotationText.addEventListener('keydown', (event) => {
@@ -4416,7 +4549,7 @@ function bindEvents() {
     pointerDown = {x:event.clientX, y:event.clientY, button:event.button};
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
-    if (!pointerDown || pointerDown.button !== 0 || state.mode !== 'select') return;
+    if (!pointerDown || pointerDown.button !== 0 || state.mode !== 'select' || state.sceneView !== 'live') return;
     const distance = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
     pointerDown = null;
     if (distance < 5) handleSceneClick(event);
@@ -4449,6 +4582,13 @@ function bindEvents() {
         return;
       }
     }
+    if (event.key === 'Escape' && annotationReferenceDrag) { finishAnnotationReferenceDrag(); event.preventDefault(); return; }
+    if (['Backspace','Delete'].includes(event.key) && !event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey &&
+        !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false]), dialog[open]')) {
+      const mark = selectedAnnotation();
+      if (mark && editable()) { event.preventDefault(); removeAnnotation(mark.id); }
+      return;
+    }
     if (event.key === 'Escape' && state.drag?.type === 'erase') {
       state.drag = null; drawOverlays(); return;
     }
@@ -4462,17 +4602,14 @@ function bindEvents() {
       setMode(['select','point','rectangle','line','arrow','text','freehand','erase'][Number(event.key) - 1]);
     }
     if (event.key === 'Escape') {
-      state.drag = null;
+      state.drag = null; state.selectedAnnotationId = null;
       hideTextEditor();
       drawOverlays();
     }
-    if (event.key === 'Backspace' && state.annotations.length && editable()) {
-      event.preventDefault();
-      removeAnnotation(state.annotations.at(-1).id);
-    }
+
   });
   document.addEventListener('keyup', (event) => { if (event.code === 'Space') state.spacePan = false; });
-  window.addEventListener('blur', () => { state.spacePan = false; state.referencePanning = null; if (state.drag?.type === 'erase') { state.drag = null; drawOverlays(); } });
+  window.addEventListener('blur', () => { finishAnnotationReferenceDrag(); state.spacePan = false; state.referencePanning = null; if (state.drag?.type === 'erase') { state.drag = null; drawOverlays(); } });
   window.addEventListener('beforeunload', saveDraft);
   new ResizeObserver(updateReferenceGeometry).observe(ui.referenceStage);
   new ResizeObserver(resizeScene).observe(ui.sceneStage);

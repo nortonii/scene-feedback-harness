@@ -299,7 +299,7 @@ def verify_scene_modes(page, screenshots):
     assert draft(page)["snapshot"] == original["snapshot"]
     assert draft(page)["annotations"] == original["annotations"]
     # Draw another mark on the first view after browsing and capturing a second.
-    page.locator('[data-tool="point"]').click()
+    page.locator('button[data-tool="point"]').click()
     image = page.locator("#scene-snapshot-image").bounding_box()
     page.mouse.click(image["x"] + image["width"] * .7, image["y"] + image["height"] * .5)
     expect(page.locator("#annotation-count")).to_have_text("2")
@@ -355,7 +355,7 @@ def verify_scene_modes(page, screenshots):
 
 def verify_eraser(page, screenshots):
     def tool(name):
-        page.locator(f'[data-tool="{name}"]').click()
+        page.locator(f'button[data-tool="{name}"]').click()
 
     def position(selector, x, y):
         r = page.locator(selector).bounding_box()
@@ -466,12 +466,12 @@ def verify_workspace_controls(page, screenshots):
 
     page.locator("#chat-collapse").click()
     page.locator("#snapshot-button").click()
-    page.locator('[data-tool="point"]').click()
+    page.locator('button[data-tool="point"]').click()
     page.mouse.click(*center("#reference-annotations"))
     page.mouse.click(*center("#scene-annotations"))
     original = draft(page)
     snapshot_pixels = page.locator("#scene-snapshot-image").get_attribute("src")
-    page.locator('[data-tool="erase"]').click()
+    page.locator('button[data-tool="erase"]').click()
     eraser_size("Home")
     expect(page.locator("#eraser-size")).to_have_value("8")
     x, y = center("#scene-annotations")
@@ -561,7 +561,7 @@ def verify_workspace_controls(page, screenshots):
         assert_no_overflow()
         if width <= 640:
             expect(divider).to_be_hidden()
-        eraser_box = page.locator('[data-tool="erase"]').bounding_box()
+        eraser_box = page.locator('button[data-tool="erase"]').bounding_box()
         arrow_box = page.locator("#eraser-settings summary").bounding_box()
         assert abs(arrow_box["y"] - eraser_box["y"]) < 2
         assert 0 <= arrow_box["x"] - eraser_box["x"] - eraser_box["width"] <= 1
@@ -627,6 +627,8 @@ def verify_selection_panel(page, screenshots):
 
 
 def verify_overlay_toolbar(page, store, screenshots):
+    # Quoting a mark now keeps the snapshot; overlay comparison is explicitly live.
+    page.locator("#browse-button").click()
     toggle = page.locator("#compare-toggle")
     panel = page.locator("#compare-panel")
     slider = page.locator("#compare-opacity")
@@ -727,7 +729,7 @@ def verify_compact_header(page, store, screenshots):
         page.set_viewport_size({"width": width, "height": 900 if width > 640 else 844})
         page.wait_for_timeout(100)
         assert page.locator(".chat-dock-header").evaluate("el => el.scrollWidth <= el.clientWidth + 1")
-        for selector in ("#chat-history-toggle", "#references-dialog-button", "#chat-collapse"):
+        for selector in ("#chat-history-toggle", "#chat-collapse"):
             assert page.locator(selector).evaluate("""el => {
               const r=el.getBoundingClientRect(), h=el.closest('.chat-dock-header').getBoundingClientRect();
               const hit=document.elementFromPoint(r.x+r.width/2,r.y+2);
@@ -856,6 +858,7 @@ def verify_project_isolation(page, server, screenshots):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshots", type=Path)
+    parser.add_argument("--selection-only", action="store_true", help="Run only annotation selection and referencing checks.")
     parser.add_argument("--controls-only", action="store_true", help="Run only workspace size and layout controls.")
     parser.add_argument("--eraser-only", action="store_true", help="Run only the eraser interaction regression.")
     parser.add_argument("--baseline", action="store_true", help="Report original geometry only.")
@@ -920,6 +923,13 @@ def main():
                     browser.close()
                     return
 
+                if args.selection_only:
+                    from annotation_selection_checks import verify_annotation_selection
+                    verify_annotation_selection(page, screenshots)
+                    assert not errors, errors
+                    passed("named annotation selection, deletion and drag references")
+                    browser.close()
+                    return
                 if args.controls_only:
                     verify_workspace_controls(page, screenshots)
                     assert not errors, errors
@@ -938,6 +948,12 @@ def main():
                 passed("eraser sweeps only visible marks, preserves other screenshots, batches undo/redo, cancels previews and works after reference zoom and reload")
                 verify_workspace_controls(page, screenshots)
                 passed("eraser size changes real hit radius; gallery collapse, split dragging, keyboard and reload preserve screenshots and marks across desktop and mobile")
+                from annotation_selection_checks import verify_annotation_selection
+                verify_annotation_selection(page, screenshots)
+                passed("named marks remain selectable on screenshots, delete only selection, drag into chat and keep stable names across screenshots and reload")
+                from chat_activity_checks import verify_chat_activity
+                verify_chat_activity(page, store, screenshots)
+                passed("collapsed conversation reflects running status, smooth reversal and reduced motion while preserving draft, focus and viewport")
                 verify_selection_panel(page, screenshots)
                 passed("selecting a real GLB part leaves composer geometry unchanged; side panel inserts node references and clears selection")
                 expect(page.locator("#chat-dock")).to_be_visible()
@@ -946,9 +962,9 @@ def main():
                 expect(page.locator("#conversation")).to_contain_text("已调整柜子位置")
                 expect(page.locator(".feedback-heading")).to_be_hidden()
                 references = page.locator("#references-dialog-button")
-                assert references.evaluate("el => !!el.closest('.chat-dock-header')")
+                assert references.evaluate("el => !!el.closest('.tool-panel')")
                 reference_box = references.bounding_box()
-                header_box = page.locator(".chat-dock-header").bounding_box()
+                header_box = page.locator(".tool-panel").bounding_box()
                 assert reference_box["y"] >= header_box["y"] and reference_box["y"] + reference_box["height"] <= header_box["y"] + header_box["height"]
                 assert geometry(page)["scene-stage"]["height"] >= 650, geometry(page)
                 print(json.dumps({"workspace_geometry": geometry(page)}, ensure_ascii=False), flush=True)
@@ -991,7 +1007,7 @@ def main():
                 passed("collapsed preferences and draft survive reload independently of recorded history")
 
                 page.locator("#chat-collapse").click()
-                page.locator('[data-tool="rectangle"]').click()
+                page.locator('button[data-tool="rectangle"]').click()
                 stage = page.locator("#scene-stage").bounding_box()
                 page.mouse.move(stage["x"] + stage["width"] * .30, stage["y"] + stage["height"] * .35)
                 page.mouse.down()
@@ -1098,7 +1114,7 @@ def main():
                 first_view = draft(page)["snapshot"]
                 page.locator("#browse-button").click()
                 page.locator("#capture-scene-button").click()
-                page.locator('[data-tool="point"]').click()
+                page.locator('button[data-tool="point"]').click()
                 scene_box = page.locator("#scene-snapshot-image").bounding_box()
                 page.mouse.click(scene_box["x"] + scene_box["width"] * .72, scene_box["y"] + scene_box["height"] * .3)
                 expect(page.locator("#annotation-count")).to_have_text("2")
@@ -1161,9 +1177,9 @@ def main():
                 expect(page.locator("#queue-list")).to_contain_text("针对场景版本")
                 page.locator('[data-close-dialog="activity-dialog"]').click()
                 page.locator("#more-tools summary").click()
-                expect(page.locator('[data-tool="freehand"]')).to_be_visible()
+                expect(page.locator('button[data-tool="freehand"]')).to_be_visible()
                 page.keyboard.press("Escape")
-                expect(page.locator('[data-tool="freehand"]')).to_be_hidden()
+                expect(page.locator('button[data-tool="freehand"]')).to_be_hidden()
                 page.locator(".view-popover summary").click()
                 expect(page.locator("#reset-button")).to_be_visible()
                 page.keyboard.press("Escape")
@@ -1193,7 +1209,7 @@ def main():
                 page.locator("#snapshot-button").click()
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 moment = draft(page)["snapshot"]
-                page.locator('[data-tool="point"]').click()
+                page.locator('button[data-tool="point"]').click()
                 r = page.locator("#scene-annotations").bounding_box()
                 page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 saved_time = page.locator("#timeline-seek").input_value()
@@ -1205,7 +1221,7 @@ def main():
                 expect(page.locator("#timeline-seek")).to_have_value(current_time)
                 assert draft(page)["snapshot"]["id"] != moment["id"]
                 other_moment = draft(page)["snapshot"]["id"]
-                page.locator('[data-tool="point"]').click()
+                page.locator('button[data-tool="point"]').click()
                 r = page.locator("#scene-annotations").bounding_box()
                 page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 expect(page.locator("#annotation-count")).to_have_text("2")
@@ -1213,7 +1229,7 @@ def main():
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 assert draft(page)["snapshot"] == moment
-                page.locator('[data-tool="erase"]').click()
+                page.locator('button[data-tool="erase"]').click()
                 r = page.locator("#scene-annotations").bounding_box()
                 page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 expect(page.locator("#annotation-count")).to_have_text("1")
@@ -1256,7 +1272,7 @@ def main():
                           const r = el.getBoundingClientRect();
                           return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
                         }""")
-                    expect(page.locator('[data-tool="erase"]')).to_be_visible()
+                    expect(page.locator('button[data-tool="erase"]')).to_be_visible()
                     expect(page.locator("#projects-dialog-button")).to_be_visible()
                     expect(page.locator("#human-pose-panel summary")).to_be_visible()
                     page.locator("#human-pose-panel summary").click()

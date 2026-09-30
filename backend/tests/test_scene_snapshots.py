@@ -74,6 +74,23 @@ class SceneSnapshotTests(unittest.TestCase):
                     self.store.submit_feedback(self.session, payload)
         self.assertEqual(self.store.list_all_feedback(), [])
 
+    def test_annotation_names_survive_references_model_prompt_mcp_and_reload(self):
+        payload = self.payload()
+        for index, mark in enumerate(payload['annotations'], 1):
+            mark['name'] = f'点{index}'
+        packet = self.store.submit_feedback(self.session, payload)
+        self.assertEqual(packet['annotations'], payload['annotations'])
+        self.assertEqual([item['annotation']['name'] for item in packet['inline_references']], ['点1', '点2'])
+        message, _ = self.gateway._turn_input(packet)
+        for name in ('点1', '点2'):
+            self.assertIn(f'"name": "{name}"', message)
+        with patch.object(mcp_server, 'DATA_DIR', self.store.data_dir):
+            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]})
+        self.assertEqual(result.structured_content['items'][0]['annotations'], payload['annotations'])
+        saved = SceneStore(self.store.data_dir).feedback_by_id(packet['feedback_id'])
+        self.assertEqual(saved['annotations'], payload['annotations'])
+        self.assertEqual(saved['inline_references'], packet['inline_references'])
+
     def test_mixed_static_and_dynamic_versions_preserve_oldest_revision(self):
         self.store.state['scene']['revision'] = 2
         self.store._save()
