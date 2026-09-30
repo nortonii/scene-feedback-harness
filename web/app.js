@@ -42,6 +42,7 @@ const ui = {
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
   humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'),
   humanStatus:id('human-pose-status'), humanJobs:id('human-pose-jobs'),
+  humanLatest:id('human-pose-latest'), humanHideAll:id('human-pose-hide-all'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
@@ -98,7 +99,7 @@ const state = {
   lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
   poseRefs:[], humanJobs:[], humanDetails:new Map(), humanDetailLoads:new Set(), humanDetailErrors:new Map(),
-  humanLoading:false,
+  humanLoading:false, humanOverlayChoice:'latest',
   humanError:null, humanJobsSignature:null,
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
@@ -216,6 +217,7 @@ function saveDraft() {
       selectionLevel:state.selectionLevel,
       referencedSceneNodes:state.referencedSceneNodes,
       poseRefs:state.poseRefs,
+      humanOverlayChoice:state.humanOverlayChoice,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
@@ -248,6 +250,8 @@ function restoreDraft() {
       ? draft.referencedSceneNodes.filter((node) => node && typeof node.parent_object_id === 'string' && Array.isArray(node.node_path))
       : [];
     state.poseRefs = Array.isArray(draft.poseRefs) ? draft.poseRefs.filter((item) => poseToken(item?.job_id,item?.reference_id)).slice(0,64) : [];
+    state.humanOverlayChoice = ['latest','hidden'].includes(draft.humanOverlayChoice) || /^[0-9a-f]{32}$/.test(draft.humanOverlayChoice || '')
+      ? draft.humanOverlayChoice : 'latest';
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
     state.restoredModelUrl = typeof draft.selectedModelUrl === 'string' ? draft.selectedModelUrl : null;
     state.activeReferenceId = typeof draft.activeReferenceId === 'string' ? draft.activeReferenceId : null;
@@ -2464,9 +2468,33 @@ function installTimelineImages(image, overlay) {
   ui.compareImage.replaceWith(overlay); ui.compareImage = overlay;
   renderCompareControls();
 }
-function humanJobName(job) {
+function humanJobNumber(job) {
   const ordered = [...state.humanJobs].sort((a,b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || a.job_id.localeCompare(b.job_id));
-  return '人体' + (Math.max(0, ordered.findIndex((item) => item.job_id === job.job_id)) + 1);
+  return Math.max(0, ordered.findIndex((item) => item.job_id === job.job_id)) + 1;
+}
+function humanJobName(job) { return '人体结果' + humanJobNumber(job); }
+function humanOverlayJob() {
+  if (state.humanOverlayChoice === 'hidden') return null;
+  const jobs=state.humanJobs.filter((job) => job.status === 'completed' && humanJobContainsCurrentReference(job));
+  if (state.humanOverlayChoice !== 'latest') return jobs.find((job) => job.job_id === state.humanOverlayChoice) || null;
+  const observations=jobs.filter((job) => job.evidence_kind !== 'projected_3d');
+  return [...(observations.length ? observations : jobs)].sort((a,b) =>
+    String(b.finished_at || b.created_at || '').localeCompare(String(a.finished_at || a.created_at || '')) ||
+    String(b.created_at || '').localeCompare(String(a.created_at || '')) || b.job_id.localeCompare(a.job_id))[0] || null;
+}
+function setHumanOverlayChoice(choice) {
+  if (!['latest','hidden'].includes(choice) && !/^[0-9a-f]{32}$/.test(choice || '')) return;
+  state.humanOverlayChoice=choice;
+  renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
+  if (state.playing && state.sessionId) {
+    // Playback keeps its visual draft fixed; this display preference can still
+    // be saved without replacing the stored frame, camera or annotations.
+    try {
+      const draft=JSON.parse(localStorage.getItem(storageKey()) || '{}');
+      draft.humanOverlayChoice=choice;
+      localStorage.setItem(storageKey(),JSON.stringify(draft));
+    } catch { /* A display preference should not block playback. */ }
+  }
 }
 function humanAutomaticJob(job) { return job.automatic === true || job.all_views === true; }
 function humanPosePageOffset(job, referenceId) {
@@ -2498,6 +2526,9 @@ function humanCurrentFrame(job) {
 function renderHumanPosePanel() {
   const jobs=state.humanJobs.filter((job) => job.status === 'completed');
   ui.humanPanel.classList.toggle('hidden',!jobs.length);
+  ui.humanLatest.setAttribute('aria-pressed',String(state.humanOverlayChoice === 'latest'));
+  ui.humanHideAll.setAttribute('aria-pressed',String(state.humanOverlayChoice === 'hidden'));
+  const overlayJob=humanOverlayJob();
   ui.humanStatus.textContent=state.humanError || '';
   ui.humanStatus.classList.toggle('hidden',!state.humanError);
   for (const job of state.humanJobs) {
@@ -2510,7 +2541,7 @@ function renderHumanPosePanel() {
       }
     }
   }
-  const jobsSignature=JSON.stringify([jobs,state.poseRefs,editable(),
+  const jobsSignature=JSON.stringify([jobs,state.poseRefs,editable(),state.humanOverlayChoice,overlayJob?.job_id,
     jobs.map((job) => [job.job_id,humanCurrentFrame(job)?.reference_id,
       state.humanDetailLoads.has(job.job_id),state.humanDetailErrors.get(job.job_id),
       state.humanDetailLoads.has(humanPoseLoadKey(job,activeReference()?.id)),
@@ -2540,6 +2571,11 @@ function renderHumanPosePanel() {
     if (error) { const detail=document.createElement('small'); detail.className='human-pose-error'; detail.textContent=String(error); row.append(detail); }
     if (job.status === 'completed') {
       const actions=document.createElement('div'); actions.className='human-pose-job-actions';
+      const selected=state.humanOverlayChoice === job.job_id || state.humanOverlayChoice === 'latest' && overlayJob?.job_id === job.job_id;
+      const display=document.createElement('button'); display.type='button'; display.className='compact-button human-pose-display';
+      display.textContent=selected ? '隐藏' : '显示'; display.setAttribute('aria-pressed',String(selected));
+      display.title=selected ? '隐藏参考图上的人体结果' : '在参考图上只显示这份人体结果';
+      display.addEventListener('click',() => setHumanOverlayChoice(selected ? 'hidden' : job.job_id)); actions.append(display);
       const cite=document.createElement('button'); cite.type='button'; cite.className='compact-button emphasis-button'; cite.textContent='引用人体';
       cite.disabled=!editable() || !frame; cite.title=frame ? '引用当前来源帧的' + poseEvidenceLabel(job) + '和骨架图' : '切到有结果的机位和帧后引用';
       cite.addEventListener('mousedown',event => event.preventDefault()); cite.addEventListener('click',() => insertHumanPoseReference(job,frame)); actions.append(cite);
@@ -2568,15 +2604,15 @@ function drawHumanPoseOverlay() {
   const surface=prepareCanvas(ui.humanCanvas);
   if (!surface) return;
   const ref=activeReference();
-  if (referencePixelsReady()) {
-    for (const job of state.humanJobs) {
-      const frame=humanCurrentFrame(job), detail=state.humanDetails.get(job.job_id);
-      if (!frame) continue;
-      const color=POSE_COLORS[(Number(humanJobName(job).slice(2))-1)%POSE_COLORS.length];
-      drawPoseSkeleton(surface.context,frame,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
-        edges:detail.skeleton_edges, label:humanJobName(job) + ' · ' + poseEvidenceLabel(job) + (frame.reference_id !== ref?.id ? ' · 近邻 ' : ' · ') + poseFrameLabel(frame,job.reference_name)});
-    }
-  }
+  const job=humanOverlayJob();
+  if (!referencePixelsReady() || !job) return;
+  const frame=humanCurrentFrame(job), detail=state.humanDetails.get(job.job_id);
+  // Historical runs can cover the same source image. Paint only the chosen
+  // result, and keep the layer empty until that exact image's frame is loaded.
+  if (!frame || frame.reference_id !== ref?.id) return;
+  const color=POSE_COLORS[(humanJobNumber(job)-1)%POSE_COLORS.length];
+  drawPoseSkeleton(surface.context,frame,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
+    edges:detail.skeleton_edges, label:humanJobName(job) + ' · ' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name)});
 }
 async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=false}={}) {
   const cached=state.humanDetails.get(job.job_id);
@@ -2641,6 +2677,7 @@ async function viewHumanPose(job) {
   const selectedView=job.multi_view && job.view_ids?.includes(referenceView()?.clip_id) ? referenceView()?.clip_id : job.view_ids?.[0];
   const frame=detail?.frames?.find((item) => item.view_id === selectedView) || detail?.frames?.[0];
   if (!frame || !editable()) return;
+  setHumanOverlayChoice(job.job_id);
   setMode('select');
   if (job.source_kind === 'static_references' || !job.view_id && !job.multi_view) {
     if (!state.references.some(ref => ref.id === frame.reference_id)) { announce('该人体结果的原参考图已被移除。',true); return; }
@@ -2675,6 +2712,8 @@ async function downloadHumanPose(job) {
   setTimeout(() => URL.revokeObjectURL(url),1000);
 }
 function bindHumanPoseEvents() {
+  ui.humanLatest.addEventListener('click',() => setHumanOverlayChoice('latest'));
+  ui.humanHideAll.addEventListener('click',() => setHumanOverlayChoice('hidden'));
   id('references-dialog-button').addEventListener('click',() => {
     renderHumanPosePanel(); loadHumanPoses().catch(() => {});
   });

@@ -102,6 +102,8 @@ select { min-width: 0; font-size: var(--text-control); }
 .reference-media canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 .reference-media .human-pose-overlay { pointer-events: none; z-index: 2; }
 .human-pose-results { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
+.human-pose-display-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.human-pose-display-actions [aria-pressed="true"], .human-pose-display[aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
 .human-pose-jobs { display: grid; gap: 8px; padding-top: 12px; }
 .human-pose-job { display: grid; gap: 5px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
 .human-pose-job-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--text-caption); }

@@ -151,6 +151,8 @@ A reconstruction task calls `workspace_export_pose_sources` to snapshot this pro
 
 Camera and timeline changes display the matching source-frame skeleton. Results can declare their joint names and edges; previously completed COCO17 results remain readable. Source labels distinguish observations, inferred estimates and projections of an existing 3D model. Projections are not measured 2D tracks.
 
+The reference image shows one result at a time: the newest 2D result by default, or the newest 3D projection if no 2D result exists. In human evidence, use `显示 / 隐藏` (Show / Hide) to select a historical result, `最新结果` (Latest result) for automatic selection, or `隐藏全部` (Hide all). Your choice is saved per session and stays through polling and new imports. While the current frame loads, no old-frame skeleton is shown. Citations and downloads retain their original results.
+
 Use `引用人体` to insert `[[pose:JOB_ID:REFERENCE_ID]]` in the shared prompt. Feedback includes original images, skeleton overlays, confidence, view, frame, time and available camera metadata, with up to eight samples. Saved evidence remains available; successful feedback clears the current citations. Cross-view identity, triangulation and 3D fitting belong to the reconstruction skill and require explicit calibration and topology.
 
 ## Quick start: room and cabinet

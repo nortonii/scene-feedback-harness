@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "scene-feedback-harness",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Review reference images and reconstructed scenes, annotate visual errors, and deliver image feedback through MCP tools and events.",
   "author": {
     "name": "nortonii"

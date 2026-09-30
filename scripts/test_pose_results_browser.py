@@ -55,6 +55,18 @@ def overlay_pixels(page) -> int:
     }""")
 
 
+def overlay_info(page) -> dict:
+    """Count boxes actually painted, including simultaneous historic results."""
+    return page.evaluate("""() => {
+      const p=__poseCheck, ctx=p.ui.humanCanvas.getContext('2d');
+      const strokeRect=ctx.strokeRect;
+      let boxes=0;
+      ctx.strokeRect=function(...args) { boxes++; return strokeRect.apply(this,args); };
+      try { p.drawHumanPoseOverlay(); } finally { ctx.strokeRect=strokeRect; }
+      return {boxes,job_id:p.humanOverlayJob()?.job_id || null,choice:p.state.humanOverlayChoice};
+    }""")
+
+
 def open_results(page):
     if page.locator("#chat-launcher").is_visible():
         page.locator("#chat-launcher").click()
@@ -111,7 +123,7 @@ def main() -> None:
                 context = browser.new_context(viewport={"width": 1440, "height": 950}, accept_downloads=True)
                 context.route("**/app.js", lambda route: route.fulfill(status=200,
                     content_type="application/javascript", body=(ROOT / "web/app.js").read_text() +
-                    "\nwindow.__poseCheck={state,ui,humanCurrentFrame,humanJobName};"))
+                    "\nwindow.__poseCheck={state,ui,humanCurrentFrame,humanJobName,humanOverlayJob,drawHumanPoseOverlay,loadHumanPoses};"))
                 page = context.new_page()
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.on("request", lambda request: requests.append((request.method, request.url)))
@@ -141,9 +153,28 @@ def main() -> None:
                 page.wait_for_function("(id) => __poseCheck.state.humanJobs.some(j=>j.job_id===id && j.status==='completed')", arg=job_id)
                 page.wait_for_function("(id) => __poseCheck.humanCurrentFrame(__poseCheck.state.humanJobs.find(j=>j.job_id===id)) !== null", arg=job_id)
                 assert overlay_pixels(page) > 300
+                assert overlay_info(page)["boxes"] == 1
                 open_results(page)
                 assert "二维观测 · capsule-body6-fixture" in page.locator("#human-pose-jobs").inner_text()
                 print("PASS: skill/API import exposes custom-profile results only inside the shared references dialog; clean headers contain no inference or upload controls", flush=True)
+
+                # A second tracking run observes the same person. It must
+                # replace the displayed overlay rather than add a second body.
+                close_results(page)
+                newer_export_response = context.request.post(base + "/api/workspace/pose/sources", headers=headers, data={"session_id": session})
+                assert newer_export_response.status == 201, newer_export_response.text()
+                newer = result_fixture(newer_export_response.json())
+                for frame in newer["frames"]:
+                    frame["bbox"] = [.2, .12, .65, .8]
+                response = import_json(context, base, headers, newer["job_id"], newer)
+                assert response.status == 200, response.text()
+                page.wait_for_function("(id)=>{const p=__poseCheck,j=p.state.humanJobs.find(j=>j.job_id===id); return j && p.humanCurrentFrame(j)}", arg=newer["job_id"])
+                assert overlay_info(page) == {"boxes": 1, "job_id": newer["job_id"], "choice": "latest"}
+                open_results(page)
+                job_name = page.evaluate("(id)=>__poseCheck.humanJobName(__poseCheck.state.humanJobs.find(j=>j.job_id===id))", job_id)
+                row = page.locator(".human-pose-job").filter(has=page.locator("strong", has_text=job_name))
+                row.get_by_role("button", name="显示", exact=True).click()
+                assert overlay_info(page) == {"boxes": 1, "job_id": job_id, "choice": job_id}
 
                 close_results(page)
                 projected_export_response = context.request.post(base + "/api/workspace/pose/sources", headers=headers, data={"session_id": session})
@@ -156,7 +187,39 @@ def main() -> None:
                 assert not page.locator("#references-dialog").is_visible()
                 open_results(page)
                 page.wait_for_function("document.getElementById('human-pose-jobs').textContent.includes('三维投影参考 · capsule-body6-fixture')")
+                assert overlay_info(page) == {"boxes": 1, "job_id": job_id, "choice": job_id}, "A newly imported result must not steal an explicit historical selection"
                 print("PASS: externally imported result appears while panel is closed; projections are labeled separately", flush=True)
+
+                page.reload()
+                page.wait_for_function("(id)=>{const p=window.__poseCheck,j=p?.state.humanJobs.find(j=>j.job_id===id); return p?.state.workspaceReady && j && p.humanCurrentFrame(j) && document.getElementById('reference-image').naturalWidth>0}", arg=job_id)
+                assert overlay_info(page) == {"boxes": 1, "job_id": job_id, "choice": job_id}
+                page.evaluate("__poseCheck.loadHumanPoses()")
+                assert overlay_info(page)["job_id"] == job_id
+                open_results(page)
+                page.locator("#human-pose-panel").get_by_role("button", name="隐藏全部", exact=True).click()
+                assert overlay_info(page)["boxes"] == 0 and overlay_pixels(page) == 0
+                page.reload()
+                page.wait_for_function("window.__poseCheck && __poseCheck.state.workspaceReady && __poseCheck.state.humanJobs.length===3")
+                assert overlay_info(page) == {"boxes": 0, "job_id": None, "choice": "hidden"}
+                open_results(page)
+                page.locator("#human-pose-panel").get_by_role("button", name="最新结果", exact=True).click()
+                page.wait_for_function("(id)=>__poseCheck.humanCurrentFrame(__poseCheck.state.humanJobs.find(j=>j.job_id===id)) !== null", arg=newer["job_id"])
+                assert overlay_info(page) == {"boxes": 1, "job_id": newer["job_id"], "choice": "latest"}, "Latest mode prefers independent 2D evidence over a newer 3D projection"
+                print("PASS: overlapping tracking runs paint one box/body; explicit history and hiding survive polling/reload; latest mode prefers 2D evidence", flush=True)
+
+                # A newly selected frame may still be loading. A cached body
+                # from another frame, or an older tracking run, must stay out.
+                delayed = page.evaluate("""(id)=>{
+                    const p=__poseCheck, detail=p.state.humanDetails.get(id), frames=detail.frames;
+                    detail.frames=[];
+                    const ctx=p.ui.humanCanvas.getContext('2d'), original=ctx.strokeRect;
+                    let boxes=0; ctx.strokeRect=function(...args){boxes++;return original.apply(this,args);};
+                    try { p.drawHumanPoseOverlay(); } finally { ctx.strokeRect=original; detail.frames=frames; }
+                    return {boxes,job_id:p.humanOverlayJob()?.job_id};
+                }""", newer["job_id"])
+                assert delayed == {"boxes": 0, "job_id": newer["job_id"]}
+                overlay_info(page)
+                print("PASS: pending frame evidence leaves an empty overlay instead of a stale or historical body", flush=True)
 
                 close_results(page)
                 page.locator("#reference-view-select").select_option(secondary["clip_id"])
@@ -225,6 +288,19 @@ def main() -> None:
                 assert not errors, errors
                 assert not any(method == "POST" and (url.endswith("/api/workspace/pose") or url.endswith("/cancel")) for method, url in requests), requests
                 print("PASS: reload keeps citations; feedback preserves two exact-frame originals, custom skeleton overlays and annotation evidence", flush=True)
+                for width in (390, 340):
+                    page.set_viewport_size({"width": width, "height": 920})
+                    open_results(page)
+                    for selector in ("#human-pose-panel", "#human-pose-latest", "#human-pose-hide-all"):
+                        bounds = page.locator(selector).bounding_box()
+                        assert bounds and bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= width + 1, (width, selector, bounds)
+                    page.locator("#human-pose-hide-all").click()
+                    assert overlay_info(page)["boxes"] == 0
+                    page.locator("#human-pose-latest").click()
+                    assert overlay_info(page)["boxes"] == 1
+                    close_results(page)
+                assert not errors, errors
+                print("PASS: latest/hide controls remain accessible at 390 and 340 pixels", flush=True)
                 browser.close()
         finally:
             server.shutdown()
