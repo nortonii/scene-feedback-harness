@@ -249,38 +249,52 @@ def workspace_get_feedback(feedback_id: str) -> CallToolResult:
 
 
 @mcp.tool()
-def workspace_track_human_pose(bbox: list[float], reference_id: str | None = None, view_id: str | None = None,
+def workspace_track_human_pose(bbox: list[float] | None = None, reference_id: str | None = None, view_id: str | None = None,
                               start_time_sec: float | None = None, end_time_sec: float | None = None,
                               sample_fps: float = 5, confidence_threshold: float = .3,
-                              request_id: str | None = None) -> dict[str, Any]:
+                              request_id: str | None = None,
+                              views: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Start asynchronous ViTPose COCO17 2D tracking for one manually boxed person.
 
-    bbox is normalized [x,y,width,height] in the original reference image.
-    Choose a static reference_id OR one dynamic view_id (read workspace_get_context).
-    A moving ROI tracks within this view only; no cross-view identity or 3D pose is inferred.
-    At most 600 sampled frames. Returns a job_id immediately; read with
+    For one image/view, pass bbox normalized [x,y,width,height] and exactly one
+    static reference_id or dynamic view_id. For multiple dynamic cameras, pass
+    views=[{view_id,bbox,reference_id?}, ...] with a separate manually chosen
+    person box in each view. Optional reference_id identifies the first sampled
+    frame for that camera. One time range and sample rate apply to all cameras.
+    Each ROI tracks independently; same-person identity is asserted by the user,
+    not inferred across views. At most 600 samples total. Returns a job_id; read with
     workspace_get_human_pose. Reuse request_id to retry an uncertain creation.
     """
     ensure_http_server()
     session_id = _http("GET", "/api/workspace/state")["session_id"]
-    payload = {"session_id": session_id, "bbox": bbox, "sample_fps": sample_fps,
+    payload = {"session_id": session_id, "sample_fps": sample_fps,
                "confidence_threshold": confidence_threshold, "request_id": request_id or uuid.uuid4().hex}
+    if views is not None:
+        if bbox is not None or reference_id is not None or view_id is not None:
+            raise ValueError("multi-view tracking uses views instead of bbox, reference_id or view_id")
+        payload["views"] = views
+    elif bbox is not None:
+        payload["bbox"] = bbox
     payload.update({key: value for key, value in {"reference_id": reference_id, "view_id": view_id,
                    "start_time_sec": start_time_sec, "end_time_sec": end_time_sec}.items() if value is not None})
     return _http("POST", "/api/workspace/pose", payload, private=True)
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
-def workspace_get_human_pose(job_id: str | None = None, frame_offset: int = 0, max_frames: int = 8) -> dict[str, Any]:
+def workspace_get_human_pose(job_id: str | None = None, frame_offset: int = 0, max_frames: int = 8,
+                             view_id: str | None = None) -> dict[str, Any]:
     """Read this project's ViTPose job progress and exact sampled-frame keypoints.
 
     Without job_id, list current-session jobs and runtime availability.
     Completed jobs include normalized coordinates, confidence, source IDs, view,
     frame, time, camera, and skeleton edges. Read up to max_frames samples
     (default 8, maximum 32) from frame_offset; next_frame_offset paginates them.
+    Set view_id to retrieve one camera's samples from a multi-camera job.
     result_json_path retains the complete job on disk. Preserve provenance.
     """
     ensure_http_server()
+    if job_id is None and view_id is not None:
+        raise ValueError("view_id filtering requires a pose job_id")
     if job_id is not None:
         if re.fullmatch(r"[0-9a-f]{32}", job_id) is None:
             raise ValueError("job_id must be a 32-character hexadecimal ID")
@@ -288,6 +302,14 @@ def workspace_get_human_pose(job_id: str | None = None, frame_offset: int = 0, m
             raise ValueError("frame_offset must be nonnegative; max_frames must be between 1 and 32")
         result = _http("GET", f"/api/workspace/pose/{job_id}")
         frames = result.get("frames", [])
+        result["total_frame_count"] = len(frames)
+        if view_id is not None:
+            if not isinstance(view_id, str) or not view_id:
+                raise ValueError("view_id must be a nonempty camera ID")
+            if view_id not in {frame.get("view_id") for frame in frames}:
+                raise ValueError("view_id is not a camera in this tracking job")
+            frames = [frame for frame in frames if frame.get("view_id") == view_id]
+            result["view_id_filter"] = view_id
         result["result_frame_count"] = len(frames)
         result["frames"] = frames[frame_offset:frame_offset + max_frames]
         result["frame_offset"] = frame_offset

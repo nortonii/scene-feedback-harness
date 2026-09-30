@@ -142,6 +142,50 @@ class PoseMCPAccessTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     mcp_server.workspace_get_human_pose(job["job_id"], **options)
 
+    def test_mcp_tracks_multiple_cameras_and_pages_each_view(self):
+        _, image = fixtures.image_data()
+        first = self.context.store.set_reference_clip(self.session, {
+            "name": "left camera", "fps": 2,
+            "frames": [{"name": f"left-{index}", "time_sec": index / 2, "data_url": image}
+                       for index in range(4)],
+        })["reference_clip"]
+        bundle = self.context.store.set_reference_clip(self.session, {
+            "append_view": True, "name": "right camera", "fps": 2,
+            "frames": [{"name": f"right-{index}", "time_sec": index / 2, "data_url": image}
+                       for index in range(4)],
+        })["reference_clip"]
+        second = bundle["views"][0]
+        views = [
+            {"view_id": first["clip_id"], "reference_id": first["frames"][0]["id"], "bbox": [.1, .1, .6, .7]},
+            {"view_id": second["clip_id"], "reference_id": second["frames"][0]["id"], "bbox": [.2, .1, .5, .7]},
+        ]
+        with self.mcp_context(self.context):
+            with self.assertRaisesRegex(ValueError, "uses views"):
+                mcp_server.workspace_track_human_pose(views=views, bbox=[.1, .1, .6, .7])
+            created = mcp_server.workspace_track_human_pose(views=views, end_time_sec=1.5, sample_fps=2)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                job = mcp_server.workspace_get_human_pose(created["job_id"], max_frames=32)
+                if job["status"] == "completed":
+                    break
+                self.assertNotIn(job["status"], {"failed", "cancelled", "interrupted"}, job.get("error"))
+                time.sleep(.02)
+            self.assertEqual(job["status"], "completed")
+            self.assertTrue(job["multi_view"])
+            self.assertEqual(set(job["view_ids"]), {first["clip_id"], second["clip_id"]})
+            self.assertEqual(job["result_frame_count"], 8)
+            self.assertEqual({frame["view_id"] for frame in job["frames"]}, set(job["view_ids"]))
+            page = mcp_server.workspace_get_human_pose(created["job_id"], view_id=second["clip_id"], max_frames=2)
+            self.assertEqual((page["total_frame_count"], page["result_frame_count"], page["next_frame_offset"]), (8, 4, 2))
+            self.assertTrue(all(frame["view_id"] == second["clip_id"] for frame in page["frames"]))
+            next_page = mcp_server.workspace_get_human_pose(created["job_id"], view_id=second["clip_id"], frame_offset=2)
+            self.assertEqual(len(next_page["frames"]), 2)
+            self.assertIsNone(next_page["next_frame_offset"])
+            with self.assertRaisesRegex(ValueError, "requires a pose job_id"):
+                mcp_server.workspace_get_human_pose(view_id=second["clip_id"])
+            with self.assertRaisesRegex(ValueError, "not a camera"):
+                mcp_server.workspace_get_human_pose(created["job_id"], view_id=uuid.uuid4().hex)
+
 
 if __name__ == "__main__":
     unittest.main()

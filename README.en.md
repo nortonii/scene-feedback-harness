@@ -139,15 +139,15 @@ workspace_set_reference_clip(manifest_path="/absolute/path/to/project/reference_
 workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4", fps=10, camera_manifest_path="/absolute/path/to/project/video-cameras.json", append_view=True, view_name="camera_B")
 ```
 
-## Human keypoints: single-person ViTPose tracking
+## Human keypoints: single-person ViTPose tracking across views
 
-Open `人体追踪` at the top right of the reference pane. Click `在参考图拖框` to box one person, or select an existing rectangle on the original image. For a static image, use `识别当前图`. For a dynamic view, start from the boxed frame, set the end time and sampling rate, then use `追踪当前机位`. Asynchronous jobs show progress and support cancellation. Sampling defaults to 5 fps, with at most 600 original reference frames per job.
+Open `人体追踪` at the top right of the reference pane. Click `在参考图拖框` to box one person, or select an existing rectangle on the original image. A static image can be analyzed on its own. For a dynamic clip, either track the current view as before or enable `多机位追踪`: choose 2–8 views, set one shared start time, visit each view's starting frame and box the person there, then set a shared end time and sampling rate. Asynchronous jobs show progress and support cancellation. Sampling defaults to 5 fps, with at most **600 original frames across all selected views combined**. Views must share a `time_sec` origin for meaningful synchronization.
 
 Completed results show COCO17 2D joints and a skeleton. Toggle the overlay, download the complete JSON, or use `引用人体` to insert `[[pose:JOB_ID:REFERENCE_ID]]` in the shared prompt. A feedback packet may cite up to 8 samples from different completed jobs or views. The server resolves stored predictions and sends the **original inference frame, cyan estimated-skeleton image, confidence, person box, view, frame number, time and available camera calibration**. Estimates stay separate from red human annotations; originals remain unchanged. Successful feedback saves clear this round's pose references and retain job history.
 
-Results belong to their scene; switching views does not move another camera's skeleton onto the current image. Original evidence remains readable after clip replacement. Cancelled and failed states persist; restarting the service marks unfinished jobs interrupted, requiring an explicit new start. Each scene allows one active pose job, and all scenes share one inference slot; other scenes' jobs wait in the queue.
+Results belong to their scene. A multiview job keeps a separate 2D track for each view; switching views displays only that view's skeleton at the current time. Query one view with the `view_id` filter or download the complete JSON for all views. Original evidence remains readable after clip replacement. Cancelled and failed states persist; restarting the service marks unfinished jobs interrupted, requiring an explicit new start. Each scene allows one active pose job, and all scenes share one inference slot; other scenes' jobs wait in the queue.
 
-This is **single-person, single-view ViTPose+ Base COCO17 2D estimation**. A gradual ROI heuristic follows confident joints from the previous sampled frame. Low-confidence, off-image and lost-person skeletons are hidden. It does not guarantee identity through occlusion or crossing people, associate people across views, estimate finger joints or 3D motion, or drive Blender rigs automatically. Draw a new starting box if it drifts. JSON uses coordinates normalized to the original image and preserves its dimensions and provenance.
+This is **single-person ViTPose+ Base COCO17 2D estimation performed independently in each view**. A person box must be chosen by hand in each view; confident joints update only that view's ROI. Low-confidence, off-image and lost-person skeletons are hidden. Even if you box the same person across views, the system does not match identity, fuse joints or triangulate 3D pose. Identity through occlusion or crossing people is not guaranteed. Finger joints and automatic Blender rig control are outside this tool. Draw a new box in the affected view if tracking drifts. JSON uses coordinates normalized to each original image and preserves its dimensions and provenance.
 
 ### Optional inference environment
 
@@ -254,8 +254,8 @@ For the desktop task binding option, also keep `--shared-thread-id "$THREAD_ID"`
 | `workspace_open` | Return or open this project's workbench URL |
 | `workspace_get_context` | Read current reference images, scene revision, and project context |
 | `workspace_get_feedback` | Read submitted feedback and its actual images |
-| `workspace_track_human_pose` | Start asynchronous ViTPose for one manually boxed person; return job_id |
-| `workspace_get_human_pose` | Read runtime, progress and COCO17 results; `frame_offset` / `max_frames` pagination defaults to 8 frames (max 32), with a local path to the full JSON |
+| `workspace_track_human_pose` | Start asynchronous ViTPose for one manually boxed person; pass `views=[{view_id,bbox},…]` for 2–8 views or keep the original single-view arguments; return job_id |
+| `workspace_get_human_pose` | Read runtime, progress and COCO17 results; optionally filter one view with `view_id`, then paginate with `frame_offset` / `max_frames` (8 frames by default, max 32); return the full JSON's local path |
 | `workspace_cancel_human_pose` | Cancel this scene’s queued/running pose job; retain completed results |
 | `workspace_publish_scene` | Validate and publish a new GLB, check the expected revision, and notify the page to refresh |
 | `workspace_set_reference_clip` | Import a single-view or multi-view manifest, or sample a project-local video with FFmpeg; `append_view=True` appends views |

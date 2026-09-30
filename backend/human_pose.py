@@ -1,7 +1,7 @@
 """Project-local asynchronous ViTPose jobs and immutable visual evidence.
 
-The user supplies a single-person ROI. Identity is local to one job/view;
-keypoints are estimates, never scene geometry or human-authored annotations.
+The user supplies a person ROI for each view. Multi-view tracks only group
+those user-selected ROIs; they never infer cross-camera identity or 3D pose.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ ACTIVE = {"queued", "running"}
 # All projects on this server share the runner, so they cannot overcommit its GPU.
 _RUNNER_SLOT = threading.Semaphore(1)
 MAX_FRAMES = 600
+MAX_VIEWS = 8
 
 
 def _atomic_json(path: Path, document: dict) -> None:
@@ -131,7 +132,6 @@ class HumanPoseJobs:
         session = self.store.get_session(session_id)
         if session["status"] != "open":
             raise APIError(409, "session is closed")
-        bbox = _bbox(payload.get("bbox"))
         request_id = payload.get("request_id")
         if not isinstance(request_id, str) or not ID.fullmatch(request_id):
             raise APIError(400, "request_id must be a 32-character hexadecimal ID")
@@ -155,8 +155,33 @@ class HumanPoseJobs:
             if any(json.loads(path.read_text(encoding="utf-8")).get("status") in ACTIVE for path in self.directory.glob("*/job.json")):
                 raise APIError(409, "this project already has an active human pose job")
             reference_id, view_id = payload.get("reference_id"), payload.get("view_id")
-            if (reference_id is None) == (view_id is None):
-                raise APIError(400, "choose exactly one static reference_id or dynamic view_id")
+            multi_requested = "views" in payload
+            multi_views = payload.get("views")
+            if multi_requested:
+                if reference_id is not None or view_id is not None or "bbox" in payload:
+                    raise APIError(400, "multi-view pose requests use views instead of top-level reference_id, view_id or bbox")
+                if not isinstance(multi_views, list) or not 2 <= len(multi_views) <= MAX_VIEWS:
+                    raise APIError(400, "multi-view pose requests need 2 to 8 camera views")
+                selected_views = []
+                seen = set()
+                for item in multi_views:
+                    if not isinstance(item, dict) or not isinstance(item.get("view_id"), str) or not ID.fullmatch(item["view_id"]):
+                        raise APIError(400, "each pose view needs a valid view_id")
+                    if item["view_id"] in seen:
+                        raise APIError(400, "pose camera views cannot be repeated")
+                    seen.add(item["view_id"])
+                    if "reference_id" in item and (not isinstance(item["reference_id"], str) or not ID.fullmatch(item["reference_id"])):
+                        raise APIError(400, "pose view reference_id must identify its first sampled frame")
+                    selected_views.append({"view_id": item["view_id"], "bbox": _bbox(item.get("bbox")),
+                                           **({"reference_id": item["reference_id"]} if "reference_id" in item else {})})
+                bbox = None
+            else:
+                if (reference_id is None) == (view_id is None):
+                    raise APIError(400, "choose exactly one static reference_id or dynamic view_id")
+                if view_id is not None and (not isinstance(view_id, str) or not ID.fullmatch(view_id)):
+                    raise APIError(400, "pose view_id must identify a reference camera")
+                bbox = _bbox(payload.get("bbox"))
+                selected_views = []
             fps = number(payload.get("sample_fps", 5), "pose sample_fps", minimum=.1, maximum=60)
             threshold = number(payload.get("confidence_threshold", .3), "pose confidence threshold", maximum=1)
             provenance: dict = {}
@@ -172,34 +197,54 @@ class HumanPoseJobs:
                 provenance.update(reference_id=reference_id, reference_name=reference["name"])
             else:
                 clip = session.get("reference_clip")
-                view = next((view for view in reference_views(clip) if view["clip_id"] == view_id), None)
-                if view is None:
+                available = {view["clip_id"]: view for view in reference_views(clip)}
+                requested = selected_views if multi_requested else [{"view_id": view_id, "bbox": bbox}]
+                if any(item["view_id"] not in available for item in requested):
                     raise APIError(400, "pose view_id is not a current reference camera")
-                start = number(payload.get("start_time_sec", 0), "pose range start", maximum=view["duration_sec"])
-                end = number(payload.get("end_time_sec", view["duration_sec"]), "pose range end", minimum=start, maximum=view["duration_sec"])
-                # First sample at the range's starting frame; timestamps remain exact.
-                candidates = [frame for frame in view["frames"] if start - 1e-6 <= frame["time_sec"] <= end + 1e-6]
-                if not candidates:
-                    raise APIError(400, "pose range contains no reference frames")
-                selected = []
-                next_time = candidates[0]["time_sec"]
-                for frame in candidates:
-                    if frame["time_sec"] + 1e-6 >= next_time:
-                        selected.append(frame)
-                        next_time = frame["time_sec"] + 1 / fps
-                if len(selected) > MAX_FRAMES:
-                    raise APIError(400, "pose tracking exceeds 600 samples; shorten the range or lower sample_fps")
-                sources = [{"reference_id": frame["id"], "reference_name": frame["name"], "reference_url": frame["url"],
-                            "frame_index": frame["frame_index"], "time_sec": frame["time_sec"], "view_id": view_id,
-                            "view_name": view["name"], "clip_id": clip["clip_id"],
-                            **({"camera": copy.deepcopy(frame["camera"])} if frame.get("camera") else {})} for frame in selected]
-                provenance.update(view_id=view_id, view_name=view["name"], clip_id=clip["clip_id"], start_time_sec=start, end_time_sec=end)
+                # Every requested camera must cover the same explicit interval.
+                duration = min(available[item["view_id"]]["duration_sec"] for item in requested)
+                start = number(payload.get("start_time_sec", 0), "pose range start", maximum=duration)
+                end = number(payload.get("end_time_sec", duration), "pose range end", minimum=start, maximum=duration)
+                sources = []
+                view_metadata = []
+                for item in requested:
+                    current_view_id = item["view_id"]
+                    view = available[current_view_id]
+                    # First sample is the first real frame at/after start; no
+                    # synthesized frame or cross-camera timestamp is implied.
+                    candidates = [frame for frame in view["frames"] if start - 1e-6 <= frame["time_sec"] <= end + 1e-6]
+                    if not candidates:
+                        raise APIError(400, "pose range contains no reference frames in view " + view["name"])
+                    selected = []
+                    next_time = candidates[0]["time_sec"]
+                    for frame in candidates:
+                        if frame["time_sec"] + 1e-6 >= next_time:
+                            selected.append(frame)
+                            next_time = frame["time_sec"] + 1 / fps
+                    if item.get("reference_id") is not None and item["reference_id"] != selected[0]["id"]:
+                        raise APIError(400, "pose view reference_id is not its first sampled frame; refresh the selected box")
+                    if len(sources) + len(selected) > MAX_FRAMES:
+                        raise APIError(400, f"pose tracking exceeds {MAX_FRAMES} samples across all views; shorten the range or lower sample_fps")
+                    view_metadata.append({"view_id": current_view_id, "view_name": view["name"],
+                                          "reference_id": selected[0]["id"], "bbox": item["bbox"],
+                                          "sampled_frames": len(selected)})
+                    sources.extend({"reference_id": frame["id"], "reference_name": frame["name"], "reference_url": frame["url"],
+                                    "frame_index": frame["frame_index"], "time_sec": frame["time_sec"], "view_id": current_view_id,
+                                    "view_name": view["name"], "clip_id": clip["clip_id"],
+                                    **({"seed_bbox": item["bbox"]} if multi_requested else {}),
+                                    **({"camera": copy.deepcopy(frame["camera"])} if frame.get("camera") else {})} for frame in selected)
+                if multi_requested:
+                    provenance.update(multi_view=True, views=view_metadata, view_ids=[item["view_id"] for item in view_metadata],
+                                      clip_id=clip["clip_id"], start_time_sec=start, end_time_sec=end)
+                else:
+                    provenance.update(view_id=view_id, view_name=view["name"], clip_id=clip["clip_id"], start_time_sec=start, end_time_sec=end)
             for source in sources:
                 source["width"], source["height"] = _display_dimensions(_image_path(self.store, source["reference_url"]))
                 source["image_orientation"] = "exif_oriented_display"
             job_id = uuid.uuid4().hex
-            job = {"schema_version": 1, "job_id": job_id, "request_id": request_id, "request_digest": digest,
-                   "session_id": session_id, "track_id": "human_" + job_id[:8], "status": "queued", "bbox": bbox,
+            job = {"schema_version": 2 if multi_requested else 1, "job_id": job_id, "request_id": request_id, "request_digest": digest,
+                   "session_id": session_id, "track_id": "human_" + job_id[:8], "status": "queued",
+                   **({"bbox": bbox} if not multi_requested else {}),
                    "sample_fps": fps, "confidence_threshold": threshold, "completed_frames": 0, "total_frames": len(sources),
                    "created_at": _now(), "sources": sources, **provenance}
             directory = self.directory / job_id
@@ -250,13 +295,15 @@ class HumanPoseJobs:
             job = self._update(job_id, status="running", started_at=_now())
             directory = self.directory / job_id
             frames = []
-            x, y, width, height = job["bbox"]
             for source in job["sources"]:
+                x, y, width, height = source.get("seed_bbox", job.get("bbox"))
                 frames.append({"image_path": str(_image_path(self.store, source["reference_url"])), "ref_id": source["reference_id"],
                                "width": source["width"], "height": source["height"],
                                "frame_index": source.get("frame_index", 0), "time_seconds": source.get("time_sec", 0),
+                               **({"view_id": source["view_id"]} if job.get("multi_view") else {}),
                                "bbox_xywh": [x * source["width"], y * source["height"], width * source["width"], height * source["height"]]})
-            manifest = {"schema_version": 1, "job_id": job_id, "track_id": job["track_id"], "view_id": job.get("view_id", "reference:" + job["sources"][0]["reference_id"]),
+            manifest = {"schema_version": 2 if job.get("multi_view") else 1, "job_id": job_id, "track_id": job["track_id"],
+                        **({"view_ids": job["view_ids"]} if job.get("multi_view") else {"view_id": job.get("view_id", "reference:" + job["sources"][0]["reference_id"])}),
                         "options": {"device": "auto", "update_roi": True, "score_threshold": job["confidence_threshold"]}, "frames": frames}
             _atomic_json(directory / "input.json", manifest)
             output = directory / "output.json"
@@ -297,8 +344,14 @@ class HumanPoseJobs:
                     raise RuntimeError(f"ViTPose worker exited {code}: {detail}")
             result = json.loads(output.read_text(encoding="utf-8"))
             normalized = self._validate_result(job, result)
+            tracking = result.get("tracking", {})
+            if not isinstance(tracking, dict):
+                raise ValueError("pose output tracking metadata must be an object")
+            if job.get("multi_view"):
+                tracking = {**tracking, "scope": "per_view_independent",
+                            "cross_view_identity_source": "user_designated_boxes", "identity_guaranteed": False}
             self._update(job_id, status="completed", completed_frames=len(normalized), frames=normalized,
-                         model=result.get("model", {}), tracking=result.get("tracking", {}), finished_at=_now(), error=None)
+                         model=result.get("model", {}), tracking=tracking, finished_at=_now(), error=None)
         except Exception as exc:
             self._update(job_id, status="failed", error=str(exc)[:1800], finished_at=_now())
         finally:
@@ -316,6 +369,8 @@ class HumanPoseJobs:
     def _validate_result(self, job: dict, result: Any) -> list[dict]:
         if not isinstance(result, dict) or result.get("job_id") != job["job_id"] or result.get("track_id") != job["track_id"]:
             raise ValueError("pose output belongs to another tracking job")
+        if job.get("multi_view") and result.get("view_ids") not in (None, job["view_ids"]):
+            raise ValueError("pose output camera view list does not match the requested views")
         predictions = result.get("frames")
         if not isinstance(predictions, list) or len(predictions) != len(job["sources"]):
             raise ValueError("pose output frame count does not match requested images")
@@ -324,6 +379,11 @@ class HumanPoseJobs:
             if (not isinstance(prediction, dict) or prediction.get("ref_id") != source["reference_id"]
                     or prediction.get("width") != source["width"] or prediction.get("height") != source["height"]):
                 raise ValueError("pose output source or image dimensions do not match")
+            if job.get("multi_view") and prediction.get("view_id") != source["view_id"]:
+                raise ValueError("pose output camera view does not match the requested source")
+            if ("frame_index" in prediction and prediction["frame_index"] != source.get("frame_index", 0) or
+                    "time_seconds" in prediction and prediction["time_seconds"] != source.get("time_sec", 0)):
+                raise ValueError("pose output frame time/index does not match the requested source")
             points = prediction.get("keypoints")
             if not isinstance(points, list) or len(points) != len(JOINT_NAMES):
                 raise ValueError("ViTPose output must contain 17 COCO keypoints")
@@ -341,7 +401,7 @@ class HumanPoseJobs:
             if isinstance(roi, dict):
                 roi = [roi.get(key) for key in ("x", "y", "width", "height")]
             if roi is None:
-                roi = job["bbox"]
+                roi = source.get("seed_bbox", job.get("bbox"))
             valid_count = sum(point["score"] >= job["confidence_threshold"] and point["in_frame"] for point in normalized)
             frames.append({**copy.deepcopy(source), "keypoints": normalized, "bbox": _bbox(roi),
                            "tracking_status": prediction.get("tracking_status", "tracked" if valid_count >= 5 else "lost"),
@@ -407,6 +467,8 @@ def prepare_pose_feedback(store: Any, session_id: str, references: Any, note: st
         image = _image_path(store, frame["reference_url"])
         # Preserve actual inference-frame evidence even if the current clip changed.
         prepared.append({"job_id": job["job_id"], "track_id": job["track_id"], "source": "vitpose_estimate",
+                         **({"multi_view": True, "view_ids": copy.deepcopy(job["view_ids"]),
+                             "cross_view_identity_source": "user_designated_boxes"} if job.get("multi_view") else {}),
                          "coordinate_frame": "reference_image_normalized", "confidence_threshold": job["confidence_threshold"],
                          "model": copy.deepcopy(job.get("model", {})), "tracking": copy.deepcopy(job.get("tracking", {})), "frame": copy.deepcopy(frame),
                          "reference_original_url": frame["reference_url"],

@@ -1506,7 +1506,7 @@ class WorkspaceGateway:
         if feedback.get("annotations"):
             lines.append("标记数据：" + json.dumps(feedback["annotations"], ensure_ascii=False))
         if feedback.get("human_pose"):
-            lines.append("用户引用的人体关键点（ViTPose 推理估计，单人身份仅在所属机位/追踪任务内有效；不是人工标记或三维动作约束）：")
+            lines.append("用户引用的人体关键点（ViTPose 二维推理估计，每个机位独立追踪；同一任务中多机位的人物由用户分别框选指定，系统未自动验证跨机位身份；不是人工标记或三维动作约束）：")
             for pose in feedback["human_pose"]:
                 lines.append(json.dumps({key: value for key, value in pose.items() if not key.endswith("_url")}, ensure_ascii=False))
         lines += ["", "附件顺序："]

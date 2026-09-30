@@ -80,6 +80,45 @@ class PoseWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mix camera views"):
                 validate_manifest(path)
 
+    def test_multi_view_manifest_checks_each_camera_timeline_and_roi_separately(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("a.png", "b.png"):
+                Image.new("RGB", (100, 80)).save(root / name)
+            def frame(view_id, index, time_sec, name, box):
+                return {"view_id": view_id, "frame_index": index, "time_seconds": time_sec,
+                        "image_path": name, "width": 100, "height": 80, "bbox_xywh": box,
+                        "ref_id": f"{view_id}-{index}"}
+            a = frame("camera-a", 0, 0, "a.png", [5, 5, 40, 60])
+            b = frame("camera-b", 0, 0, "b.png", [50, 5, 40, 60])
+            manifest = {"schema_version": 2, "job_id": "job", "track_id": "person",
+                        "view_ids": ["camera-a", "camera-b"], "frames": [a, b,
+                        frame("camera-a", 1, .5, "a.png", [5, 5, 40, 60]),
+                        frame("camera-b", 1, .5, "b.png", [50, 5, 40, 60])]}
+            path = root / "input.json"
+            def check():
+                path.write_text(json.dumps(manifest))
+                return validate_manifest(path)
+            self.assertEqual([item["view_id"] for item in check()["frames"]],
+                             ["camera-a", "camera-b", "camera-a", "camera-b"])
+            self.assertEqual(manifest["frames"][0]["bbox_xywh"], [5, 5, 40, 60])
+            self.assertEqual(manifest["frames"][1]["bbox_xywh"], [50, 5, 40, 60])
+            manifest["frames"][3]["frame_index"] = 0
+            with self.assertRaisesRegex(ValueError, "strictly increasing"):
+                check()
+            manifest["frames"][3]["frame_index"] = 1
+            manifest["frames"][3]["view_id"] = "camera-c"
+            with self.assertRaisesRegex(ValueError, "undeclared"):
+                check()
+            manifest["frames"][3]["view_id"] = "camera-b"
+            manifest["view_ids"] = ["camera-a", "camera-a"]
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                check()
+            manifest["view_ids"] = ["camera-a", "camera-b"]
+            manifest["frames"] = [a]
+            with self.assertRaisesRegex(ValueError, "at least one frame"):
+                check()
+
     def test_runner_argv_does_not_evaluate_shell_text_in_paths(self):
         with patch.dict(os.environ, {"SCENE_FEEDBACK_POSE_RUNNER": json.dumps([
             sys.executable, "--input", "{manifest}", "--output", "{output}"

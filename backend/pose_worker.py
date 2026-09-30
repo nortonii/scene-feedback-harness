@@ -1,4 +1,4 @@
-"""ViTPose runtime adapter and a single-person, single-view inference worker.
+"""ViTPose runtime adapter and per-camera single-person inference worker.
 
 The HTTP process imports this module without loading Torch or a checkpoint.
 Inference happens in a separately configured Python process or runner.
@@ -167,11 +167,23 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
     if path.stat().st_size > 8 * 1024 * 1024:
         raise ValueError("pose manifest exceeds 8 MiB")
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(manifest, dict) or manifest.get("schema_version", 1) != 1:
-        raise ValueError("pose manifest must be a schema_version 1 object")
-    for name in ("job_id", "track_id", "view_id"):
+    if not isinstance(manifest, dict) or manifest.get("schema_version", 1) not in (1, 2):
+        raise ValueError("pose manifest must be a schema_version 1 or 2 object")
+    version = manifest.get("schema_version", 1)
+    for name in ("job_id", "track_id"):
         if not isinstance(manifest.get(name), str) or not manifest[name] or len(manifest[name]) > 200:
-            raise ValueError(name + " must identify this single-view job")
+            raise ValueError(name + " must identify this pose job")
+    if version == 1:
+        view_id = manifest.get("view_id")
+        if not isinstance(view_id, str) or not view_id or len(view_id) > 200:
+            raise ValueError("view_id must identify this single-view job")
+        view_ids = [view_id]
+    else:
+        view_ids = manifest.get("view_ids")
+        if (not isinstance(view_ids, list) or not 2 <= len(view_ids) <= 8
+                or any(not isinstance(view_id, str) or not view_id or len(view_id) > 200 for view_id in view_ids)
+                or len(set(view_ids)) != len(view_ids)):
+            raise ValueError("multi-view pose manifest needs 2 to 8 distinct view_ids")
     frames = manifest.get("frames")
     if not isinstance(frames, list) or not 1 <= len(frames) <= 600:
         raise ValueError("pose job must contain 1 to 600 frames")
@@ -183,20 +195,25 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
         raise ValueError("score_threshold must be between 0 and 1")
     if not isinstance(options.get("update_roi", True), bool):
         raise ValueError("update_roi must be boolean")
-    previous_index = -1
-    previous_time = -1.0
+    previous_by_view: dict[str, tuple[int, float]] = {}
     for frame in frames:
         if not isinstance(frame, dict):
             raise ValueError("pose frames must be objects")
-        if frame.get("view_id", manifest["view_id"]) != manifest["view_id"]:
+        current_view = frame.get("view_id", view_ids[0] if version == 1 else None)
+        if not isinstance(current_view, str) or not current_view or len(current_view) > 200:
+            raise ValueError("pose frame needs a valid view_id")
+        if version == 1 and current_view != view_ids[0]:
             raise ValueError("a pose track cannot mix camera views")
+        if current_view not in view_ids:
+            raise ValueError("pose frame references an undeclared camera view")
+        previous_index, previous_time = previous_by_view.get(current_view, (-1, -1.0))
         index = frame.get("frame_index")
         if isinstance(index, bool) or not isinstance(index, int) or index < 0 or index <= previous_index:
             raise ValueError("frame_index must be nonnegative and strictly increasing")
         time_seconds = _number(frame.get("time_seconds"), "time_seconds")
         if time_seconds < 0 or time_seconds < previous_time:
             raise ValueError("frame times must be nonnegative and nondecreasing")
-        previous_index, previous_time = index, time_seconds
+        previous_by_view[current_view] = (index, time_seconds)
         image_path = frame.get("image_path")
         if not isinstance(image_path, str) or not image_path:
             raise ValueError("each frame needs an image_path")
@@ -227,6 +244,8 @@ def validate_manifest(manifest_path: Path) -> dict[str, Any]:
             if key in frame and frame[key] != actual:
                 raise ValueError("manifest dimensions do not match the EXIF-oriented reference image")
         clip_bbox(box, width, height)
+    if version == 2 and set(previous_by_view) != set(view_ids):
+        raise ValueError("each declared pose camera view needs at least one frame")
     return manifest
 
 
@@ -311,14 +330,16 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
     emit = progress or (lambda value: None)
     emit({"type": "progress", "completed_frames": 0, "total_frames": len(manifest["frames"]), "stage": "model_loaded"})
     results = []
-    previous_box = None
-    previous_dimensions = None
+    previous_by_view: dict[str, tuple[list[float], tuple[int, int]]] = {}
     for completed, frame in enumerate(manifest["frames"], 1):
         with Image.open(frame["image_path"]) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
         width, height = image.size
         manual_box = clip_bbox(frame["bbox_xywh"], width, height)
         dimensions = (width, height)
+        current_view = frame.get("view_id", manifest.get("view_id"))
+        previous = previous_by_view.get(current_view)
+        previous_box, previous_dimensions = previous if previous is not None else (None, None)
         if previous_box is not None and update_roi and not frame.get("reset_roi"):
             if previous_dimensions != dimensions:
                 raise ValueError("ROI tracking requires consistent image dimensions within a camera view")
@@ -337,22 +358,25 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
         tracked = tracking_quality(keypoints)
         roi_status = "updated" if tracked and update_roi else "held_low_confidence" if not tracked else "fixed"
         result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id") if key in frame}
-        result.update({"view_id": manifest["view_id"], "track_id": manifest["track_id"],
+        result.update({"view_id": current_view, "track_id": manifest["track_id"],
                        "width": width, "height": height, "bbox_xywh": box,
                        "bbox": {"x": box[0] / width, "y": box[1] / height, "width": box[2] / width, "height": box[3] / height},
                        "keypoints": keypoints, "tracking_status": "tracked" if tracked else "lost", "roi_status": roi_status})
         results.append(result)
-        previous_box = update_bbox(box, keypoints, width, height) if tracked and update_roi else box
-        previous_dimensions = dimensions
+        previous_by_view[current_view] = (update_bbox(box, keypoints, width, height) if tracked and update_roi else box, dimensions)
         emit({"type": "progress", "completed_frames": completed, "total_frames": len(manifest["frames"])})
-    result = {"schema_version": 1, "job_id": manifest["job_id"], "track_id": manifest["track_id"], "view_id": manifest["view_id"],
+    multi_view = manifest.get("schema_version", 1) == 2
+    result = {"schema_version": 2 if multi_view else 1, "job_id": manifest["job_id"], "track_id": manifest["track_id"],
+              **({"view_ids": manifest["view_ids"]} if multi_view else {"view_id": manifest["view_id"]}),
               "model": {"name": "ViTPose+ Base", "path": str(model_directory), "dataset": "COCO", "dataset_index": 0,
                         "checkpoint_sha256": digest.hexdigest(), "source": "local_checkpoint",
                         "joints": 17, "joint_names": list(COCO_NAMES), "edges": [list(edge) for edge in COCO_EDGES],
                         "device": device, "torch_version": str(torch.__version__), "transformers_version": transformers.__version__,
                         "gpu_name": torch.cuda.get_device_name(0) if device.startswith("cuda") else None},
               "tracking": {"method": "single_person_confidence_gated_roi" if update_roi else "fixed_manual_roi",
-                           "scope": "single_view", "identity_guaranteed": False, "score_threshold": threshold,
+                           "scope": "per_view_independent" if multi_view else "single_view",
+                           **({"cross_view_identity_source": "user_designated_boxes"} if multi_view else {}),
+                           "identity_guaranteed": False, "score_threshold": threshold,
                            "coordinate_space": "exif_oriented_display",
                            "visibility_method": "confidence_and_image_bounds_not_occlusion_segmentation",
                            "raw_score_kind": "heatmap_peak_not_calibrated_probability"}, "frames": results}

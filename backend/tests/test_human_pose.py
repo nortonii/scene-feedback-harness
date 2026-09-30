@@ -45,8 +45,11 @@ for index,source in enumerate(manifest["frames"]):
  keypoints[0]["raw_score"]=1.25
  if a.mode=="invalid":keypoints[0]["name"]="wrong_joint"
  if a.mode=="nan":keypoints[0]["x"]=float("nan")
- frame={"ref_id":source["ref_id"],"width":width,"height":height,"keypoints":keypoints,
+ frame={"ref_id":source["ref_id"],"view_id":source.get("view_id",manifest.get("view_id")),
+ "frame_index":source["frame_index"],"time_seconds":source["time_seconds"],
+ "width":width,"height":height,"keypoints":keypoints,
  "bbox":[.12,.12,.55,.7],"tracking_status":"lost" if a.mode=="lost" else "tracked"}
+ if a.mode=="wrong_view" and index==0:frame["view_id"]="other-camera"
  frames.append(frame)
  for bad in ("not-json",json.dumps({"completed_frames":-1}),json.dumps({"completed_frames":9999}),json.dumps({"completed_frames":True})):
   print(bad,flush=True)
@@ -54,6 +57,7 @@ for index,source in enumerate(manifest["frames"]):
  if a.mode=="hold":time.sleep(3600)
  if a.mode=="slow":time.sleep(.15)
 Path(a.output).write_text(json.dumps({"job_id":manifest["job_id"],"track_id":manifest["track_id"],
+ **({"view_ids":manifest["view_ids"]} if "view_ids" in manifest else {}),
  "model":{"name":"controlled ViTPose transport fixture","keypoint_format":"coco17"},"frames":frames}))
 '''
 
@@ -126,7 +130,7 @@ class HumanPoseTests(unittest.TestCase):
                         self.fail(current.get("error"))
                     time.sleep(.02)
                 self.fail("controlled worker did not report its first frame")
-            return self.wait(created["job_id"], status="failed" if mode in {"fail", "invalid", "nan"} else "completed")
+            return self.wait(created["job_id"], status="failed" if mode in {"fail", "invalid", "nan", "wrong_view"} else "completed")
 
     def clip(self):
         primary = self.store.set_reference_clip(self.session, {"name": "camera A", "fps": 2, "frames": [
@@ -200,6 +204,73 @@ class HumanPoseTests(unittest.TestCase):
         self.assertEqual([p["frame"] for p in prepared], original)
         with self.assertRaisesRegex(APIError, "view_id"):
             self.jobs.start(self.request(reference_id=None, view_id=second["clip_id"]))
+
+    def test_multi_view_tracks_independent_manual_boxes_and_preserves_both_cameras(self):
+        primary, second = self.clip()
+        first_box, second_box = [.1, .1, .5, .6], [.4, .05, .5, .8]
+        request = {"session_id": self.session, "request_id": uuid.uuid4().hex,
+                   "views": [{"view_id": primary["clip_id"], "reference_id": primary["frames"][1]["id"], "bbox": first_box},
+                             {"view_id": second["clip_id"], "reference_id": second["frames"][1]["id"], "bbox": second_box}],
+                   "start_time_sec": .3, "end_time_sec": 1.5, "sample_fps": 2}
+        original_request = copy.deepcopy(request)
+        job = self.start(request)
+        self.assertEqual(request, original_request)
+        self.assertEqual((job["status"], job["schema_version"], job["multi_view"], job["total_frames"]),
+                         ("completed", 2, True, 5))
+        self.assertEqual(job["view_ids"], [primary["clip_id"], second["clip_id"]])
+        self.assertEqual([view["sampled_frames"] for view in job["views"]], [3, 2])
+        self.assertEqual([frame["time_sec"] for frame in job["frames"]], [.5, 1., 1.5, .34, 1.2])
+        self.assertEqual([frame["frame_index"] for frame in job["frames"]], [1, 2, 3, 1, 3])
+        self.assertEqual([frame["view_id"] for frame in job["frames"]],
+                         [primary["clip_id"]] * 3 + [second["clip_id"]] * 2)
+        self.assertTrue(all(frame["camera"] == camera() for frame in job["frames"]))
+        self.assertEqual(job["tracking"]["scope"], "per_view_independent")
+        self.assertEqual(job["tracking"]["cross_view_identity_source"], "user_designated_boxes")
+        self.assertFalse(job["tracking"]["identity_guaranteed"])
+        manifest = json.loads((self.jobs.directory / job["job_id"] / "input.json").read_text())
+        self.assertEqual((manifest["schema_version"], manifest["view_ids"]), (2, job["view_ids"]))
+        self.assertEqual(manifest["frames"][0]["bbox_xywh"], [16, 12, 80, 72])
+        self.assertEqual(manifest["frames"][3]["bbox_xywh"], [64, 6, 80, 96])
+        self.assertEqual([frame["view_id"] for frame in manifest["frames"]],
+                         [primary["clip_id"]] * 3 + [second["clip_id"]] * 2)
+        refs = [{"job_id": job["job_id"], "reference_id": job["frames"][index]["reference_id"]} for index in (0, 3)]
+        note = "Compare " + " ".join("[[pose:" + ref["job_id"] + ":" + ref["reference_id"] + "]]" for ref in refs)
+        old_frames = copy.deepcopy(job["frames"])
+        self.store.set_reference_clip(self.session, {"frames": [{"data_url": self.data_url}]})
+        self.assertEqual(self.jobs.get(job["job_id"])["frames"], old_frames)
+        prepared = prepare_pose_feedback(self.store, self.session, refs, note)
+        self.assertEqual([entry["frame"]["view_id"] for entry in prepared], job["view_ids"])
+        self.assertTrue(all(entry["multi_view"] and entry["view_ids"] == job["view_ids"] for entry in prepared))
+
+    def test_multi_view_rejects_ambiguous_stale_or_oversize_inputs_before_creating_job(self):
+        primary, second = self.clip()
+        item_a = {"view_id": primary["clip_id"], "reference_id": primary["frames"][0]["id"], "bbox": [.1, .1, .5, .6]}
+        item_b = {"view_id": second["clip_id"], "reference_id": second["frames"][0]["id"], "bbox": [.4, .05, .5, .8]}
+        base = {"session_id": self.session, "request_id": uuid.uuid4().hex,
+                "views": [item_a, item_b], "start_time_sec": 0, "end_time_sec": 1, "sample_fps": 2}
+        cases = [dict(base, views=None), dict(base, views=[item_a]), dict(base, views=[item_a] * 9),
+                 dict(base, views=[item_a, item_a]), dict(base, views=[item_a, dict(item_b, view_id=uuid.uuid4().hex)]),
+                 dict(base, views=[dict(item_a, bbox=None), item_b]),
+                 dict(base, views=[dict(item_a, reference_id=primary["frames"][2]["id"]), item_b]),
+                 dict(base, bbox=[.1, .1, .2, .2]), dict(base, view_id=primary["clip_id"]),
+                 dict(base, end_time_sec=2)]
+        for request in cases:
+            with self.subTest(request=request), self.assertRaises(APIError):
+                self.jobs.start(request)
+        with patch("human_pose.MAX_FRAMES", 4), self.assertRaisesRegex(APIError, "4 samples across all views"):
+            self.jobs.start(base)
+        self.assertEqual(self.jobs.list(self.session)["jobs"], [])
+
+    def test_multi_view_rejects_worker_frames_assigned_to_another_camera(self):
+        primary, second = self.clip()
+        payload = {"session_id": self.session, "request_id": uuid.uuid4().hex,
+                   "views": [{"view_id": primary["clip_id"], "bbox": [.1, .1, .5, .6]},
+                             {"view_id": second["clip_id"], "bbox": [.4, .05, .5, .8]}],
+                   "start_time_sec": 0, "end_time_sec": .5, "sample_fps": 2}
+        job = self.start(payload, "wrong_view")
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("camera view", job["error"])
+        self.assertEqual(job["frames"], [])
 
     def test_progress_cancel_and_restart_are_durable_and_never_completed(self):
         primary, _ = self.clip()

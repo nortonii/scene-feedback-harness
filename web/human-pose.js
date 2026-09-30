@@ -22,6 +22,14 @@ export function sampledPoseFrameCount(frames, start, end, fps) {
   }
   return count;
 }
+export function firstPoseFrame(view, start) {
+  return Array.isArray(view?.frames) && Number.isFinite(start)
+    ? view.frames.find((frame) => Number.isFinite(frame?.time_sec) && frame.time_sec >= start-1e-6) || null
+    : null;
+}
+export function sampledPoseViewCount(views, start, end, fps) {
+  return Array.isArray(views) ? views.reduce((sum, view) => sum + sampledPoseFrameCount(view?.frames, start, end, fps), 0) : 0;
+}
 export function poseToken(jobId, referenceId) {
   if (![jobId, referenceId].every((value) => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value))) return null;
   return `[[pose:${jobId}:${referenceId}]]`;
@@ -47,10 +55,14 @@ export function collectPoseReferences(note, candidates, limit=8) {
 }
 export function poseFrameForReference(job, referenceId, viewId, time) {
   if (!Array.isArray(job?.frames) || !job.frames.length) return null;
-  const frames = job.frames.filter((frame) => !frame.view_id || frame.view_id === job.view_id);
-  if (!job.view_id) return job.reference_id === referenceId
-    ? frames.find((frame) => frame.reference_id === referenceId) || null : null;
-  if (!viewId || job.view_id !== viewId || !Number.isFinite(time)) return null;
+  const viewIds = Array.isArray(job.view_ids) && job.view_ids.length ? job.view_ids : job.view_id ? [job.view_id] : [];
+  if (!viewIds.length) return job.reference_id === referenceId
+    ? job.frames.find((frame) => frame.reference_id === referenceId) || null : null;
+  if (!viewId || !viewIds.includes(viewId) || !Number.isFinite(time)) return null;
+  const frames = job.frames.filter((frame) => frame.view_id === viewId || !job.multi_view && !frame.view_id);
+  if (!frames.length) return null;
+  /* A multi-camera job stores a flat list of frames; each camera has its own
+     independent 2D track and must never inherit another camera's skeleton. */
   const exact = frames.find((frame) => frame.reference_id === referenceId);
   if (exact) return exact;
   const sampled = frames.filter((frame) => Number.isFinite(frame.time_sec));

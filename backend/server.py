@@ -541,7 +541,7 @@ def _make_server_unlocked(
                     "SCENE_FEEDBACK_DATA_DIR": str(context.store.data_dir),
                     "SCENE_FEEDBACK_PROJECT_DIR": str(context.project_dir),
                     "SCENE_FEEDBACK_WEB_DIR": str(web_root),
-                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-29-vitpose"},
+                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-vitpose-multiview"},
             "tool_timeout_sec": 120, "required": True,
         }}}
         context.gateway.browser_url = lambda session_id: browser_url(session_id, server.server_port, context, prefixed=True)
