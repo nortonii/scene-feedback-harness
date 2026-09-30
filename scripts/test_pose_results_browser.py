@@ -197,7 +197,9 @@ def main() -> None:
                 assert overlay_info(page)["job_id"] == job_id
                 open_results(page)
                 page.locator("#human-pose-panel").get_by_role("button", name="隐藏全部", exact=True).click()
-                assert overlay_info(page)["boxes"] == 0 and overlay_pixels(page) == 0
+                hidden_info,hidden_pixels=overlay_info(page),overlay_pixels(page)
+                assert hidden_info["boxes"] == 0 and hidden_pixels == 0, {"overlay":hidden_info,"pixels":hidden_pixels,
+                    "size":page.evaluate("({width:__poseCheck.ui.humanCanvas.clientWidth,height:__poseCheck.ui.humanCanvas.clientHeight})")}
                 page.reload()
                 page.wait_for_function("window.__poseCheck && __poseCheck.state.workspaceReady && __poseCheck.state.humanJobs.length===3")
                 assert overlay_info(page) == {"boxes": 0, "job_id": None, "choice": "hidden"}

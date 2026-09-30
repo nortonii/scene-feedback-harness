@@ -12,14 +12,17 @@ import traceback
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pose_worker import run_inference  # noqa: E402
+from wholebody_profile import COCO17_PROFILE, WHOLEBODY133_PROFILE  # noqa: E402
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Infer observed COCO17 keypoints from an exported workbench source manifest")
+    parser = argparse.ArgumentParser(description="Infer observed WholeBody133 keypoints from an exported workbench source manifest")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model-path", type=Path, required=True, help="Local ViTPose+ Base checkpoint directory")
     parser.add_argument("--detector-path", type=Path, help="Local official Faster R-CNN COCO .pth for automatic source tracking")
+    parser.add_argument("--profile", choices=(WHOLEBODY133_PROFILE, COCO17_PROFILE),
+                        default=WHOLEBODY133_PROFILE, help="WholeBody133 by default; coco17 is explicit legacy mode")
     args = parser.parse_args()
     manifest = json.loads(args.manifest.expanduser().resolve(strict=True).read_text(encoding="utf-8"))
     project_dir = manifest.get("project_dir")
@@ -43,6 +46,7 @@ def main() -> int:
         with contextlib.redirect_stdout(sys.stderr):
             run_inference(args.manifest, output, model_path=args.model_path,
                           detector_path=args.detector_path, auto_detect=args.detector_path is not None,
+                          profile=args.profile,
                           progress=progress)
         return 0
     except Exception as exc:

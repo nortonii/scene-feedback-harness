@@ -95,6 +95,7 @@ class WorkspaceGateway:
         result["human_pose_supported"] = self.pose_jobs is not None
         result["human_pose_inference_supported"] = False
         result["human_pose_mode"] = "external_results"
+        result["pose_corrections_supported"] = True
         result["desktop_available"] = self.external_review and bool(
             result.get("thread_id") or getattr(self.adapter, "thread_id", None) or self.desktop_seed_thread_id
         )
@@ -1594,6 +1595,10 @@ class WorkspaceGateway:
             lines.append("用户引用的人体关节证据：按 evidence_kind 区分二维观测和三维投影；按声明的 keypoint_profile 解读关节，不把投影当成实测，不自行猜测跨机位身份。")
             for pose in feedback["human_pose"]:
                 lines.append(json.dumps({key: value for key, value in pose.items() if not key.endswith("_url")}, ensure_ascii=False))
+        if feedback.get("human_pose_edits"):
+            lines.append("用户手动修正的二维关键点：使用 $capsule-human-tracking 的 apply-corrections 合并到原观测，再重建身体与手部。model score 保留原值；manual_visibility=visible 才是人工可见观测，occluded/missing 不可当成可见测量。未修改点保留 parent_evidence_kind，不把三维投影当成二维实测。")
+            for pose in feedback["human_pose_edits"]:
+                lines.append(f"[[pose_edit:{pose['id']}]] → " + json.dumps({key: value for key, value in pose.items() if not key.endswith("_url") and key not in {"frame", "effective_keypoints"}}, ensure_ascii=False))
         lines += ["", "附件顺序："]
         image_paths: list[str] = []
 
@@ -1638,6 +1643,13 @@ class WorkspaceGateway:
                 label += " · " + frame["reference_name"]
             add("人体关键点来源原帧：" + label, pose["reference_original_url"])
             add(("三维关节投影参考（青色）：" if pose.get("evidence_kind") == "projected_3d" else "二维关节证据（青色）：") + label, pose["pose_overlay_url"])
+        for pose in feedback.get("human_pose_edits", []):
+            frame = pose["frame"]
+            label = f"[[pose_edit:{pose['id']}]] · {pose['track_id']} · {frame['reference_name']}"
+            if "frame_index" in frame:
+                label += f" · {frame['view_name']} · 第 {frame['frame_index'] + 1} 帧 · {frame['time_sec']:.6f} 秒"
+            add("人工关键点修正来源原帧：" + label, pose["reference_original_url"])
+            add("人工修正关键点（橙色；遮挡/缺失有独立状态）：" + label, pose["pose_overlay_url"])
         for frame in feedback.get("dynamic_frames", []):
             lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
             frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""

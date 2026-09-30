@@ -8,6 +8,7 @@ script validates their local files and prints the exact import arguments.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -16,6 +17,9 @@ import shutil
 from typing import Any
 
 from pose_worker import COCO_NAMES, run_inference, validate_manifest
+from wholebody_profile import (COCO17_PROFILE, WHOLEBODY133_PROFILE,
+                               WHOLEBODY133_NAMES, WHOLEBODY133_EDGES,
+                               WHOLEBODY133_GROUPS)
 
 
 def _finite(value: Any, label: str, *, minimum: float | None = None,
@@ -84,6 +88,9 @@ def _topology(result: dict) -> tuple[list[str], list[list[int]]]:
         raise ValueError("result skeleton_edges must use declared joint indices")
     if result.get("keypoint_profile") == "coco17" and names != list(COCO_NAMES):
         raise ValueError("coco17 profile requires canonical COCO17 joint names and order")
+    if result.get("keypoint_profile") == WHOLEBODY133_PROFILE and (
+            names != list(WHOLEBODY133_NAMES) or edges != [list(edge) for edge in WHOLEBODY133_EDGES]):
+        raise ValueError("coco-wholebody133 profile requires canonical 133 joints and edges")
     if (not isinstance(result.get("keypoint_profile"), str) or not result["keypoint_profile"].strip()
             or len(result["keypoint_profile"]) > 96):
         raise ValueError("result must declare a keypoint_profile")
@@ -91,10 +98,15 @@ def _topology(result: dict) -> tuple[list[str], list[list[int]]]:
 
 
 def _bbox(value: Any) -> None:
-    if not isinstance(value, dict) or set(value) != {"x", "y", "width", "height"}:
-        raise ValueError("tracked result bbox must be normalized {x,y,width,height}")
-    x, y, w, h = (_finite(value[key], "bbox " + key, minimum=0, maximum=1)
-                  for key in ("x", "y", "width", "height"))
+    if isinstance(value, dict) and set(value) == {"x", "y", "width", "height"}:
+        coordinates = [value[key] for key in ("x", "y", "width", "height")]
+    elif isinstance(value, list) and len(value) == 4:
+        # The workbench's archived importer uses normalized xywh arrays;
+        # direct standalone results use the named-object form.
+        coordinates = value
+    else:
+        raise ValueError("tracked result bbox must be normalized xywh")
+    x, y, w, h = (_finite(item, "bbox coordinate", minimum=0, maximum=1) for item in coordinates)
     if w < .01 or h < .01 or x + w > 1.000001 or y + h > 1.000001:
         raise ValueError("tracked bbox must have positive area inside its source image")
 
@@ -151,8 +163,11 @@ def verify_result(manifest: dict, result: dict, *, result_path: Path | None = No
             lost_total += 1
             if frame["tracking_status"] != "lost":
                 raise ValueError("null bbox requires lost tracking_status")
-            if any(point["in_frame"] or point["score"] for point in points):
-                raise ValueError("null bbox requires all joints out of frame with zero score")
+            if any(point["score"] or (point["in_frame"] and not (
+                    point.get("manual_source") == "manual_2d"
+                    and point.get("manual_visibility") == "visible"
+                    and point.get("manual_position") is True)) for point in points):
+                raise ValueError("null bbox allows only explicitly positioned manual visible joints with zero model scores")
         else:
             _bbox(frame["bbox"])
     report = {"job_id": result["job_id"], "source_snapshot_id": result["source_snapshot_id"],
@@ -234,9 +249,124 @@ def adapt_observations(manifest: dict, observations: dict) -> dict:
             **({"view_id": manifest["view_id"]} if manifest["schema_version"] == 1 else {"view_ids": manifest["view_ids"]}),
             "evidence_kind": "observed_2d", "keypoint_profile": profile,
             "keypoint_names": names, "skeleton_edges": edges,
+            **({"keypoint_groups": WHOLEBODY133_GROUPS} if profile == WHOLEBODY133_PROFILE else {}),
             "model": {"name": "external observed 2D source", "source": provenance["source_artifact"]},
             "provenance": provenance, "tracking": {"method": provenance["method"], "identity_guaranteed": False},
             "frames": output_frames}
+
+
+def apply_corrections(manifest: dict, result: dict, corrections: dict,
+                      *, corrections_path: Path | None = None) -> dict:
+    """Merge source-bound human joint edits without changing model confidence.
+
+    The original result stays intact. Every changed joint retains its model
+    prediction for audit and gets an explicit manual origin and visibility.
+    """
+    verify_result(manifest, result)
+    if result["keypoint_profile"] != WHOLEBODY133_PROFILE:
+        raise ValueError("manual correction merge requires COCO-WholeBody133 parent evidence")
+    if not isinstance(corrections, dict) or type(corrections.get("schema_version")) is not int or corrections["schema_version"] != 1 or corrections.get("kind") != "scene_feedback_pose_corrections":
+        raise ValueError("corrections need scene_feedback_pose_corrections schema_version 1")
+    for key in ("project_id", "session_id", "source_snapshot_id"):
+        if corrections.get(key) != manifest[key]:
+            raise ValueError("corrections differ from source " + key)
+    if corrections.get("parent_job_id") != result["job_id"]:
+        raise ValueError("corrections parent_job_id differs from result job_id")
+    for key in ("keypoint_profile", "keypoint_names", "skeleton_edges"):
+        if corrections.get(key) != result[key]:
+            raise ValueError("corrections differ from parent " + key)
+    if corrections.get("parent_evidence_kind") != result["evidence_kind"]:
+        raise ValueError("corrections differ from parent evidence_kind")
+    if corrections.get("coordinate_frame") != "reference_image_normalized":
+        raise ValueError("corrections must use reference_image_normalized coordinates")
+    items = corrections.get("frames")
+    if not isinstance(items, list) or not items or len(items) > len(manifest["frames"]):
+        raise ValueError("corrections need one or more edited source frames")
+    merged = copy.deepcopy(result)
+    by_ref = {source["ref_id"]: (source, original, amended)
+              for source, original, amended in zip(manifest["frames"], result["frames"], merged["frames"])}
+    if len(by_ref) != len(manifest["frames"]):
+        raise ValueError("source export has duplicate ref_id values")
+    seen_refs: set[str] = set()
+    edit_count = 0
+    names = result["keypoint_names"]
+    name_to_index = {name: index for index, name in enumerate(names)}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("correction frame must be an object")
+        ref_id = item.get("ref_id")
+        if not isinstance(ref_id, str) or ref_id not in by_ref or ref_id in seen_refs:
+            raise ValueError("correction ref_id is unknown or repeated")
+        seen_refs.add(ref_id)
+        source, original, amended = by_ref[ref_id]
+        for key in ("view_id", "frame_index", "time_seconds", "width", "height", "image_sha256", "image_orientation"):
+            expected = original[key]
+            if item.get(key) != expected or (key in ("frame_index", "width", "height") and type(item.get(key)) is not int):
+                raise ValueError(f"correction {ref_id} differs from source {key}")
+        if type(item.get("time_seconds")) not in (int, float):
+            raise ValueError("correction time_seconds must be numeric")
+        parent_points = item.get("original_keypoints")
+        if not isinstance(parent_points, list) or len(parent_points) != len(names):
+            raise ValueError("correction must echo all original parent keypoints")
+        for index, (echo, point) in enumerate(zip(parent_points, original["keypoints"])):
+            if not isinstance(echo, dict) or any(echo.get(key) != point.get(key) for key in ("name", "x", "y", "score", "in_frame")):
+                raise ValueError(f"correction parent joint {index} differs from actual result")
+            for key in ("raw_score", "manual_source", "manual_visibility", "manual_position"):
+                if (key in echo or key in point) and echo.get(key) != point.get(key):
+                    raise ValueError(f"correction parent joint {index} differs from actual result {key}")
+        edits = item.get("edits")
+        if not isinstance(edits, list) or not 1 <= len(edits) <= len(names):
+            raise ValueError("correction frame needs one or more named edits")
+        seen_names: set[str] = set()
+        for edit in edits:
+            if not isinstance(edit, dict) or edit.get("name") not in name_to_index or edit["name"] in seen_names:
+                raise ValueError("correction joint name is unknown or repeated")
+            name = edit["name"]
+            seen_names.add(name)
+            visibility = edit.get("visibility")
+            if visibility not in ("visible", "occluded", "missing"):
+                raise ValueError("correction visibility must be visible, occluded or missing")
+            if visibility == "missing":
+                if "x" in edit or "y" in edit:
+                    raise ValueError("missing joint must not have coordinates")
+                parent_point = original["keypoints"][name_to_index[name]]
+                x, y = parent_point["x"], parent_point["y"]
+                positioned = False
+            elif visibility == "occluded" and "x" not in edit and "y" not in edit:
+                # The absence of a human location is distinct from a measured
+                # image point; keep the original estimate only for display.
+                point = original["keypoints"][name_to_index[name]]
+                x, y = point["x"], point["y"]
+                positioned = False
+            else:
+                x = _finite(edit.get("x"), "manual x", minimum=0, maximum=1)
+                y = _finite(edit.get("y"), "manual y", minimum=0, maximum=1)
+                positioned = True
+                if visibility == "visible" and (x >= 1 or y >= 1):
+                    raise ValueError("visible correction must lie inside its source image")
+            point = amended["keypoints"][name_to_index[name]]
+            point["model_prediction"] = {key: original["keypoints"][name_to_index[name]].get(key)
+                                         for key in ("x", "y", "score", "in_frame", "visible", "raw_score")
+                                         if key in original["keypoints"][name_to_index[name]]}
+            point.update({"x": x, "y": y, "in_frame": visibility == "visible",
+                          "visible": visibility == "visible", "origin": "manual",
+                          "visibility": visibility, "manual_source": "manual_2d",
+                          "manual_visibility": visibility, "manual_position": positioned,
+                          "pixel_x": x * original["width"], "pixel_y": y * original["height"]})
+            edit_count += 1
+    provenance = merged.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+        merged["provenance"] = provenance
+    prior_manual = copy.deepcopy(provenance.get("manual"))
+    provenance["manual"] = {"kind": "human_annotation", "source": "scene_feedback_pose_corrections",
+                            "edited_frames": len(seen_refs), "edited_joints": edit_count,
+                            "confidence_policy": "model score retained; manual_source, manual_visibility and manual_position carry the human evidence class",
+                            **({"previous_amendment": prior_manual} if prior_manual is not None else {}),
+                            **({"source_artifact": str(corrections_path.resolve()),
+                                "source_sha256": _digest(corrections_path)} if corrections_path else {})}
+    verify_result(manifest, merged)
+    return merged
 
 
 def _joint_map(path: Path, result: dict) -> dict:
@@ -257,18 +387,22 @@ def _joint_map(path: Path, result: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
-    for name in ("source-export", "track", "adapt-observations", "check-result", "import-payload", "handoff"):
+    for name in ("source-export", "track", "adapt-observations", "apply-corrections", "check-result", "import-payload", "handoff"):
         command = sub.add_parser(name)
         command.add_argument("--manifest", type=Path, required=True, help="manifest_json_path from workspace_export_pose_sources")
-        if name in ("check-result", "import-payload", "handoff"):
+        if name in ("apply-corrections", "check-result", "import-payload", "handoff"):
             command.add_argument("--result", type=Path, required=True)
-        if name in ("track", "adapt-observations", "handoff"):
+        if name in ("track", "adapt-observations", "apply-corrections", "handoff"):
             command.add_argument("--output", type=Path, required=True)
         if name == "track":
             command.add_argument("--model-path", type=Path, required=True)
             command.add_argument("--detector-path", type=Path)
+            command.add_argument("--profile", choices=(WHOLEBODY133_PROFILE, COCO17_PROFILE),
+                                 default=WHOLEBODY133_PROFILE)
         if name == "adapt-observations":
             command.add_argument("--observations", type=Path, required=True)
+        if name == "apply-corrections":
+            command.add_argument("--corrections", type=Path, required=True)
         if name == "handoff":
             command.add_argument("--joint-map", type=Path)
     args = parser.parse_args()
@@ -285,6 +419,7 @@ def main() -> None:
             parser.error("automatic tracking requires --detector-path")
         result = run_inference(manifest_path, output, model_path=args.model_path,
                                detector_path=args.detector_path,
+                               profile=args.profile,
                                progress=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True))
         report = verify_result(manifest, result, result_path=output)
         print(json.dumps({"type": "complete", **report}, ensure_ascii=False), flush=True)
@@ -298,6 +433,18 @@ def main() -> None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(adapted, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"type": "adapted", **verify_result(manifest, adapted, result_path=output)}, ensure_ascii=False))
+        return
+    if args.action == "apply-corrections":
+        output = _project_result_path(manifest, args.output)
+        if output.exists():
+            parser.error("output already exists; choose a new merged result path")
+        parent = _json(args.result.expanduser().resolve(strict=True))
+        corrections_path = args.corrections.expanduser().resolve(strict=True)
+        merged = apply_corrections(manifest, parent, _json(corrections_path),
+                                   corrections_path=corrections_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(merged, ensure_ascii=False, allow_nan=False, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps({"type": "corrected", **verify_result(manifest, merged, result_path=output)}, ensure_ascii=False))
         return
     result_path = args.result.expanduser().resolve(strict=True)
     result = _json(result_path)

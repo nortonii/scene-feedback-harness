@@ -156,6 +156,19 @@ def _joint_profile(result: dict) -> tuple[str, list[str], list[list[int]]]:
     return profile, copy.deepcopy(names), copy.deepcopy(edges)
 
 
+def _joint_groups(result: dict, names: list[str]) -> dict[str, list[int]]:
+    groups = result.get("keypoint_groups", {})
+    if not isinstance(groups, dict) or len(groups) > 32:
+        raise APIError(400, "keypoint_groups must contain at most 32 named groups")
+    for name, indices in groups.items():
+        if (not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name)
+                or not isinstance(indices, list) or not indices or len(indices) > len(names)
+                or any(type(index) is not int or not 0 <= index < len(names) for index in indices)
+                or len(set(indices)) != len(indices)):
+            raise APIError(400, "keypoint_groups must reference distinct declared joint indices")
+    return copy.deepcopy(groups)
+
+
 class HumanPoseJobs:
     """Passive result store; the historical name keeps old persisted jobs readable."""
 
@@ -396,6 +409,7 @@ class HumanPoseJobs:
                 raise APIError(409, "pose reference sources changed after export; export current sources again")
             normalized = self._validate_result(job, result)
             profile, names, edges = _joint_profile(result)
+            groups = _joint_groups(result, names)
             provenance = result.get("provenance", {})
             if not isinstance(provenance, dict):
                 raise APIError(400, "pose provenance must be an object")
@@ -423,6 +437,7 @@ class HumanPoseJobs:
                        result_frame_count=len(normalized), model=model, tracking=tracking,
                        evidence_kind=result["evidence_kind"], confidence_threshold=threshold, keypoint_profile=profile,
                        keypoint_names=names, skeleton_edges=edges, provenance=provenance,
+                       keypoint_groups=groups,
                        result_digest=digest, finished_at=_now(), error=None)
             _atomic_json(directory / "job.json", job)
             return _summary(job)
@@ -466,8 +481,17 @@ class HumanPoseJobs:
                     raise APIError(400, "pose result requires finite normalized coordinates and scores")
                 if type(point.get("in_frame")) is not bool:
                     raise APIError(400, "pose result requires a boolean in_frame for each joint")
+                manual = {}
+                if any(key in point for key in ("manual_visibility", "manual_source", "manual_position")):
+                    visibility = point.get("manual_visibility")
+                    if (not isinstance(visibility, str) or visibility not in {"visible", "occluded", "missing"} or point.get("manual_source") != "manual_2d"
+                            or type(point.get("manual_position")) is not bool
+                            or visibility == "visible" and (not point["manual_position"] or not point["in_frame"] or values[0] >= 1 or values[1] >= 1)
+                            or visibility == "missing" and (point["manual_position"] or point["in_frame"])):
+                        raise APIError(400, "imported manual joint metadata must declare consistent visibility/source/position")
+                    manual = {key: point[key] for key in ("manual_visibility", "manual_source", "manual_position")}
                 normalized.append({"name": name, "x": values[0], "y": values[1], "score": values[2],
-                                   "in_frame": point["in_frame"],
+                                   "in_frame": point["in_frame"], **manual,
                                    **({"raw_score": point["raw_score"]} if type(point.get("raw_score")) in (int, float) and math.isfinite(point["raw_score"]) else {})})
             status = prediction.get("tracking_status")
             if status not in {"tracked", "lost"}:
@@ -475,7 +499,9 @@ class HumanPoseJobs:
             roi = prediction.get("bbox")
             if isinstance(roi, dict):
                 roi = [roi.get(key) for key in ("x", "y", "width", "height")]
-            if roi is None and (status != "lost" or any(point["score"] > 0 or point["in_frame"] for point in normalized)):
+            if roi is None and (status != "lost" or any(point["score"] > 0 or point["in_frame"] and not
+                                                      (point.get("manual_source") == "manual_2d" and point.get("manual_visibility") == "visible"
+                                                       and point.get("manual_position") is True) for point in normalized)):
                 raise APIError(400, "no-person frame must be lost with no visible or confident keypoints")
             roi_status = prediction.get("roi_status")
             if roi_status is not None and (not isinstance(roi_status, str) or len(roi_status) > 120):
@@ -559,6 +585,8 @@ def _render_overlay(path: Path, frame: dict, threshold: float, edges: list[list[
     width, height = image.size
     line_width = max(2, round(min(width, height) / 200))
     def visible(point: dict) -> bool:
+        if point.get("manual_visibility") is not None:
+            return point["manual_visibility"] == "visible" and point.get("in_frame", True)
         return frame.get("tracking_status") != "lost" and point["score"] >= threshold and point.get("in_frame", True)
     for first, second in edges if edges is not None else SKELETON_EDGES:
         if visible(points[first]) and visible(points[second]):
@@ -568,9 +596,136 @@ def _render_overlay(path: Path, frame: dict, threshold: float, edges: list[list[
     for point in points:
         if visible(point):
             x, y = point["x"] * width, point["y"] * height
-            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill="#00b7b0", outline="white")
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill="#b65320" if point.get("manual_source") else "#00b7b0", outline="white")
+        elif point.get("manual_visibility") == "occluded" and point.get("manual_position"):
+            x, y = point["x"] * width, point["y"] * height
+            draw.ellipse((x-radius,y-radius,x+radius,y+radius),outline="#b65320",width=line_width)
     draw.rectangle((4, 4, 255, 25), fill="white")
-    draw.text((8, 8), "Projected 3D joints" if evidence_kind == "projected_3d" else "Estimated 2D joints", fill="#005f5b")
+    draw.text((8, 8), "Manual 2D corrections" if evidence_kind == "manual_2d" else "Projected 3D joints" if evidence_kind == "projected_3d" else "Estimated 2D joints", fill="#005f5b")
     output = io.BytesIO()
     image.save(output, "PNG")
     return output.getvalue()
+
+
+def prepare_pose_edit_feedback(store: Any, session_id: str, payload: dict, pose_jobs: Any = None) -> list[dict]:
+    """Bind sparse manual corrections to immutable archived source evidence.
+
+    Unchanged predictions and original scores remain intact. Only explicitly
+    edited visible joints are new manual observations; occluded/missing joints
+    must never be presented to reconstruction as visible measurements.
+    """
+    store.get_session(session_id)
+    samples = payload.get("pose_edits", [])
+    note = payload.get("note")
+    if not isinstance(samples, list) or len(samples) > 8:
+        raise APIError(400, "pose_edits must contain at most 8 source frames")
+    if note is not None:
+        if not isinstance(note, str):
+            raise APIError(400, "pose edit note must be text")
+        pattern = re.compile(r"\[\[pose_edit:([0-9a-f]{32})\]\]")
+        tokens = list(pattern.finditer(note))
+        starts = {token.start() for token in tokens}
+        if any(match.start() not in starts for match in re.finditer(r"\[\[pose_edit:", note)):
+            raise APIError(400, "malformed inline pose edit reference")
+        cited = {token.group(1) for token in tokens}
+        supplied = {item["id"] for item in samples if isinstance(item, dict) and isinstance(item.get("id"), str)}
+        if cited != supplied:
+            raise APIError(400, "pose edit references must exactly match the cited corrections")
+    allowed = {"id", "job_id", "reference_id", "image_sha256", "image_orientation", "keypoint_profile", "edits"}
+    prepared, seen_ids, seen_frames = [], set(), set()
+    for sample in samples:
+        if not isinstance(sample, dict) or set(sample) - allowed:
+            raise APIError(400, "pose edit contains unsupported fields")
+        edit_id = sample.get("id")
+        if not isinstance(edit_id, str) or not ID.fullmatch(edit_id) or edit_id in seen_ids:
+            raise APIError(400, "pose edit IDs must be unique 32 character hex values")
+        seen_ids.add(edit_id)
+        job = _load_job(store, sample.get("job_id"))
+        if job.get("session_id") != session_id or job.get("project_id") != store.state.get("workspace", {}).get("project_id"):
+            raise APIError(400, "pose edit parent belongs to another project/session")
+        if job.get("status") != "completed":
+            raise APIError(409, "pose edit parent result has not completed")
+        reference_id = sample.get("reference_id")
+        if not isinstance(reference_id, str) or not ID.fullmatch(reference_id):
+            raise APIError(400, "pose edit needs an exact parent reference ID")
+        pair = (job["job_id"], reference_id)
+        if pair in seen_frames:
+            raise APIError(400, "duplicate pose edit source frame")
+        seen_frames.add(pair)
+        if job.get("automatic"):
+            index = _frame_index(store, job["job_id"])
+            position = index["references"].get(reference_id)
+            frame = _read_archive_frames(store, job["job_id"], index, position, 1)[0] if position is not None else None
+        else:
+            frame = next((item for item in job.get("frames", []) if item["reference_id"] == reference_id), None)
+        if frame is None:
+            raise APIError(400, "pose edit reference is not in its parent result")
+        if (sample.get("image_sha256") != frame.get("image_sha256") or not isinstance(frame.get("image_sha256"), str)
+                or sample.get("image_orientation") != frame.get("image_orientation")
+                or sample.get("keypoint_profile") != job.get("keypoint_profile", "coco17")):
+            raise APIError(400, "pose edit source hash/orientation/profile does not match the parent frame")
+        image_path = _image_path(store, frame["reference_url"])
+        if hashlib.sha256(image_path.read_bytes()).hexdigest() != frame["image_sha256"]:
+            raise APIError(409, "pose edit original source image changed")
+        names = job.get("keypoint_names", JOINT_NAMES)
+        edits = sample.get("edits")
+        if not isinstance(edits, list) or not 1 <= len(edits) <= len(names):
+            raise APIError(400, "pose edits must contain sparse corrections for declared joints")
+        seen_names, normalized = set(), []
+        for edit in edits:
+            if not isinstance(edit, dict) or set(edit) - {"name", "x", "y", "visibility"}:
+                raise APIError(400, "manual joint needs a declared name, visibility and optional coordinates")
+            name, visibility = edit.get("name"), edit.get("visibility")
+            if not isinstance(name, str) or name not in names or name in seen_names:
+                raise APIError(400, "manual joints must have unique declared names")
+            seen_names.add(name)
+            if not isinstance(visibility, str) or visibility not in {"visible", "occluded", "missing"}:
+                raise APIError(400, "manual joint visibility must be visible, occluded or missing")
+            has_position = "x" in edit or "y" in edit
+            if (visibility == "visible" and not has_position or visibility == "missing" and has_position
+                    or has_position and not {"x", "y"} <= edit.keys()):
+                raise APIError(400, "visible joints need x/y; missing joints cannot claim a position")
+            item = {"name": name, "visibility": visibility}
+            if has_position:
+                item.update(x=number(edit["x"], "manual joint x", maximum=1),
+                            y=number(edit["y"], "manual joint y", maximum=1))
+                if visibility == "visible" and (item["x"] >= 1 or item["y"] >= 1):
+                    raise APIError(400, "visible manual joints must lie inside the source image (x/y < 1)")
+            normalized.append(item)
+        effective = copy.deepcopy(frame["keypoints"])
+        for edit in normalized:
+            point = effective[names.index(edit["name"])]
+            point.update(manual_visibility=edit["visibility"], manual_source="manual_2d",
+                         manual_position="x" in edit, in_frame=edit["visibility"] == "visible")
+            if "x" in edit:
+                point.update(x=edit["x"], y=edit["y"])
+        source_frame = {"ref_id": reference_id, "view_id": frame["view_id"], "view_name": frame["view_name"],
+                        "frame_index": frame["frame_index"], "time_seconds": frame["time_sec"],
+                        "width": frame["width"], "height": frame["height"],
+                        "image_sha256": frame["image_sha256"], "image_orientation": frame["image_orientation"],
+                        "original_keypoints": copy.deepcopy(frame["keypoints"]), "edits": normalized,
+                        "effective_keypoints": effective}
+        if frame.get("camera"):
+            source_frame["camera"] = copy.deepcopy(frame["camera"])
+        if frame.get("clip_id"):
+            source_frame["clip_id"] = frame["clip_id"]
+        document = {"schema_version": 1, "kind": "scene_feedback_pose_corrections", "correction_id": edit_id,
+                    "project_id": job["project_id"], "session_id": session_id,
+                    "source_snapshot_id": job["source_snapshot_id"], "parent_job_id": job["job_id"],
+                    "track_id": job["track_id"], "parent_evidence_kind": job.get("evidence_kind", "observed_2d"),
+                    "evidence_kind": "manual_2d", "coordinate_frame": "reference_image_normalized",
+                    "keypoint_profile": job.get("keypoint_profile", "coco17"), "keypoint_names": copy.deepcopy(names),
+                    "skeleton_edges": copy.deepcopy(job.get("skeleton_edges", SKELETON_EDGES)),
+                    "keypoint_groups": copy.deepcopy(job.get("keypoint_groups", {})),
+                    "frames": [source_frame]}
+        corrected_frame = {**copy.deepcopy(frame), "keypoints": effective}
+        prepared.append({"id": edit_id, "parent_job_id": job["job_id"], "track_id": job["track_id"],
+                         "source": "manual_2d", "evidence_kind": "manual_2d", "parent_evidence_kind": document["parent_evidence_kind"],
+                         "coordinate_frame": document["coordinate_frame"], "keypoint_profile": document["keypoint_profile"],
+                         "keypoint_names": document["keypoint_names"], "skeleton_edges": document["skeleton_edges"],
+                         "confidence_threshold": job.get("confidence_threshold", .3), "frame": copy.deepcopy(frame),
+                         "edits": normalized, "effective_keypoints": effective,
+                         "reference_original_url": frame["reference_url"], "document": document,
+                         "_overlay_data": _render_overlay(image_path, corrected_frame, job.get("confidence_threshold", .3),
+                                                          job.get("skeleton_edges", SKELETON_EDGES), "manual_2d")})
+    return prepared

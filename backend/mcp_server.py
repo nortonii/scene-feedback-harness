@@ -90,6 +90,13 @@ def _feedback_with_local_paths(result: dict[str, Any], data_dir: Path | None = N
         for pose in item.get("human_pose", []):
             for name in ("reference_original", "pose_overlay"):
                 pose[name + "_path"] = str(_image_path(pose[name + "_url"], data_dir))
+        for pose in item.get("human_pose_edits", []):
+            for name in ("reference_original", "pose_overlay"):
+                pose[name + "_path"] = str(_image_path(pose[name + "_url"], data_dir))
+            feedback_id, edit_id = item.get("feedback_id"), pose.get("id")
+            if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) for value in (feedback_id, edit_id)):
+                raise ValueError("feedback contains an invalid pose correction ID")
+            pose["corrections_path"] = str((data_dir or DATA_DIR) / "human_pose" / "corrections" / feedback_id / (edit_id + ".json"))
         for name in ("scene_original", "scene_annotated", "screenshot"):
             url = item.get(f"{name}_url")
             if url:
@@ -156,6 +163,15 @@ def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) ->
                 label += f", view {frame['view_name']}, frame {frame['frame_index'] + 1}, {frame['time_sec']:.6f}s"
             for name in ("reference_original", "pose_overlay"):
                 content.append(TextContent(type="text", text=f"{label}: {name} (estimated 2D keypoints, not user-drawn geometry)"))
+                content.append(_preview_image(Path(pose[name + "_path"])))
+        for pose in item.get("human_pose_edits", []):
+            frame = pose["frame"]
+            label = f"[[pose_edit:{pose['id']}]] manual 2D corrections; profile {pose['keypoint_profile']}; reference {frame['reference_id']}"
+            if "frame_index" in frame:
+                label += f"; view {frame['view_name']}, frame {frame['frame_index'] + 1}, {frame['time_sec']:.6f}s"
+            content.append(TextContent(type="text", text=f"{label}: source-bound JSON {pose['corrections_path']}. Original model scores are unchanged; only explicitly visible manual points are observed measurements, not occluded/missing points. Unchanged points retain parent evidence kind."))
+            for name in ("reference_original", "pose_overlay"):
+                content.append(TextContent(type="text", text=f"{label}: {name}; orange points are user corrections"))
                 content.append(_preview_image(Path(pose[name + "_path"])))
         for frame in item.get("dynamic_frames", []):
             frame_label = f"clip frame {frame['frame_index'] + 1}, " if "frame_index" in frame else ""

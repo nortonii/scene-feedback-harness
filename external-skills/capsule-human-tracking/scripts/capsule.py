@@ -140,6 +140,8 @@ def main():
     p=sp.add_parser('build',help='Build standalone + integrated Blender, increments, and reopen/audit');p.add_argument('--config',required=True);p.add_argument('--motion',required=True);p.add_argument('--output',required=True);p.add_argument('--blender')
     p=sp.add_parser('review',help='Render before/after for both cameras; emit standalone review HTML');p.add_argument('--config',required=True);p.add_argument('--before');p.add_argument('--after',required=True);p.add_argument('--output',required=True);p.add_argument('--frames',default='0,mid,last',help='Comma-separated source frames, or all');p.add_argument('--views',default='all');p.add_argument('--video',action='store_true');p.add_argument('--blender')
     p=sp.add_parser('handoff',help='Bundle latest actor, config, code and provenance for Astra');p.add_argument('--config',required=True);p.add_argument('--run',required=True);p.add_argument('--output',required=True);p.add_argument('--copy-media',action='store_true')
+    p=sp.add_parser('wholebody-reconstruct',help='Calibrated source-bound WholeBody133 -> causal fixed body and finger capsules');p.add_argument('--config',required=True);p.add_argument('--output',required=True);p.add_argument('--frames',type=int)
+    p=sp.add_parser('wholebody-build',help='Save/reopen editable WholeBody body/hands; optional calibrated scene copy and static GLB');p.add_argument('--run',required=True);p.add_argument('--output',required=True);p.add_argument('--scene');p.add_argument('--world-to-blender-json',help='Explicit rigid camera-world -> Blender-world 4x4 JSON');p.add_argument('--preview-glb',action='store_true');p.add_argument('--preview-frame',type=int);p.add_argument('--blender')
     a=ap.parse_args()
     if a.command=='import-spi102':result=import_case(a)
     elif a.command=='template-edit':result=edit_template(a)
@@ -161,6 +163,13 @@ def main():
         if a.video and frames!=list(range(frames[0],frames[-1]+1)):raise ValueError('--video requires contiguous frames')
         out=fresh(a.output);worker({'action':'render','config':c,'before':str(Path(a.before).resolve()) if a.before else c['paths']['base_human'],'after':str(Path(a.after).resolve()),'frames':frames,'views':views,'output':str(out)},a.blender);review_package(c,out,frames,views,a.video);result={'review':str(out/'index.html'),'serve':f'python3 -m http.server 9071 --bind 127.0.0.1 --directory "{out}"','frames':len(frames),'views':views}
     elif a.command=='handoff':result=handoff(a)
+    elif a.command=='wholebody-reconstruct':
+        from wholebody_reconstruction import reconstruct_files
+        result=reconstruct_files(a.config,a.output,a.frames)
+    elif a.command=='wholebody-build':
+        from wholebody_reconstruction import build_files
+        transform=json.loads(Path(a.world_to_blender_json).read_text()) if a.world_to_blender_json else None
+        result=build_files(a.run,a.output,blender=a.blender,scene=a.scene,world_to_blender=transform,preview_glb=a.preview_glb,preview_frame=a.preview_frame)
     print(json.dumps(result,indent=2,ensure_ascii=False))
 
 if __name__=='__main__':

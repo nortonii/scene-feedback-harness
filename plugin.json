@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "scene-feedback-harness",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Review reference images and reconstructed scenes, annotate visual errors, and deliver image feedback through MCP tools and events.",
   "author": {
     "name": "nortonii"
@@ -32,7 +32,7 @@
           "进入人工调试模式，让我在参考图和当前场景上指出问题。",
           "Review this reconstruction with annotated visual feedback."
         ],
-        "longDescription": "Compare reference images with reconstructed 3D scenes, mark visual errors, and share original and annotated evidence through a project-specific MCP service. The workbench supports frozen render annotations, multiple camera views, dynamic frames and imported 2D human pose evidence. Human reconstruction and tracking run in a separate capsule skill. Experimental MCP Events delivery requires a supporting host and a verified subscription.",
+        "longDescription": "Compare reference images with reconstructed 3D scenes, mark visual errors, and share original and annotated evidence through a project-specific MCP service. The workbench supports frozen render annotations, multiple camera views, dynamic frames and imported WholeBody133 evidence and source-bound manual hand keypoint corrections. Human reconstruction and tracking run in a separate capsule skill. Experimental MCP Events delivery requires a supporting host and a verified subscription.",
         "logo": "./assets/icon.svg",
         "composerIcon": "./assets/icon.svg"
       }

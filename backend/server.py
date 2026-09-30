@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - this server requires Unix file locking
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
 from projects import ProjectContext, ProjectRegistry
-from human_pose import HumanPoseJobs
+from human_pose import HumanPoseJobs, prepare_pose_edit_feedback
 
 
 HERE = Path(__file__).resolve().parent
@@ -362,6 +362,23 @@ def _make_server_unlocked(
                 if "result_path" in payload:
                     self._require_control_key()
                 return self._send_json(200, gateway.pose_jobs.import_result(payload))
+            if self.command == "POST" and path == "/api/workspace/pose/corrections/export":
+                self._require_pose_access()
+                payload = self._read_json()
+                if set(payload) - {"session_id", "pose_edits"}:
+                    raise APIError(400, "correction export accepts only session_id and pose_edits")
+                session_id = payload.get("session_id") or gateway.state()["session_id"]
+                prepared = prepare_pose_edit_feedback(store, session_id, payload, gateway.pose_jobs)
+                return self._send_json(200, {"documents": [item["document"] for item in prepared]})
+            correction_match = re.fullmatch(r"/api/workspace/pose/corrections/([0-9a-f]{32})/([0-9a-f]{32})", path)
+            if self.command == "GET" and correction_match:
+                self._require_pose_access()
+                feedback_id, edit_id = correction_match.groups()
+                feedback = next((item for item in store.state["feedback"] if item["feedback_id"] == feedback_id), None)
+                if feedback is None or not any(item["id"] == edit_id for item in feedback.get("human_pose_edits", [])):
+                    raise APIError(404, "pose correction not found in this project")
+                correction_path = store.data_dir / "human_pose" / "corrections" / feedback_id / (edit_id + ".json")
+                return self._send_file(correction_path)
             pose_match = POSE_ROUTE.fullmatch(path)
             if pose_match:
                 job_id = pose_match.group(1)

@@ -1275,7 +1275,7 @@ class SceneStore:
                         raise APIError(400, "object prompt refers to an unknown object id")
                     normalized["object_id"] = object_id
                 normalized_prompts.append(normalized)
-            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images") and not dynamic_frames and not payload.get("pose_refs"):
+            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images") and not dynamic_frames and not payload.get("pose_refs") and not payload.get("pose_edits"):
                 raise APIError(400, "add a reference, annotation, object prompt or note before submitting")
             camera = payload.get("camera")
             if camera is not None:
@@ -1313,8 +1313,9 @@ class SceneStore:
             if "screenshot_data_url" in payload and payload["screenshot_data_url"] is not None and "scene_annotated_data_url" not in prepared_scene:
                 prepared_scene["scene_annotated_data_url"] = self._decode_image_data_url(payload["screenshot_data_url"])
             crops = payload.get("crops", [])
-            from human_pose import prepare_pose_feedback
+            from human_pose import prepare_pose_feedback, prepare_pose_edit_feedback, _atomic_json
             prepared_pose = prepare_pose_feedback(self, session_id, payload.get("pose_refs"), note)
+            prepared_pose_edits = prepare_pose_edit_feedback(self, session_id, payload)
             if not isinstance(crops, list) or len(crops) > MAX_CROPS:
                 raise APIError(400, "crops must be an array of at most 8 images")
             prepared_crops = []
@@ -1337,6 +1338,25 @@ class SceneStore:
             if prepared_pose:
                 feedback["human_pose"] = [{**{key: value for key, value in item.items() if key != "_overlay_data"},
                                            "pose_overlay_url": self._write_media(item["_overlay_data"])} for item in prepared_pose]
+            if prepared_pose_edits:
+                feedback["human_pose_edits"] = []
+                corrections_dir = self.data_dir / "human_pose" / "corrections" / feedback["feedback_id"]
+                corrections_dir.mkdir(parents=True, exist_ok=False)
+                for item in prepared_pose_edits:
+                    correction_path = corrections_dir / (item["id"] + ".json")
+                    _atomic_json(correction_path, item["document"])
+                    parent_dir = self.data_dir / "human_pose" / item["parent_job_id"]
+                    parent_paths = {key: str(path.resolve()) for key, path in (
+                        ("source_manifest_path", parent_dir / "input.json"),
+                        ("parent_result_path", parent_dir / "output.json"),
+                    ) if path.is_file()}
+                    feedback["human_pose_edits"].append({
+                        **{key: value for key, value in item.items() if key != "_overlay_data"},
+                        **parent_paths,
+                        "pose_overlay_url": self._write_media(item["_overlay_data"]),
+                        "corrections_path": str(correction_path.resolve()),
+                        "corrections_url": f"/api/workspace/pose/corrections/{feedback['feedback_id']}/{item['id']}",
+                    })
             if timeline is not None:
                 feedback["timeline"] = timeline
                 feedback["dynamic_frames"] = [{**item["frame"], **{field + "_url": self._write_media(data) for field, data in item["images"].items()}} for item in dynamic_frames]

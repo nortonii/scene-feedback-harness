@@ -156,6 +156,12 @@ The reference image shows one result at a time: the newest 2D result by default,
 
 Use `引用人体` to insert `[[pose:JOB_ID:REFERENCE_ID]]` in the shared prompt. Feedback includes original images, skeleton overlays, confidence, view, frame, time and available camera metadata, with up to eight samples. Saved evidence remains available; successful feedback clears the current citations. Cross-view identity, triangulation and 3D fitting belong to the reconstruction skill and require explicit calibration and topology.
 
+The standalone observer now defaults to **COCO-WholeBody133**: 17 body, 6 foot, 68 face and 21 landmarks per hand, using a verified 133-output ViTPose checkpoint. Existing COCO17 results remain readable; regenerate them to obtain hand observations.
+
+In a human result, click `修正关键点` (Correct keypoints), choose the left/right hand and joint, then click or drag on the reference image. Zoom first for precise placement; mark points visible, occluded or missing. Corrections insert `[[pose_edit:ID]]` into the shared prompt, support multiple source views/frames and JSON download, stay bound to their original frame, and clear after successful saving while failed submissions retain the draft. Feedback includes the original, orange correction overlay and source-bound JSON; original predictions and model scores remain intact.
+
+The skill merges corrections with `apply-corrections`, then uses `capsule.py wholebody-reconstruct` / `wholebody-build` to produce editable fixed capsule bodies and 20 finger segments per hand, Blender animation and optional GLB. Synchronized calibrated views and explicit actor association are required. Missing fingers hold their previous pose; uninitialized hands are reported as partial results. Face landmarks are reference evidence, without detailed face mesh reconstruction. See [WholeBody reconstruction](external-skills/capsule-human-tracking/references/wholebody-reconstruction.md).
+
 ## Quick start: room and cabinet
 
 The browser UI uses Chinese labels: `标注` means “Annotate,” `返回 3D` returns to live selection, and `发送反馈` means “Send feedback.”

@@ -156,6 +156,12 @@ workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4"
 
 点击「引用人体」把 `[[pose:任务ID:原帧ID]]` 插入统一提示。发送时附带原图、估计骨架、置信度、机位、帧号、时间和已有相机信息；最多引用 8 个样本。新旧已保存证据均保留，反馈保存成功后清空本轮引用。自动跨机位身份识别、三角化与驱动三维人体须由重建 skill 按明确的校准和拓扑处理。
 
+默认二维 observer 已升级为 **COCO-WholeBody133**：身体 17 点、足部 6 点、面部 68 点，左右手各 21 点。真实 133 输出的 ViTPose checkpoint 由独立 skill 使用；旧 COCO17 结果不会自动长出手部点，需要重新生成 WholeBody 结果。
+
+在人体结果中点击「修正关键点」，选择左／右手和指节，在左侧原图上点一下或拖动关键点；支持「可见／遮挡／缺失」，可先缩放图片再精确放点。修正自动插入 `[[pose_edit:修正ID]]`，可以在同一提示里引用多个机位／帧的修正并发送，也可下载 JSON。草稿保留具体来源帧，换机位或时间不会挪到新图；保存成功后清理本轮修正，失败保留。发送附原图、橙色修正图与来源 JSON，原结果和模型置信度不被覆盖。
+
+skill 用 `apply-corrections` 合并到新观测文件，再通过 `capsule.py wholebody-reconstruct` / `wholebody-build` 重建固定胶囊身体和每手 20 段可编辑手指，输出 Blender 动画与可选 GLB。需要同步、已标定的多机位和明确的同人关联；不可见手指保持前一姿态，未能初始化的手明确报告为部分结果。68 个面部点仅作参考，不生成精细面部网格。详见 [WholeBody 重建说明](external-skills/capsule-human-tracking/references/wholebody-reconstruction.md)。
+
 ## 快速试用：房间与柜子
 
 需要 Python 3.11+、支持 WebGL 的浏览器，以及已登录的 **`codex-cli 0.156.1`**。App Server 的请求和响应格式已对照这个版本生成的 JSON Schema 核对；其他版本会明确报错，避免静默使用不兼容字段。

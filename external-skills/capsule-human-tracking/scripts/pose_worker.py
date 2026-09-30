@@ -10,23 +10,61 @@ import json
 import math
 import os
 from pathlib import Path
+import struct
 import tempfile
 from typing import Any, Callable
 
+from wholebody_profile import (COCO17_NAMES, COCO17_PROFILE, WHOLEBODY133_NAMES,
+                               WHOLEBODY133_PROFILE, WHOLEBODY133_EDGES,
+                               WHOLEBODY133_GROUPS)
 
-COCO_NAMES = (
-    "nose", "left_eye", "right_eye", "left_ear", "right_ear",
-    "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
-    "left_wrist", "right_wrist", "left_hip", "right_hip",
-    "left_knee", "right_knee", "left_ankle", "right_ankle",
-)
+COCO_NAMES = COCO17_NAMES
 COCO_EDGES = ((15, 13), (13, 11), (16, 14), (14, 12), (11, 12), (5, 11),
               (6, 12), (5, 6), (5, 7), (6, 8), (7, 9), (8, 10),
               (1, 2), (0, 1), (0, 2), (1, 3), (2, 4), (3, 5), (4, 6))
 MODEL_FILES = ("config.json", "preprocessor_config.json", "model.safetensors")
 DETECTOR_FILENAME = "fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth"
 DETECTOR_SHA256 = "907ea3f91ff92242bc1baea8049276a3e76bca48ce7560bd268cc029f37977b5"
-MAX_AUTO_FRAMES = 8 * 600
+MAX_SOURCE_FRAMES = 8 * 10000
+SUPPORTED_PROFILES = (WHOLEBODY133_PROFILE, COCO17_PROFILE)
+
+
+def pose_topology(profile: str) -> tuple[tuple[str, ...], tuple[tuple[int, int], ...], int]:
+    if profile == WHOLEBODY133_PROFILE:
+        return WHOLEBODY133_NAMES, WHOLEBODY133_EDGES, 5
+    if profile == COCO17_PROFILE:
+        return COCO17_NAMES, COCO_EDGES, 0
+    raise ValueError("unsupported pose profile: " + str(profile))
+
+
+def validate_model_head(model_directory: Path, profile: str) -> None:
+    """Reject mislabeled or incomplete checkpoints before Torch/GPU loads.
+
+    HF's ViTPose+ Base has six backbone experts but its public COCO head has
+    only 17 channels. Expert 5 alone cannot make WholeBody133 predictions.
+    """
+    model_directory = Path(model_directory)
+    names, _, _ = pose_topology(profile)
+    config = json.loads((model_directory / "config.json").read_text(encoding="utf-8"))
+    labels = config.get("id2label")
+    backbone = config.get("backbone_config") or {}
+    if not isinstance(labels, dict) or len(labels) != len(names) or backbone.get("num_experts") != 6:
+        raise ValueError(f"{profile} needs a genuine {len(names)}-joint ViTPose+ checkpoint; dataset_index alone does not change the head")
+    weights = model_directory / "model.safetensors"
+    with weights.open("rb") as stream:
+        size_raw = stream.read(8)
+        if len(size_raw) != 8:
+            raise ValueError("ViTPose safetensors header is missing")
+        header_size = struct.unpack("<Q", size_raw)[0]
+        if not 0 < header_size <= 16 * 1024 * 1024:
+            raise ValueError("ViTPose safetensors header is invalid")
+        header = json.loads(stream.read(header_size))
+    weight = header.get("head.conv.weight")
+    bias = header.get("head.conv.bias")
+    if (not isinstance(weight, dict) or not isinstance(bias, dict)
+            or weight.get("shape") != [len(names), 256, 1, 1]
+            or bias.get("shape") != [len(names)]):
+        raise ValueError(f"{profile} needs a trained {len(names)}-channel pose head in model.safetensors")
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -77,8 +115,8 @@ def clip_bbox(box: Any, width: int, height: int) -> list[float]:
 
 def validate_manifest(manifest_path: Path, *, auto_detect: bool | None = None) -> dict[str, Any]:
     path = Path(manifest_path).resolve(strict=True)
-    if path.stat().st_size > 12 * 1024 * 1024:
-        raise ValueError("pose manifest exceeds 12 MiB")
+    if path.stat().st_size > 64 * 1024 * 1024:
+        raise ValueError("pose manifest exceeds 64 MiB")
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or manifest.get("schema_version", 1) not in (1, 2):
         raise ValueError("pose manifest must be a schema_version 1 or 2 object")
@@ -113,7 +151,7 @@ def validate_manifest(manifest_path: Path, *, auto_detect: bool | None = None) -
     # caller choosing a detector can infer its ROIs without editing that export.
     automatic = auto_detect if auto_detect is not None else options.get("auto_detect", False) or (
         isinstance(frames, list) and bool(frames) and all("bbox_xywh" not in frame for frame in frames if isinstance(frame, dict)))
-    frame_limit = MAX_AUTO_FRAMES if automatic else 600
+    frame_limit = MAX_SOURCE_FRAMES
     if not isinstance(frames, list) or not 1 <= len(frames) <= frame_limit:
         raise ValueError(f"pose job must contain 1 to {frame_limit} frames")
     threshold = _number(options.get("score_threshold", 0.3), "score_threshold")
@@ -193,15 +231,16 @@ def validate_manifest(manifest_path: Path, *, auto_detect: bool | None = None) -
     return manifest
 
 
-def normalized_keypoints(points: Any, scores: Any, width: int, height: int, threshold: float) -> list[dict[str, Any]]:
-    if len(points) != 17 or len(scores) != 17:
-        raise ValueError("ViTPose model must return exactly 17 COCO joints")
+def normalized_keypoints(points: Any, scores: Any, width: int, height: int, threshold: float,
+                         names: tuple[str, ...] = COCO_NAMES) -> list[dict[str, Any]]:
+    if len(points) != len(names) or len(scores) != len(names):
+        raise ValueError(f"ViTPose model must return exactly {len(names)} declared joints")
     result = []
     for index, (point, score) in enumerate(zip(points, scores)):
         px, py = _number(float(point[0]), "predicted x"), _number(float(point[1]), "predicted y")
         raw_score = _number(float(score), "predicted score")
         in_frame = 0 <= px < width and 0 <= py < height
-        result.append({"id": index, "name": COCO_NAMES[index],
+        result.append({"id": index, "name": names[index],
                        "x": min(1.0, max(0.0, px / width)), "y": min(1.0, max(0.0, py / height)),
                        "score": min(1.0, max(0.0, raw_score)), "raw_score": raw_score,
                        "in_frame": in_frame, "visible": in_frame and raw_score >= threshold,
@@ -210,7 +249,9 @@ def normalized_keypoints(points: Any, scores: Any, width: int, height: int, thre
 
 
 def tracking_quality(keypoints: list[dict[str, Any]]) -> bool:
-    confident = [point for point in keypoints if point["visible"]]
+    # Hands and face can remain confidently predicted while the torso is lost.
+    # They must not preserve or steer the person ROI on their own.
+    confident = [point for point in keypoints[:17] if point["visible"]]
     torso = [keypoints[index] for index in (5, 6, 11, 12) if keypoints[index]["visible"]]
     # Require upper and lower torso support, so visible feet alone cannot pull
     # the next crop toward the floor when the person is occluded.
@@ -218,7 +259,9 @@ def tracking_quality(keypoints: list[dict[str, Any]]) -> bool:
 
 
 def update_bbox(box: list[float], points: list[dict[str, Any]], width: int, height: int) -> list[float]:
-    confident = [point for point in points if point["visible"]]
+    confident = [point for point in points[:17] if point["visible"]]
+    if not confident:
+        return box
     xs, ys = [point["pixel_x"] for point in confident], [point["pixel_y"] for point in confident]
     old_x, old_y, old_w, old_h = box
     span_w, span_h = max(xs) - min(xs), max(ys) - min(ys)
@@ -276,19 +319,21 @@ def select_person_detection(prediction: dict[str, Any], width: int, height: int,
     return clip_bbox([x - w * .08, y - h * .08, w * 1.16, h * 1.16], width, height), score
 
 
-def _empty_keypoints() -> list[dict[str, Any]]:
+def _empty_keypoints(names: tuple[str, ...] = COCO_NAMES) -> list[dict[str, Any]]:
     return [{"id": index, "name": name, "x": 0., "y": 0., "score": 0., "raw_score": 0.,
              "in_frame": False, "visible": False, "pixel_x": 0., "pixel_y": 0.}
-            for index, name in enumerate(COCO_NAMES)]
+            for index, name in enumerate(names)]
 
 
 def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | None = None,
                   detector_path: Path | None = None,
                   auto_detect: bool | None = None,
+                  profile: str = WHOLEBODY133_PROFILE,
                   progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Load checkpoints once and infer every source frame with independent ROIs."""
     if auto_detect is None:
         auto_detect = detector_path is not None
+    names, edges, dataset_index = pose_topology(profile)
     manifest = validate_manifest(manifest_path, auto_detect=auto_detect)
     options = manifest.get("options", {})
     threshold = float(options.get("score_threshold", 0.3))
@@ -300,7 +345,8 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
         raise ValueError("provide --detector-path for the local person detector checkpoint")
     model_directory = Path(model_path).expanduser().resolve(strict=True)
     if not all((model_directory / name).is_file() for name in MODEL_FILES):
-        raise ValueError("ViTPose+ Base checkpoint must contain config, processor config and safetensors weights")
+        raise ValueError("ViTPose+ checkpoint must contain config, processor config and safetensors weights")
+    validate_model_head(model_directory, profile)
     import torch
     import transformers
     from PIL import Image, ImageOps
@@ -315,9 +361,9 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
     torch.set_num_threads(4)
     model = VitPoseForPoseEstimation.from_pretrained(str(model_directory), local_files_only=True).to(device).eval()
     processor = VitPoseImageProcessor.from_pretrained(str(model_directory), local_files_only=True)
-    if (len(model.config.id2label) != 17 or getattr(model.config.backbone_config, "num_experts", 0) != 6
-            or getattr(model.config.backbone_config, "hidden_size", 0) != 768):
-        raise ValueError("configured checkpoint is not the 17-joint ViTPose+ Base model")
+    if (len(model.config.id2label) != len(names) or model.head.conv.out_channels != len(names)
+            or getattr(model.config.backbone_config, "num_experts", 0) != 6):
+        raise ValueError("loaded checkpoint does not match the declared ViTPose+ joint profile")
     digest = hashlib.sha256()
     with (model_directory / "model.safetensors").open("rb") as checkpoint:
         for chunk in iter(lambda: checkpoint.read(2 * 1024 * 1024), b""):
@@ -367,9 +413,9 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
             else:
                 box = previous_box
             if box is None:
-                keypoints = _empty_keypoints()
+                keypoints = _empty_keypoints(names)
                 result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id",
-                                                       "image_sha256", "image_orientation", "camera") if key in frame}
+                                                       "image_sha256", "image_orientation", "camera", "clip_id", "view_name") if key in frame}
                 result.update({"view_id": current_view, "track_id": manifest["track_id"],
                                "width": width, "height": height, "bbox_xywh": None, "bbox": None,
                                "keypoints": keypoints, "tracking_status": "lost", "roi_status": "no_person_detected"})
@@ -386,21 +432,24 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
         boxes = [[box]]
         inputs = processor(images=image, boxes=boxes, return_tensors="pt")
         inputs = {name: value.to(device) for name, value in inputs.items()}
-        inputs["dataset_index"] = torch.zeros(len(inputs["pixel_values"]), dtype=torch.long, device=device)
+        inputs["dataset_index"] = torch.full((len(inputs["pixel_values"]),), dataset_index,
+                                              dtype=torch.long, device=device)
         with torch.inference_mode():
             prediction = model(**inputs)
         person = processor.post_process_pose_estimation(prediction, boxes=boxes)[0][0]
         keypoints = normalized_keypoints(person["keypoints"].detach().cpu().tolist(),
-                                         person["scores"].detach().cpu().tolist(), width, height, threshold)
+                                         person["scores"].detach().cpu().tolist(), width, height, threshold, names)
         tracked = tracking_quality(keypoints)
         roi_status = ("detected" if previous is None else "re_detected") if detected else (
             "updated" if tracked and update_roi else "held_low_confidence" if not tracked else "fixed")
         result = {key: frame[key] for key in ("image_path", "frame_index", "time_seconds", "ref_id", "image_id",
-                                               "image_sha256", "image_orientation", "camera") if key in frame}
+                                               "image_sha256", "image_orientation", "camera", "clip_id", "view_name") if key in frame}
         result.update({"view_id": current_view, "track_id": manifest["track_id"],
                        "width": width, "height": height, "bbox_xywh": box,
                        "bbox": {"x": box[0] / width, "y": box[1] / height, "width": box[2] / width, "height": box[3] / height},
-                       "keypoints": keypoints, "tracking_status": "tracked" if tracked else "lost", "roi_status": roi_status,
+                       "keypoints": keypoints,
+                       "tracking_status": "tracked" if tracked or detected or not automatic else "lost",
+                       "roi_body_quality": tracked, "roi_status": roi_status,
                        **({"detector_score": detector_score} if detector_score is not None else {})})
         results.append(result)
         previous_by_view[current_view] = (update_bbox(box, keypoints, width, height) if tracked and update_roi else box,
@@ -410,15 +459,16 @@ def run_inference(manifest_path: Path, output_path: Path, *, model_path: Path | 
     result = {"schema_version": 2 if multi_view else 1, "job_id": manifest["job_id"], "track_id": manifest["track_id"],
               "project_id": manifest["project_id"], "session_id": manifest["session_id"],
               "source_snapshot_id": manifest["source_snapshot_id"], "evidence_kind": "observed_2d",
-              "provenance": {"kind": "image_inference", "method": "Faster R-CNN person detection and ViTPose+ Base COCO17" if automatic else "ViTPose+ Base COCO17 on supplied ROI",
+              "provenance": {"kind": "image_inference", "method": f"Faster R-CNN person detection and ViTPose+ {profile}" if automatic else f"ViTPose+ {profile} on supplied ROI",
                              "source_artifact": str(model_directory / "model.safetensors"),
                              **({"detector_artifact": str(detector_path)} if automatic else {})},
-              "keypoint_profile": "coco17", "keypoint_names": list(COCO_NAMES),
-              "skeleton_edges": [list(edge) for edge in COCO_EDGES],
+              "keypoint_profile": profile, "keypoint_names": list(names),
+              "skeleton_edges": [list(edge) for edge in edges],
+              **({"keypoint_groups": WHOLEBODY133_GROUPS} if profile == WHOLEBODY133_PROFILE else {}),
               **({"view_ids": manifest["view_ids"]} if multi_view else {"view_id": manifest["view_id"]}),
-              "model": {"name": "ViTPose+ Base", "path": str(model_directory), "dataset": "COCO", "dataset_index": 0,
+              "model": {"name": "ViTPose+", "path": str(model_directory), "dataset": "COCO-WholeBody" if dataset_index == 5 else "COCO", "dataset_index": dataset_index,
                         "checkpoint_sha256": digest.hexdigest(), "source": "local_checkpoint",
-                        "joints": 17, "joint_names": list(COCO_NAMES), "edges": [list(edge) for edge in COCO_EDGES],
+                        "joints": len(names), "joint_names": list(names), "edges": [list(edge) for edge in edges],
                         "device": device, "torch_version": str(torch.__version__), "transformers_version": transformers.__version__,
                         "gpu_name": torch.cuda.get_device_name(0) if device.startswith("cuda") else None},
               "tracking": {"method": "automatic_person_detection_and_confidence_gated_roi" if automatic else
