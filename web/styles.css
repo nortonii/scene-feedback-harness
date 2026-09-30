@@ -220,7 +220,8 @@ input[type=range] { accent-color: #292925; }
 .chat-launcher { position: fixed; z-index: 30; right: 16px; bottom: 44px; display: inline-flex; align-items: center; gap: 9px; min-height: 42px; padding: 10px 14px; border-radius: 24px; font-size: var(--text-control); font-weight: 500; transition: box-shadow .16s, border-color .16s; }
 .chat-launcher:hover { border-color: #fff; box-shadow: 0 12px 32px #1717151a, 0 0 0 1px #1717150d, inset 0 1px 0 #fff; }
 .chat-launcher.has-attention { border-color: #923f32; }
-.feedback-panel.is-transitioning, .chat-launcher.is-transitioning { will-change: opacity, translate; }
+.feedback-panel.is-transitioning { will-change: clip-path, translate, opacity; }
+.chat-launcher.is-transitioning { will-change: opacity; }
 .feedback-panel.is-closing, .chat-launcher.is-closing { pointer-events: none; }
 .chat-launcher .chat-launcher-spinner { display: none; }
 .chat-launcher.is-running .chat-launcher-icon { display: none; }

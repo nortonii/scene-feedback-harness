@@ -156,19 +156,33 @@ export function setupChatDock({getState}) {
     persist();
   }
 
+  function launcherBounds() {
+    // Measure the real button, including unread counts and mobile safe areas.
+    // Restoring display in this same task avoids painting a second launcher.
+    const hidden = launcher.classList.contains('hidden');
+    launcher.classList.remove('hidden');
+    const rect = launcher.getBoundingClientRect();
+    launcher.classList.toggle('hidden', hidden);
+    return rect;
+  }
+
   function setVisible(element, visible, animate) {
     if (!element) return;
     const previous = visibilityTransitions.get(element);
     if (animate && previous?.visible === visible) return;
-    // Read the current frame before cancelling, so reversing a transition does
-    // not jump back to its starting position or leave a late hide callback.
+    const hidden = element.classList.contains('hidden');
+    // Capture every animated property before cancelling. Reversals then continue
+    // from this exact visible shape, without an old completion hiding the panel.
     const style = getComputedStyle(element);
-    const offset = element === dock ? '0 8px' : '0 4px';
-    const start = {
-      opacity:element.classList.contains('hidden') ? '0' : style.opacity,
-      translate:element.classList.contains('hidden') ? offset : style.translate,
-    };
+    const start = {opacity:hidden ? '0' : style.opacity};
+    if (element === dock) {
+      start.clipPath = style.clipPath;
+      start.translate = style.translate === 'none' ? '0px 0px' : style.translate;
+    }
+    const contents = element === dock ? [dock.querySelector('.chat-dock-header'), byId('chat-dock-body')] : [];
+    const contentOpacity = contents.map(child => hidden ? '0' : getComputedStyle(child).opacity);
     previous?.animation?.cancel();
+    previous?.contents?.forEach(animation => animation.cancel());
     element.inert = !visible;
     element.setAttribute('aria-hidden', String(!visible));
     element.classList.toggle('is-closing', !visible);
@@ -180,22 +194,47 @@ export function setupChatDock({getState}) {
     }
     element.classList.remove('hidden');
     element.classList.add('is-transitioning');
-    const animation = element.animate([start, {
-      opacity:visible ? '1' : '0', translate:visible ? '0 0' : offset,
-    }], {duration:visible ? 260 : 190, easing:'cubic-bezier(.22, 1, .36, 1)', fill:'both'});
-    visibilityTransitions.set(element, {visible, animation});
+    let end = {opacity:visible ? '1' : '0'};
+    if (element === dock) {
+      const rect = dock.getBoundingClientRect();
+      const button = launcherBounds();
+      const small = {
+        clipPath:`inset(${Math.max(0, rect.height - button.height)}px 0px 0px ${Math.max(0, rect.width - button.width)}px round 24px)`,
+        translate:`${button.right - rect.right}px ${button.bottom - rect.bottom}px`,
+        opacity:'0.35',
+      };
+      // Leave space around the open shape for its shadow and resize handle.
+      const large = {clipPath:'inset(-48px -48px -48px -48px round 24px)', translate:'0px 0px', opacity:'1'};
+      if (hidden) Object.assign(start, small);
+      else if (start.clipPath === 'none') start.clipPath = large.clipPath;
+      end = visible ? large : small;
+    }
+    const opening = !collapsed;
+    const timing = {duration:opening ? 560 : 460, easing:'cubic-bezier(.22, .68, .2, 1)', fill:'both'};
+    // Hand the surface from the button to the panel early on opening, and
+    // reveal the button near the end of closing instead of showing two panels.
+    const frames = element === launcher && !previous?.animation
+      ? (visible ? [start, {...start, offset:.65}, end] : [start, {...end, offset:.35}, end])
+      : [start, end];
+    const animation = element.animate(frames, timing);
+    // The panel reveals content at its natural size; only the glass boundary
+    // grows. Text never scales, wraps or squeezes during the transition.
+    const contentAnimations = contents.map((child, index) => child.animate([
+      {opacity:contentOpacity[index]},
+      {opacity:visible ? '1' : '0'},
+    ], timing));
+    visibilityTransitions.set(element, {visible, animation, contents:contentAnimations});
     animation.finished.then(() => {
       if (visibilityTransitions.get(element)?.animation !== animation) return;
       element.classList.toggle('hidden', !visible);
       element.classList.remove('is-transitioning');
       visibilityTransitions.set(element, {visible});
       animation.cancel();
+      contentAnimations.forEach(content => content.cancel());
     }, () => { /* A reversed transition continues from its current frame. */ });
   }
 
   function applyLayout({animate=false}={}) {
-    setVisible(dock, !collapsed, animate);
-    setVisible(launcher, collapsed, animate);
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
@@ -207,8 +246,13 @@ export function setupChatDock({getState}) {
       resizeHandle.tabIndex = enabled ? 0 : -1;
       resizeHandle.setAttribute('aria-disabled', String(!enabled));
     }
+    const hidden = dock?.classList.contains('hidden');
+    if (!collapsed) dock?.classList.remove('hidden');
     applyHeight({restoreScroll:false});
+    if (hidden) dock?.classList.add('hidden');
     updateCounts();
+    setVisible(dock, !collapsed, animate);
+    setVisible(launcher, collapsed, animate);
     if (historyVisible()) {
       // Let the restored history acquire its height before restoring its position.
       requestAnimationFrame(() => {
@@ -326,8 +370,14 @@ export function setupChatDock({getState}) {
   reducedMotion.addEventListener('change', () => {
     if (reducedMotion.matches) applyLayout();
   });
-  window.addEventListener('resize', scheduleHeightUpdate);
-  window.visualViewport?.addEventListener('resize', scheduleHeightUpdate);
+  function resizeViewport() {
+    // A viewport change invalidates the launcher-to-panel path. Settle at the
+    // requested state before fitting the new screen instead of drifting outside it.
+    if ([dock, launcher].some(element => visibilityTransitions.get(element)?.animation)) applyLayout();
+    scheduleHeightUpdate();
+  }
+  window.addEventListener('resize', resizeViewport);
+  window.visualViewport?.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
