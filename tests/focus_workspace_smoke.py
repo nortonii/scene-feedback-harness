@@ -79,6 +79,29 @@ def wait_ready(page):
     page.wait_for_timeout(250)
 
 
+def assert_clean_visual_headers(page):
+    for selector in ("#freeze-button", "#browse-button", "#snapshot-button", ".view-popover", "#human-pose-import"):
+        expect(page.locator(selector)).to_have_count(0)
+    expect(page.locator(".pane-head #human-pose-panel")).to_have_count(0)
+    for text in ("标注", "视角", "标注截图", "人体结果"):
+        expect(page.locator(".pane-head").get_by_text(text, exact=True)).to_have_count(0)
+
+
+def open_references(page):
+    if page.locator("#chat-launcher").is_visible():
+        page.locator("#chat-launcher").click()
+    if not page.locator("#references-dialog").is_visible():
+        page.locator("#references-dialog-button").click()
+    expect(page.locator("#references-dialog")).to_be_visible()
+
+
+def reopen_scene_mark(page):
+    open_references(page)
+    page.locator(".annotation-open-scene").first.click()
+    expect(page.locator("#references-dialog")).to_be_hidden()
+    expect(page.locator("#scene-snapshot-media")).to_be_visible()
+
+
 def verify_chat_resize(page, store, submissions, screenshots):
     """Resize with real pointer/keyboard input while a visual draft is pending."""
     for index in range(7):
@@ -227,6 +250,7 @@ def verify_overlay_toolbar(page, store, screenshots):
     panel = page.locator("#compare-panel")
     slider = page.locator("#compare-opacity")
     overlay = page.locator("#compare-image")
+    page.locator('button[data-tool="select"]').click()
     original = draft(page)
     expect(toggle).to_be_enabled()
     expect(toggle).to_have_attribute("aria-pressed", "true")
@@ -260,7 +284,7 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(slider).to_have_value("75")
 
     # Reopen the existing marked screenshot, preserving its original evidence.
-    page.locator("#snapshot-button").click()
+    reopen_scene_mark(page)
     expect(overlay).to_be_hidden()
     expect(toggle).to_be_disabled()
     expect(toggle).to_have_attribute("aria-pressed", "false")
@@ -270,7 +294,7 @@ def verify_overlay_toolbar(page, store, screenshots):
     preference = page.evaluate("""() => JSON.parse(localStorage.getItem(
       'astra-visual-compare:' + new URL(location.href).searchParams.get('session_id')) || '{}')""")
     assert preference["enabled"] is True and preference["opacity"] == 75
-    page.locator("#browse-button").click()
+    page.locator('button[data-tool="select"]').click()
     expect(toggle).to_be_enabled()
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(overlay).to_be_visible()
@@ -575,12 +599,26 @@ def main():
                 expect(page.locator("#feedback-note")).to_be_focused()
                 note = page.locator("#feedback-note").input_value()
                 assert "保留草稿" in note and "[[annotation:" in note
+                page.locator('button[data-tool="select"]').click()
+                expect(page.locator("#scene-snapshot-media")).to_be_hidden()
+                assert draft(page)["sceneView"] == "live"
+                viewport = page.locator("#viewport").bounding_box()
+                for x, y in ((.5, .4), (.35, .45), (.65, .45), (.5, .6)):
+                    page.mouse.click(viewport["x"] + viewport["width"] * x, viewport["y"] + viewport["height"] * y)
+                    if draft(page).get("selectedId"):
+                        break
+                assert draft(page).get("selectedId"), "Selection tool must restore actual scene picking"
+                assert draft(page)["snapshot"] == annotated["snapshot"]
+                reopen_scene_mark(page)
+                assert draft(page)["snapshot"] == annotated["snapshot"]
+                assert draft(page)["snapshot"]["camera"] == annotated["snapshot"]["camera"]
+                assert page.locator("#scene-snapshot-image").get_attribute("src") == annotated["snapshot"]["data_url"]
                 page.locator("#chat-collapse").click()
                 page.locator("#chat-launcher").click()
                 after = draft(page)
                 assert after["snapshot"] == annotated["snapshot"]
                 assert after["annotations"] == annotated["annotations"]
-                passed("scene annotations and frozen evidence survive collapse; reference insertion restores composer focus")
+                passed("automatic scene snapshot survives draw, cite, live object selection and reopening the mark from its list")
                 verify_chat_resize(page, store, submissions, screenshots)
                 passed("pointer and keyboard resizing preserve draft and height; collapsed history disables resize until explicitly reopened, including after reload")
                 verify_overlay_toolbar(page, store, screenshots)
@@ -631,16 +669,15 @@ def main():
                 passed("conversation replays server history on reload without losing pending annotation references")
 
                 expect(page.locator("#projects-dialog-button")).to_be_visible()
-                page.locator("#human-pose-panel summary").click()
-                expect(page.locator("#human-pose-panel summary")).to_have_text("人体结果")
-                expect(page.locator("#human-pose-import")).to_be_enabled()
-                expect(page.locator("#human-pose-jobs")).to_contain_text("capsule")
-                expect(page.locator("#human-pose-run, #human-pose-draw, #human-pose-runtime")).to_have_count(0)
+                assert_clean_visual_headers(page)
+                open_references(page)
+                expect(page.locator("#references-dialog #human-pose-panel")).to_be_hidden()
+                expect(page.locator("#human-pose-run, #human-pose-draw, #human-pose-runtime, #human-pose-import")).to_have_count(0)
                 expect(page.locator("#annotation-count")).to_have_text("1")
                 assert "humanSeed" not in draft(page)
                 assert page.locator("#human-pose-overlay").evaluate("el => getComputedStyle(el).pointerEvents") == "none"
-                page.keyboard.press("Escape")
-                passed("passive human result import remains separate from feedback marks with no inference or ROI controls")
+                page.locator('[data-close-dialog="references-dialog"]').click()
+                passed("clean visual headers hide pose results unless imported evidence exists in the shared references dialog")
 
                 composer = page.locator("#feedback-note")
                 composer.focus()
@@ -683,7 +720,7 @@ def main():
                 sent = submissions[0]
                 assert sent["note"] == note
                 assert len(sent["annotations"]) == 1
-                assert sent["scene_original_data_url"].startswith("data:image/")
+                assert sent["scene_original_data_url"] == annotated["snapshot"]["data_url"]
                 assert sent["scene_annotated_data_url"].startswith("data:image/")
                 assert sent["camera"] == before_submit["snapshot"]["camera"]
                 assert len(store.list_all_feedback()) == 1
@@ -692,7 +729,7 @@ def main():
 
                 expect(page.locator("#annotation-count")).to_have_text("0")
                 expect(page.locator("#undo-annotation")).to_be_disabled()
-                expect(page.locator("#snapshot-button")).to_be_hidden()
+                expect(page.locator("#snapshot-button")).to_have_count(0)
                 fresh = draft(page)
                 assert fresh["annotations"] == [] and fresh["snapshot"] is None
                 assert fresh["selectedId"] is None and fresh["sceneView"] == "live"
@@ -717,10 +754,11 @@ def main():
                 expect(page.locator('[data-tool="freehand"]')).to_be_visible()
                 page.keyboard.press("Escape")
                 expect(page.locator('[data-tool="freehand"]')).to_be_hidden()
-                page.locator(".view-popover summary").click()
+                open_references(page)
                 expect(page.locator("#reset-button")).to_be_visible()
-                page.keyboard.press("Escape")
-                passed("activity dialog and toolbar/view popovers remain usable")
+                expect(page.locator("#frame-button")).to_be_visible()
+                page.locator('[data-close-dialog="references-dialog"]').click()
+                passed("activity dialog, drawing tools and contextual view controls remain usable")
 
                 image_url = "data:image/png;base64," + base64.b64encode(
                     (ROOT / "examples/room_demo/reference.png").read_bytes()).decode()
@@ -767,19 +805,16 @@ def main():
                     page.wait_for_timeout(350)
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
                     expect(page.locator("#projects-dialog-button")).to_be_visible()
-                    expect(page.locator("#human-pose-panel summary")).to_be_visible()
-                    page.locator("#human-pose-panel summary").click()
-                    expect(page.locator("#human-pose-import")).to_be_enabled()
-                    expect(page.locator("#human-pose-run, #human-pose-draw")).to_have_count(0)
-                    pose_box = page.locator(".human-pose-controls").bounding_box()
-                    assert pose_box["x"] >= -1 and pose_box["x"] + pose_box["width"] <= width + 1, pose_box
-                    assert pose_box["y"] >= -1 and pose_box["y"] + pose_box["height"] <= height + 1, pose_box
-                    page.keyboard.press("Escape")
+                    assert_clean_visual_headers(page)
+                    open_references(page)
+                    expect(page.locator("#human-pose-panel")).to_be_hidden()
+                    page.locator('[data-close-dialog="references-dialog"]').click()
                     page.locator("#projects-dialog-button").click()
                     expect(page.locator("#projects-dialog")).to_be_visible()
                     expect(page.locator("#project-list .project-item")).to_have_count(1)
                     page.locator("#close-projects").click()
-                    page.locator("#chat-launcher").click()
+                    if page.locator("#chat-launcher").is_visible():
+                        page.locator("#chat-launcher").click()
                     expect(page.locator("#feedback-note")).to_be_visible()
                     expect(page.locator("#submit-button")).to_be_visible()
                     dock = page.locator("#chat-dock").bounding_box()
@@ -789,7 +824,7 @@ def main():
                         page.screenshot(path=str(screenshots / f"viewport-{width}.png"))
                     page.locator("#chat-collapse").click()
                     assert_launcher(page)
-                passed("desktop, tablet and narrow mobile retain project switch, pose popover, multiview and dock controls without overflow")
+                passed("desktop, tablet and narrow mobile retain clean visual headers, project switch, multiview and dock controls without overflow")
                 verify_compact_header(page, store, screenshots)
                 passed("long unread counts fit the shared header at narrow widths and resize grip leaves header buttons clickable")
                 verify_project_isolation(page, server, screenshots)

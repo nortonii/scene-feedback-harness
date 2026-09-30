@@ -55,6 +55,27 @@ def overlay_pixels(page) -> int:
     }""")
 
 
+def open_results(page):
+    if page.locator("#chat-launcher").is_visible():
+        page.locator("#chat-launcher").click()
+    if not page.locator("#references-dialog").is_visible():
+        page.locator("#references-dialog-button").click()
+    page.wait_for_function("document.getElementById('references-dialog').open && !document.getElementById('human-pose-panel').classList.contains('hidden')")
+
+
+def close_results(page):
+    if page.locator("#references-dialog").is_visible():
+        page.locator('[data-close-dialog="references-dialog"]').click()
+
+
+def import_json(context, base, headers, job_id, result):
+    # Send the actual JSON file representation. Passing a dictionary through
+    # Playwright's JavaScript API can round Python float values before transport.
+    return context.request.post(base + "/api/workspace/pose/import",
+        headers={**headers, "Content-Type": "application/json"},
+        data=json.dumps({"job_id": job_id, "result": result}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser-executable", help="Path to an existing Chromium binary")
@@ -96,11 +117,15 @@ def main() -> None:
                 page.on("request", lambda request: requests.append((request.method, request.url)))
                 page.goto(base + "/")
                 page.wait_for_function("window.__poseCheck && __poseCheck.state.workspaceReady && !__poseCheck.state.sceneLoading && document.getElementById('reference-image').naturalWidth > 0")
-                assert page.locator("#human-pose-panel summary").inner_text() == "人体结果"
-                for control in ("human-pose-run", "human-pose-runtime", "human-pose-progress", "human-pose-draw", "human-pose-fps"):
+                assert page.locator(".pane-head #human-pose-panel").count() == 0
+                assert page.locator("#references-dialog #human-pose-panel").count() == 1
+                for control in ("human-pose-run", "human-pose-runtime", "human-pose-progress", "human-pose-draw", "human-pose-fps", "human-pose-import",
+                                "freeze-button", "browse-button", "snapshot-button"):
                     assert page.locator("#" + control).count() == 0, control
-                page.locator("#human-pose-panel summary").click()
-                assert "capsule" in page.locator("#human-pose-jobs").inner_text()
+                assert page.locator(".view-popover").count() == 0
+                page.locator("#references-dialog-button").click()
+                assert not page.locator("#human-pose-panel").is_visible(), "No result controls appear before a skill imports evidence"
+                close_results(page)
                 capability = page.evaluate("__poseCheck.state.browserCapability")
                 headers = {"X-Workspace-Capability": capability, "X-Scene-Harness-Key": store.control_token}
                 response = context.request.post(base + "/api/workspace/pose/sources", headers=headers, data={"session_id": session})
@@ -108,32 +133,32 @@ def main() -> None:
                 export = response.json()
                 observed = result_fixture(export)
                 job_id = export["job_id"]
-                page.locator("#human-pose-import").set_input_files({"name": "bad.json", "mimeType": "application/json", "buffer": b"not json"})
-                page.wait_for_function("document.getElementById('human-pose-status').textContent.includes('无法读取 JSON')")
-                with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/api/workspace/pose/import")) as pending_import:
-                    page.locator("#human-pose-import").set_input_files({"name": "capsule-points.json", "mimeType": "application/json", "buffer": json.dumps(observed).encode()})
-                assert pending_import.value.status == 200, pending_import.value.text()
+                response = context.request.post(base + "/api/workspace/pose/import",
+                    headers={**headers, "Content-Type": "application/json"}, data="not json")
+                assert response.status == 400, response.text()
+                response = import_json(context, base, headers, job_id, observed)
+                assert response.status == 200, response.text()
                 page.wait_for_function("(id) => __poseCheck.state.humanJobs.some(j=>j.job_id===id && j.status==='completed')", arg=job_id)
                 page.wait_for_function("(id) => __poseCheck.humanCurrentFrame(__poseCheck.state.humanJobs.find(j=>j.job_id===id)) !== null", arg=job_id)
                 assert overlay_pixels(page) > 300
+                open_results(page)
                 assert "二维观测 · capsule-body6-fixture" in page.locator("#human-pose-jobs").inner_text()
-                print("PASS: lightweight result panel imports bound custom-profile JSON; no inference controls", flush=True)
+                print("PASS: skill/API import exposes custom-profile results only inside the shared references dialog; clean headers contain no inference or upload controls", flush=True)
 
-                page.locator("#human-pose-panel summary").click()
+                close_results(page)
                 projected_export_response = context.request.post(base + "/api/workspace/pose/sources", headers=headers, data={"session_id": session})
                 assert projected_export_response.status == 201, projected_export_response.text()
                 projected_export = projected_export_response.json()
                 projected = result_fixture(projected_export, "projected_3d")
-                response = context.request.post(base + "/api/workspace/pose/import", headers=headers,
-                    data={"job_id": projected["job_id"], "result": projected})
+                response = import_json(context, base, headers, projected["job_id"], projected)
                 assert response.status == 200, response.text()
                 page.wait_for_function("(id)=>__poseCheck.state.humanJobs.some(j=>j.job_id===id && j.status==='completed')", arg=projected["job_id"], timeout=15000)
-                assert not page.locator("#human-pose-panel").evaluate("element=>element.open")
-                page.locator("#human-pose-panel summary").click()
+                assert not page.locator("#references-dialog").is_visible()
+                open_results(page)
                 page.wait_for_function("document.getElementById('human-pose-jobs').textContent.includes('三维投影参考 · capsule-body6-fixture')")
                 print("PASS: externally imported result appears while panel is closed; projections are labeled separately", flush=True)
 
-                page.locator("#human-pose-panel summary").click()
+                close_results(page)
                 page.locator("#reference-view-select").select_option(secondary["clip_id"])
                 page.locator("#timeline-seek").focus()
                 page.locator("#timeline-seek").press("End")
@@ -141,7 +166,7 @@ def main() -> None:
                 page.wait_for_function("(x)=>{const s=__poseCheck.state,j=s.humanJobs.find(j=>j.job_id===x.job); return !s.seeking && s.activeViewId===x.view && __poseCheck.humanCurrentFrame(j)?.reference_id===x.ref}",
                     arg={"job": job_id, "view": secondary["clip_id"], "ref": expected_b})
                 assert overlay_pixels(page) > 300
-                page.locator("#human-pose-panel summary").click()
+                open_results(page)
                 job_name = page.evaluate("(id)=>__poseCheck.humanJobName(__poseCheck.state.humanJobs.find(j=>j.job_id===id))", job_id)
                 row = page.locator(".human-pose-job").filter(has=page.locator("strong", has_text=job_name))
                 row.get_by_role("button", name="引用人体", exact=True).click()
@@ -151,11 +176,11 @@ def main() -> None:
                 page.wait_for_function("(x)=>{const s=__poseCheck.state,j=s.humanJobs.find(j=>j.job_id===x.job); return !s.seeking && s.activeViewId===x.view && __poseCheck.humanCurrentFrame(j)?.reference_id===x.ref}",
                     arg={"job": job_id, "view": primary["clip_id"], "ref": expected_a})
                 assert overlay_pixels(page) > 300
-                page.locator("#human-pose-panel summary").click()
+                open_results(page)
                 row.get_by_role("button", name="引用人体", exact=True).click()
                 assert "camera_A · 第 2 帧 · 0.500 s" in page.locator("#feedback-note").input_value()
                 assert page.evaluate("__poseCheck.state.poseRefs.length") == 2
-                page.locator("#human-pose-panel summary").click()
+                open_results(page)
                 with page.expect_download() as pending:
                     row.get_by_role("button", name="下载 JSON", exact=True).click()
                 downloaded_path = root / "download.json"
@@ -164,23 +189,21 @@ def main() -> None:
                 assert len(downloaded["frames"]) == 5 and downloaded["skeleton_edges"] == observed["skeleton_edges"]
                 assert downloaded["keypoint_names"] == observed["keypoint_names"]
                 assert downloaded == observed
-                with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/api/workspace/pose/import")) as pending_roundtrip:
-                    page.locator("#human-pose-import").set_input_files(downloaded_path)
-                assert pending_roundtrip.value.status == 200, pending_roundtrip.value.text()
+                assert json.dumps(downloaded, sort_keys=True) == json.dumps(observed, sort_keys=True), "Download must preserve source JSON numeric representations for idempotent skill import"
+                response = import_json(context, base, headers, job_id, downloaded)
+                assert response.status == 200, response.text()
                 modified = json.loads(downloaded_path.read_text())
                 modified["frames"][0]["keypoints"][0]["x"] = .123
-                with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/api/workspace/pose/import")) as pending_conflict:
-                    page.locator("#human-pose-import").set_input_files({"name": "changed.json", "mimeType": "application/json", "buffer": json.dumps(modified).encode()})
-                assert pending_conflict.value.status == 409, pending_conflict.value.text()
-                page.wait_for_function("document.getElementById('human-pose-status').textContent.includes('different completed result')")
-                page.locator("#human-pose-panel summary").click()
+                response = import_json(context, base, headers, job_id, modified)
+                assert response.status == 409, response.text()
+                close_results(page)
                 print("PASS: camera switching/scrubbing retain exact frames; complete JSON reimports idempotently and conflicting results are rejected", flush=True)
 
                 page.reload()
                 page.wait_for_function("window.__poseCheck && __poseCheck.state.workspaceReady && !__poseCheck.state.sceneLoading")
                 assert page.evaluate("__poseCheck.state.poseRefs.length") == 2
                 assert page.evaluate("!Object.hasOwn(__poseCheck.state,'humanPendingRequest')")
-                page.locator("[data-tool='arrow']").click()
+                page.locator("button[data-tool='arrow']").click()
                 bounds = page.locator("#reference-annotations").bounding_box()
                 page.mouse.move(bounds["x"] + bounds["width"] * .2, bounds["y"] + bounds["height"] * .2)
                 page.mouse.down()

@@ -40,7 +40,7 @@ const ui = {
   viewport:id('viewport'), sceneStage:id('scene-stage'), sceneCanvas:id('scene-annotations'),
   referenceStage:id('reference-stage'), referenceMedia:id('reference-media'),
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
-  humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'), humanImport:id('human-pose-import'),
+  humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'),
   humanStatus:id('human-pose-status'), humanJobs:id('human-pose-jobs'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
@@ -73,7 +73,7 @@ const ui = {
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
-  freeze:id('freeze-button'), browse:id('browse-button'), snapshotButton:id('snapshot-button'),
+  frame:id('frame-button'), resetView:id('reset-button'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
   feedbackIntro:id('feedback-intro'),
@@ -98,7 +98,7 @@ const state = {
   lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
   poseRefs:[], humanJobs:[], humanDetails:new Map(), humanDetailLoads:new Set(), humanDetailErrors:new Map(),
-  humanLoading:false, humanImporting:false, humanImportMessage:'',
+  humanLoading:false,
   humanError:null, humanJobsSignature:null,
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
@@ -546,7 +546,6 @@ function updateProjectTitle() {
 function projectBusyReason({allowCreation=false}={}) {
   if (state.submitting) return '正在保存反馈，请稍后切换场景。';
   if (state.uploading) return '正在导入文件，请稍后切换场景。';
-  if (state.humanImporting) return '正在导入人体结果，请稍后切换场景。';
   if (state.creatingTarget || state.switchingTarget) return '正在连接 Codex 任务，请稍后切换场景。';
   if (state.creatingProject && !allowCreation) return '正在创建场景，请等待创建结果。';
   if (state.navigatingProject) return '正在切换场景…';
@@ -2063,6 +2062,7 @@ function renderSelection() {
     ui.clearSelection.classList.add('hidden');
   }
   renderObjectList();
+  ui.frame.disabled = !editable() || !state.selectedId;
 }
 function renderObjectList() {
   ui.objectList.replaceChildren();
@@ -2258,7 +2258,7 @@ function renderCompareControls() {
   const visible = available && enabled && opacity > 0;
   const summary = !hasReference ? '—' : paused ? '暂停' : visible ? opacity + '%' : '关';
   const status = !hasReference ? '先添加参考图，再使用叠图对比。'
-    : paused ? '固定截图中暂停叠图；点击「返回 3D」恢复。'
+    : paused ? '固定截图中暂停叠图；点「选择」恢复。'
     : visible ? '调整透明度，对照参考图与实时场景。' : '叠图已关闭，点击「叠图」开启。';
   ui.compareImage.classList.toggle('hidden', !visible);
   ui.compareImage.style.opacity = opacity / 100;
@@ -2305,9 +2305,6 @@ function renderSceneView({persist=true}={}) {
   const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
   if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
-  ui.browse.classList.toggle('hidden', !showingSnapshot);
-  ui.snapshotButton.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
-  ui.freeze.classList.toggle('hidden', showingSnapshot);
   ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
     ui.newSceneBadge.textContent = '标注 v' + state.snapshot.scene_revision + ' · 查看最新 v' + state.sceneRevision + ' ↗';
@@ -2499,9 +2496,10 @@ function humanCurrentFrame(job) {
   return poseFrameForReference(detail, ref?.id, clipReference() ? referenceView()?.clip_id : null, state.time);
 }
 function renderHumanPosePanel() {
-  ui.humanImport.disabled=!state.workspaceReady || !editable() || state.humanImporting;
-  ui.humanStatus.textContent=state.humanError || (state.humanImporting
-    ? '正在导入人体结果…' : state.humanImportMessage);
+  const jobs=state.humanJobs.filter((job) => job.status === 'completed');
+  ui.humanPanel.classList.toggle('hidden',!jobs.length);
+  ui.humanStatus.textContent=state.humanError || '';
+  ui.humanStatus.classList.toggle('hidden',!state.humanError);
   for (const job of state.humanJobs) {
     if (job.status === 'completed' && humanJobContainsCurrentReference(job) && !humanCurrentFrame(job)) {
       const referenceId=humanAutomaticJob(job) ? activeReference()?.id : null;
@@ -2512,8 +2510,6 @@ function renderHumanPosePanel() {
       }
     }
   }
-  if (!ui.humanPanel.open) return;
-  const jobs=state.humanJobs.filter((job) => !['queued','running'].includes(job.status));
   const jobsSignature=JSON.stringify([jobs,state.poseRefs,editable(),
     jobs.map((job) => [job.job_id,humanCurrentFrame(job)?.reference_id,
       state.humanDetailLoads.has(job.job_id),state.humanDetailErrors.get(job.job_id),
@@ -2521,11 +2517,6 @@ function renderHumanPosePanel() {
       state.humanDetailErrors.get(humanPoseLoadKey(job,activeReference()?.id))])]);
   if (jobsSignature === state.humanJobsSignature) return;
   state.humanJobsSignature=jobsSignature; ui.humanJobs.replaceChildren();
-  if (!jobs.length) {
-    const empty=document.createElement('p'); empty.className='muted';
-    empty.textContent='让 capsule 人体重建 skill 生成并导入当前场景的二维关键点。';
-    ui.humanJobs.append(empty);
-  }
   for (const job of [...jobs].reverse()) {
     const row=document.createElement('div'); row.className='human-pose-job';
     const heading=document.createElement('div'); heading.className='human-pose-job-heading';
@@ -2629,26 +2620,6 @@ async function loadHumanPoses() {
   } catch (error) { state.humanError='人体结果连接失败：' + error.message; throw error; }
   finally { state.humanLoading=false; renderHumanPosePanel(); drawHumanPoseOverlay(); }
 }
-async function importHumanPoseFile(file) {
-  if (!file || !editable() || !state.workspaceReady || state.humanImporting) return;
-  state.humanImporting=true; state.humanError=null; state.humanImportMessage=''; renderHumanPosePanel();
-  try {
-    if (file.size > 50 * 1024 * 1024) throw new Error('人体结果 JSON 不能超过 50 MB。');
-    let result;
-    try { result=JSON.parse(await file.text()); }
-    catch { throw new Error('无法读取 JSON，请选择 skill 导出的完整结果文件。'); }
-    if (!result || !/^[0-9a-f]{32}$/.test(result.job_id || '') || !Array.isArray(result.frames)) {
-      throw new Error('文件缺少来源任务或关键点帧，请使用当前工作台任务导出的完整结果。');
-    }
-    const job=await api('/api/workspace/pose/import',{method:'POST',body:{session_id:state.sessionId,job_id:result.job_id,result}});
-    if (!job.job_id || job.session_id !== state.sessionId || job.status !== 'completed') throw new Error('服务未返回当前场景的完整人体结果');
-    state.humanJobs=[...state.humanJobs.filter(item => item.job_id !== job.job_id),job];
-    state.humanImportMessage='已导入，可在对应机位和帧查看、引用。';
-    await loadHumanPoses().catch(() => {});
-  } catch (error) {
-    state.humanError='人体结果未能导入：' + error.message;
-  } finally { state.humanImporting=false; ui.humanImport.value=''; renderHumanPosePanel(); drawHumanPoseOverlay(); }
-}
 function insertHumanPoseReference(job, frame) {
   if (!editable() || !frame || job.session_id !== state.sessionId) return;
   const ref={job_id:job.job_id,reference_id:frame.reference_id}, token=poseToken(ref.job_id,ref.reference_id);
@@ -2662,7 +2633,7 @@ function insertHumanPoseReference(job, frame) {
   } catch (error) { announce(error.message,true); return; }
   if (insertNoteReference('@' + humanJobName(job) + '（' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name) + '）',token)) {
     if (!existing) state.poseRefs.push(ref);
-    ui.humanPanel.open=false; saveDraft(); renderHumanPosePanel();
+    saveDraft(); renderHumanPosePanel();
   }
 }
 async function viewHumanPose(job) {
@@ -2670,6 +2641,7 @@ async function viewHumanPose(job) {
   const selectedView=job.multi_view && job.view_ids?.includes(referenceView()?.clip_id) ? referenceView()?.clip_id : job.view_ids?.[0];
   const frame=detail?.frames?.find((item) => item.view_id === selectedView) || detail?.frames?.[0];
   if (!frame || !editable()) return;
+  setMode('select');
   if (job.source_kind === 'static_references' || !job.view_id && !job.multi_view) {
     if (!state.references.some(ref => ref.id === frame.reference_id)) { announce('该人体结果的原参考图已被移除。',true); return; }
     pauseTimeline(); state.clipEnabled=false; state.activeReferenceId=frame.reference_id;
@@ -2680,29 +2652,32 @@ async function viewHumanPose(job) {
     if (!referenceViews().some((view) => view.clip_id === viewId)) { announce('该人体结果的原机位已不在当前片段。',true); return; }
     await seekTimeline(frame.time_sec,{viewId,preserveTime:true});
   }
-  ui.humanPanel.open=true; renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
+  minimalLayout?.closeReferences(); renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
 }
 async function downloadHumanPose(job) {
-  let detail;
+  let jsonText;
   try {
-    detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + (humanAutomaticJob(job) ? '?download=1' : ''));
+    const response=await fetch(resourceURL('/api/workspace/pose/' + encodeURIComponent(job.job_id) + (humanAutomaticJob(job) ? '?download=1' : '')));
+    jsonText=await response.text();
+    const detail=JSON.parse(jsonText);
+    if (!response.ok) throw new Error(detail.error || detail.detail || 'HTTP ' + response.status);
     if (detail.job_id !== job.job_id || detail.session_id !== state.sessionId ||
         (!job.imported_external && detail.status !== 'completed') || !Array.isArray(detail.frames)) {
       throw new Error('下载结果与当前场景会话不匹配');
     }
   } catch (error) { announce('人体结果未能下载：' + error.message,true); return; }
-  const blob=new Blob([JSON.stringify(detail,null,2)],{type:'application/json;charset=utf-8'});
+  // Preserve the server's numeric representation, including 0.0. Rewriting
+  // parsed JSON in JavaScript can change the immutable import digest.
+  const blob=new Blob([jsonText],{type:'application/json;charset=utf-8'});
   const url=URL.createObjectURL(blob), link=document.createElement('a');
   link.href=url; link.download=humanJobName(job) + '_' + job.job_id.slice(0,8) + '.json';
   document.body.append(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url),1000);
 }
 function bindHumanPoseEvents() {
-  ui.humanPanel.addEventListener('toggle',() => {
-    if (ui.humanPanel.open) { renderHumanPosePanel(); loadHumanPoses().catch(() => {}); }
-    drawHumanPoseOverlay();
+  id('references-dialog-button').addEventListener('click',() => {
+    renderHumanPosePanel(); loadHumanPoses().catch(() => {});
   });
-  ui.humanImport.addEventListener('change',() => importHumanPoseFile(ui.humanImport.files?.[0]));
   setInterval(() => {
     if (state.workspaceReady && !state.navigatingProject && !document.hidden) {
       loadHumanPoses().catch(() => {});
@@ -3368,7 +3343,7 @@ function updateSceneHint() {
       ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
       : '直接在渲染图上圈画，自动保留当前截图';
   } else if (state.mode === 'select') {
-    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「返回 3D」可继续选择';
+    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点「选择」返回 3D';
   } else {
     ui.sceneHint.textContent = '在场景上' +
       ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
@@ -3377,7 +3352,8 @@ function updateSceneHint() {
 }
 function updateMode() {
   updateAnnotationHistory();
-  for (const button of [ui.freeze, ui.browse, ui.snapshotButton]) button.disabled = !editable();
+  ui.frame.disabled = !editable() || !state.selectedId;
+  ui.resetView.disabled = !editable();
   document.body.dataset.tool = state.mode;
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
@@ -3681,8 +3657,12 @@ function renderAnnotations() {
     const glyph = document.createElement('span');
     glyph.className = 'annotation-glyph';
     glyph.textContent = glyphs[annotation.type] || '●';
-    const copy = document.createElement('div');
-    copy.className = 'annotation-copy';
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'annotation-copy annotation-preview' + (annotation.pane === 'scene' ? ' annotation-open-scene' : '');
+    copy.title = annotation.pane === 'scene' ? '查看标注截图' : '查看这条标记';
+    copy.disabled = !editable();
+    copy.addEventListener('click', () => openAnnotationPreview(annotation));
     const title = document.createElement('strong');
     const ref = [...state.references, ...referenceViews().flatMap((view) => view.frames)].find((item) => item.id === annotation.reference_image_id);
     title.textContent = (annotation.group_id ? circled[Number(annotation.group_id)] + ' ' : '') +
@@ -3692,11 +3672,7 @@ function renderAnnotations() {
     const stale = annotation.pane === 'scene' && annotation.scene_revision !== state.sceneRevision;
     subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
     if (stale) subtitle.classList.add('stale-label');
-    if (annotation.frame_id) {
-      title.style.cursor = 'pointer';
-      title.title = '回到这条标记的时刻';
-      title.addEventListener('click', () => openMoment(annotation.frame_id));
-    }
+    copy.setAttribute('aria-label', '查看：' + title.textContent);
     copy.append(title, subtitle);
     const cite = document.createElement('button');
     cite.type = 'button';
@@ -3720,6 +3696,27 @@ function renderAnnotations() {
     row.append(glyph, copy, cite, remove);
     ui.annotationList.append(row);
   }
+}
+
+async function openAnnotationPreview(annotation) {
+  if (!editable()) return;
+  hideTextEditor(); pauseTimeline(); setMode('select');
+  if (annotation.frame_id) {
+    await openMoment(annotation.frame_id);
+    if (state.snapshot?.id !== annotation.frame_id || state.sceneView !== 'snapshot') return;
+  } else if (annotation.pane === 'scene') {
+    if (!state.snapshot || state.snapshot.id !== annotation.snapshot_id) {
+      announce('这条标记的原截图已无法恢复，请重新圈画。',true); return;
+    }
+    state.sceneView='snapshot'; renderSceneView(); drawOverlays();
+  } else {
+    const reference=state.references.find((item) => item.id === annotation.reference_image_id);
+    if (!reference) { announce('这条标记的原参考图已被移除。',true); return; }
+    state.clipEnabled=false; state.activeReferenceId=reference.id;
+    renderReferenceStrip(); showActiveReference();
+    if (referenceCamera(reference)) alignActiveReference(); else leaveReferenceCamera();
+  }
+  minimalLayout?.closeReferences(); saveDraft();
 }
 
 async function loadImage(url) {
@@ -3823,7 +3820,7 @@ function insertNoteText(text, {replaceSelection=true}={}) {
   minimalLayout?.openChat();
   ui.note.setRangeText(insertion, start, end, 'end');
   // Return to live picking after inserting a reference. The frozen annotated
-  // image remains available through the Back to annotation button.
+  // image remains available by opening its saved mark in the reference list.
   setMode('select');
   ui.note.focus();
   saveDraft();
@@ -4296,10 +4293,7 @@ function bindEvents() {
   });
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
-  ui.freeze.addEventListener('click', freezeScene);
-  ui.browse.addEventListener('click', () => { if (editable()) setMode('select'); });
   ui.newSceneBadge.addEventListener('click', () => { if (editable()) setMode('select'); });
-  ui.snapshotButton.addEventListener('click', () => { if (!editable()) return; if (state.snapshot?.time_sec !== undefined) openMoment(state.snapshot.id); else { state.sceneView = 'snapshot'; renderSceneView(); } });
   ui.compareToggle?.addEventListener('click', toggleCompare);
   ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
   for (const button of ui.comparePresets) {
@@ -4358,14 +4352,19 @@ function bindEvents() {
     renderSelection();
     saveDraft();
   });
-  id('frame-button').addEventListener('click', () => {
+  ui.frame.addEventListener('click', () => {
     if (!editable()) return;
+    setMode('select');
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
     if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
     else if (state.selectedId) frameBox(objectBox(state.selectedId));
     else frameAll();
+    minimalLayout?.closeReferences();
   });
-  id('reset-button').addEventListener('click', () => { if (editable()) frameAll(); });
+  ui.resetView.addEventListener('click', () => {
+    if (!editable()) return;
+    setMode('select'); frameAll(); minimalLayout?.closeReferences();
+  });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
   ui.annotationText.addEventListener('keydown', (event) => {

@@ -101,10 +101,8 @@ select { min-width: 0; font-size: var(--text-control); }
 .reference-media img, .scene-snapshot-media img { display: block; height: 100%; width: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
 .reference-media canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
 .reference-media .human-pose-overlay { pointer-events: none; z-index: 2; }
-.human-pose-popover .popover-content { width: 295px; max-height: min(530px, 78vh); overflow-y: auto; }
-.human-pose-controls p { margin: 0; font-size: var(--text-caption); line-height: 1.6; }
-.human-pose-controls .upload-button { justify-self: start; }
-.human-pose-jobs { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 10px; }
+.human-pose-results { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
+.human-pose-jobs { display: grid; gap: 8px; padding-top: 12px; }
 .human-pose-job { display: grid; gap: 5px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
 .human-pose-job-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: var(--text-caption); }
 .human-pose-job small { color: var(--muted); font-size: var(--text-caption); line-height: 1.6; overflow-wrap: anywhere; }
@@ -330,10 +328,13 @@ dialog::backdrop { background: #17171522; }
 .object-color { flex: none; width: 7px; height: 7px; border: 1px solid #0002; }
 .annotation-section { padding-top: 20px; }
 .section-heading { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.object-view-actions { display: flex; gap: 12px; }
 .annotation-list { display: grid; gap: 14px; padding-top: 16px; }
 .annotation-item { display: flex; align-items: flex-start; gap: 10px; font-size: var(--text-caption); }
 .annotation-glyph { font-size: 15px; width: 16px; flex: none; }
 .annotation-copy { flex: 1; min-width: 0; }
+.annotation-preview { display: block; padding: 0; text-align: left; }
+.annotation-preview:hover strong { text-decoration: underline; text-underline-offset: 4px; }
 .annotation-copy strong { display: block; font-size: var(--text-body); font-weight: 400; line-height: 1.6; }
 .annotation-copy small { display: block; color: var(--muted); font-size: var(--text-caption); line-height: 1.6; margin-top: 4px; }
 .annotation-remove { color: var(--muted); padding: 3px; }
@@ -365,8 +366,6 @@ dialog::backdrop { background: #17171522; }
   .annotation-history-tools .compact-button > span:last-child { display: none; }
   .pane-heading h2 { max-width: 95px; }
   .pane-actions { gap: 0; }
-  .human-pose-popover { position: static; }
-  .human-pose-popover .popover-content { right: 0; max-width: 100%; }
   .zoom-button { display: none; }
   .selection-card { gap: 5px; }
   .selected-name { max-width: 160px; }
