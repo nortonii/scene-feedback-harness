@@ -169,7 +169,7 @@ def publish_prepared_clip(store: Any, clip: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[str, Any],
-                             revision: int, object_ids: set[str], model_ids: set[str]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+                             revision: int, object_ids: set[str], model_ids: set[str], *, require_oldest: bool = True) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     timeline = payload.get("timeline")
     frames = payload.get("dynamic_frames", [])
     if timeline is None:
@@ -318,7 +318,7 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
         elif "reference_original" in images:
             raise APIError(400, "reference original image requires a reference clip")
         prepared.append({"frame": frame, "images": images})
-    if min(item["frame"]["scene_revision"] for item in prepared) != revision:
+    if require_oldest and min(item["frame"]["scene_revision"] for item in prepared) != revision:
         raise APIError(409, "submitted scene_revision must be the oldest saved dynamic evidence revision",
                        detail={"code": "feedback_revision_conflict", "current_scene_revision": store.state["scene"]["revision"]})
     return normalized_timeline, prepared
@@ -353,3 +353,48 @@ def validate_timed_annotations(annotations: list[dict[str, Any]], timeline: dict
                 annotation["reference_time_sec"] = frame["reference_time_sec"]
         if "frame_index" in frame:
             annotation["frame_index"] = frame["frame_index"]
+
+
+def prepare_scene_snapshots(store: Any, session: dict[str, Any], payload: dict[str, Any],
+                            revision: int, object_ids: set[str], model_ids: set[str]) -> list[dict[str, Any]]:
+    """Validate static camera views with the same image/selection limits as frames.
+
+    The synthetic timeline is local to validation; static views never acquire
+    timestamps or timeline semantics in stored feedback or model attachments.
+    """
+    snapshots = payload.get("scene_snapshots", [])
+    if not isinstance(snapshots, list) or len(snapshots) > MAX_DYNAMIC_FRAMES:
+        raise APIError(400, "scene_snapshots must contain at most 8 camera views")
+    if not snapshots:
+        return []
+    frames = []
+    for index, snapshot in enumerate(snapshots):
+        if not isinstance(snapshot, dict):
+            raise APIError(400, "scene snapshot must be an object")
+        name = snapshot.get("name", f"截图 {index + 1}")
+        if not isinstance(name, str) or not name.strip() or len(name) > 80 or any(ord(c) < 32 for c in name):
+            raise APIError(400, "scene snapshot name must be short text")
+        if any(key in snapshot for key in ("time_sec", "reference_frame_id", "view_id", "animation_clips")):
+            raise APIError(400, "static scene snapshots cannot contain timeline fields")
+        frames.append({**snapshot, "time_sec": 0})
+    _, prepared = prepare_dynamic_feedback(store, {**session, "reference_clip": None}, {
+        **payload, "dynamic_frames": frames,
+        "timeline": {"clip_id": None, "time_sec": 0, "duration_sec": 1, "fps": 1, "scope": {"kind": "frame"}},
+    }, revision, object_ids, model_ids, require_oldest=False)
+    for index, item in enumerate(prepared):
+        item["frame"].pop("time_sec", None)
+        item["frame"].pop("reference_frame_id", None)
+        item["frame"]["name"] = snapshots[index].get("name", f"截图 {index + 1}").strip()
+    return prepared
+
+
+def validate_snapshot_annotations(annotations: list[dict[str, Any]], snapshots: list[dict[str, Any]]) -> None:
+    evidence = {item["frame"]["id"]: item["frame"] for item in snapshots}
+    for annotation in annotations:
+        if annotation.get("pane") != "scene" or annotation.get("frame_id"):
+            continue
+        snapshot = evidence.get(annotation.get("snapshot_id"))
+        if snapshot is None:
+            raise APIError(400, "scene annotation must identify a saved scene snapshot")
+        if annotation.get("scene_revision") != snapshot["scene_revision"] or annotation.get("camera") != snapshot["camera"]:
+            raise APIError(400, "scene annotation camera and revision must match its snapshot")

@@ -237,16 +237,17 @@ input[type=range] { accent-color: #292925; }
   .feedback-panel, .chat-launcher { background: var(--paper); border-color: var(--line); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .feedback-panel::before, .chat-launcher::before { display: none; }
 }
-.feedback-heading { flex: none; display: flex; align-items: center; gap: 12px; min-height: 30px; margin: 4px 0 5px; }
 .section-label { font-size: var(--text-caption); font-weight: 600; }
 .section-label span { color: var(--muted); margin-left: 5px; }
 #submit-caption:empty, #scene-title:empty { display: none; }
-.feedback-heading:not(:has(.selected-name)) { display: none; }
 #annotation-count { color: var(--muted); }
+.current-selection { margin-bottom: 20px; }
+.current-selection:not(:has(.selected-name)) { display: none; }
+.current-selection .section-label { margin-bottom: 8px; }
 .selection-card { display: flex; gap: 8px; align-items: center; min-width: 0; }
 .selection-card:not(:has(.selected-name)) { display: none; }
-.selection-summary { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.selected-name { font-size: var(--text-caption); white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+.selection-summary { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+.selected-name { min-width: 0; flex: 1; font-size: var(--text-caption); white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
 .selected-id { display: none; }
 .text-button, .reference-insert { padding: 3px 0; color: var(--muted); background: transparent; font-size: var(--text-control); white-space: nowrap; font-weight: 500; }
 .text-button:hover, .reference-insert:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
@@ -417,7 +418,6 @@ dialog::backdrop { background: #17171522; }
   #chat-dock-body { padding: 0 10px 10px; }
   .conversation { max-height: 24dvh; }
   .timeline-options { margin-left: auto; }
-  .feedback-heading { flex-wrap: wrap; gap: 8px; }
   .selection-card { order: 3; width: 100%; }
   .selection-summary { gap: 9px; }
   .selected-name { max-width: 230px; }
@@ -436,3 +436,12 @@ dialog::backdrop { background: #17171522; }
   .chat-status { max-width: 70px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Saved camera views float over the canvas without changing its aspect ratio. */
+.scene-snapshot-strip { position: absolute; top: 10px; left: 10px; max-width: calc(100% - 20px); display: flex; gap: 6px; overflow-x: auto; z-index: 8; padding: 3px; border-radius: 9px; background: #f5f4efe8; backdrop-filter: blur(12px); }
+.snapshot-card { display: flex; flex: none; align-items: center; }
+.snapshot-open { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 3px; border: 1px solid transparent; border-radius: 6px; font-size: var(--text-caption); white-space: nowrap; }
+.snapshot-open img { width: 38px; height: 28px; object-fit: cover; border-radius: 3px; }
+.snapshot-open[aria-pressed=true] { background: var(--paper); border-color: var(--ink); }
+.snapshot-remove { flex: none; padding: 6px; color: var(--muted); }
+.scene-stage:has(.scene-snapshot-strip:not(.hidden)) .selected-chip { top: 66px; }

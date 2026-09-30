@@ -179,7 +179,7 @@ class WorkspaceGateway:
                     continue
                 packet = feedback.get(item["feedback_id"], {})
                 has_evidence = bool(packet.get("scene_original_url")) or any(
-                    frame.get("scene_original_url") for frame in packet.get("dynamic_frames", [])
+                    frame.get("scene_original_url") for frame in [*packet.get("dynamic_frames", []), *packet.get("scene_snapshots", [])]
                 )
                 if not has_evidence:
                     continue
@@ -1543,6 +1543,11 @@ class WorkspaceGateway:
                 label += " · " + frame["reference_name"]
             add("人体关键点来源原帧：" + label, pose["reference_original_url"])
             add("ViTPose 估计骨架（青色，区别于人工提示）：" + label, pose["pose_overlay_url"])
+        for snapshot in feedback.get("scene_snapshots", []):
+            lines.append("静态视角截图：" + json.dumps({key: value for key, value in snapshot.items() if not key.endswith("_url")}, ensure_ascii=False))
+            for field, label in (("scene_original", "原始截图"), ("scene_annotated", "带用户标记的截图")):
+                if snapshot.get(field + "_url"):
+                    add(f"{snapshot['name']} · {label}，证据 {snapshot['id']}，场景版本 {snapshot['scene_revision']}", snapshot[field + "_url"])
         for frame in feedback.get("dynamic_frames", []):
             lines.append("动态证据帧：" + json.dumps({key: value for key, value in frame.items() if not key.endswith("_url")}, ensure_ascii=False))
             frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""

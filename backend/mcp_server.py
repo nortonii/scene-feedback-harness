@@ -90,7 +90,7 @@ def _feedback_with_local_paths(result: dict[str, Any]) -> dict[str, Any]:
             url = item.get(f"{name}_url")
             if url:
                 item[f"{name}_path"] = str(_image_path(url))
-        for frame in item.get("dynamic_frames", []):
+        for frame in [*item.get("dynamic_frames", []), *item.get("scene_snapshots", [])]:
             for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
                 if frame.get(name + "_url"):
                     frame[name + "_path"] = str(_image_path(frame[name + "_url"]))
@@ -143,6 +143,12 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
             for name in ("reference_original", "pose_overlay"):
                 content.append(TextContent(type="text", text=f"{label}: {name} (estimated 2D keypoints, not user-drawn geometry)"))
                 content.append(_preview_image(Path(pose[name + "_path"])))
+        for snapshot in item.get("scene_snapshots", []):
+            content.append(TextContent(type="text", text=f"Saved camera view {snapshot['name']}, evidence {snapshot['id']}, scene revision {snapshot['scene_revision']}; each annotation belongs to its snapshot_id."))
+            for name in ("scene_original", "scene_annotated"):
+                if snapshot.get(name + "_path"):
+                    content.append(TextContent(type="text", text=f"{snapshot['name']} {name}: {snapshot[name + '_path']}"))
+                    content.append(_preview_image(Path(snapshot[name + "_path"])))
         for frame in item.get("dynamic_frames", []):
             frame_label = f"clip frame {frame['frame_index'] + 1}, " if "frame_index" in frame else ""
             view_label = f"view {frame['view_name']} (ID {frame['view_id']}), " if frame.get("view_id") else ""

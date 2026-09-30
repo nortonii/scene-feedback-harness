@@ -281,7 +281,7 @@ export function setupChatDock({getState}) {
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
-    for (const element of [dock, dock?.querySelector('.chat-dock-header'), dock?.querySelector('.feedback-heading'),
+    for (const element of [dock, dock?.querySelector('.chat-dock-header'),
       dock?.querySelector('.composer'), byId('timeline-panel')]) {
       if (element) observer.observe(element);
     }

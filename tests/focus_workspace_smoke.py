@@ -248,6 +248,27 @@ def verify_scene_modes(page, screenshots):
     page.mouse.up()
     expect(page.locator("#annotation-count")).to_have_text("1")
     original = draft(page)
+    # Upgrade a legacy draft: one active screenshot and the old IDB array format.
+    page.evaluate("""async () => {
+      const key = 'astra-visual-draft:' + new URL(location.href).searchParams.get('session_id');
+      const draft = JSON.parse(localStorage.getItem(key));
+      delete draft.sceneSnapshotIds; delete draft.snapshot.name; delete draft.snapshot.number;
+      localStorage.setItem(key, JSON.stringify(draft));
+      await new Promise((resolve, reject) => {
+        const request = indexedDB.open('astra-visual-moments', 1);
+        request.onsuccess = () => {
+          const db = request.result, tx = db.transaction('drafts', 'readwrite');
+          tx.objectStore('drafts').put([], new URL(location.href).searchParams.get('session_id'));
+          tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = () => reject(tx.error);
+        };
+        request.onerror = () => reject(request.error);
+      });
+    }""")
+    page.reload()
+    wait_ready(page)
+    expect(page.locator(".snapshot-open")).to_have_count(1)
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["annotations"] == original["annotations"]
     annotate.click()
     assert draft(page)["snapshot"] == original["snapshot"]
     browse.click()
@@ -260,42 +281,69 @@ def verify_scene_modes(page, screenshots):
     page.mouse.up()
     page.wait_for_timeout(500)
     assert draft(page)["camera"] != original["snapshot"]["camera"]
+    # A different camera creates a second view without destroying the first.
     annotate.click()
     mode(True)
+    current = draft(page)
+    assert current["snapshot"]["id"] != original["snapshot"]["id"]
+    assert current["snapshot"]["camera"] != original["snapshot"]["camera"]
+    assert current["annotations"] == original["annotations"]
+    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator("#timeline-panel")).to_be_hidden()
+    for field in ("position", "target", "up", "fov"):
+        assert current["snapshot"]["camera"][field] == current["camera"][field]
+    browse.click()
+    annotate.click()
+    assert draft(page)["snapshot"] == current["snapshot"], "Unchanged view should reuse its screenshot"
+    page.locator(".snapshot-open").first.click()
     assert draft(page)["snapshot"] == original["snapshot"]
     assert draft(page)["annotations"] == original["annotations"]
+    # Draw another mark on the first view after browsing and capturing a second.
+    page.locator('[data-tool="point"]').click()
+    image = page.locator("#scene-snapshot-image").bounding_box()
+    page.mouse.click(image["x"] + image["width"] * .7, image["y"] + image["height"] * .5)
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    assert all(mark["snapshot_id"] == original["snapshot"]["id"] for mark in draft(page)["annotations"])
     page.reload()
     wait_ready(page)
     mode(True)
-    expect(page.locator("body")).to_have_attribute("data-tool", "rectangle")
+    expect(page.locator(".snapshot-open")).to_have_count(2)
     assert draft(page)["snapshot"] == original["snapshot"]
-    if screenshots:
-        page.screenshot(path=str(screenshots / "scene-mode-annotation.png"))
-    page.locator(".view-popover summary").click()
-    page.locator("#reset-button").click()
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    page.locator(".snapshot-remove").first.click()
     mode(False)
-    assert draft(page)["snapshot"] == original["snapshot"]
-    assert draft(page)["annotations"] == original["annotations"]
-    annotate.click()
-    mode(True)
-    browse.click()
-    mode(False)
-    page.locator(".view-popover summary").click()
-    page.once("dialog", lambda dialog: dialog.dismiss())
-    page.locator("#freeze-button").click()
-    mode(False)
-    assert draft(page)["snapshot"] == original["snapshot"]
-    assert draft(page)["annotations"] == original["annotations"]
-    page.locator(".view-popover summary").click()
-    page.once("dialog", lambda dialog: dialog.accept())
-    page.locator("#freeze-button").click()
-    mode(True)
+    expect(page.locator(".snapshot-open")).to_have_count(1)
     expect(page.locator("#annotation-count")).to_have_text("0")
-    assert draft(page)["snapshot"]["id"] != original["snapshot"]["id"]
     page.locator("#undo-annotation").click()
-    assert draft(page)["snapshot"] == original["snapshot"]
-    assert draft(page)["annotations"] == original["annotations"]
+    mode(True)
+    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    page.locator(".snapshot-open").nth(1).click()
+    assert draft(page)["snapshot"] == current["snapshot"]
+    if screenshots:
+        page.screenshot(path=str(screenshots / "scene-mode-multiple-views.png"))
+    # Capacity is bounded without discarding any saved view or mark.
+    for _ in range(6):
+        browse.click()
+        page.locator("#capture-scene-button").click()
+    expect(page.locator(".snapshot-open")).to_have_count(8)
+    browse.click()
+    page.locator("#capture-scene-button").click()
     mode(False)
+    expect(page.locator(".snapshot-open")).to_have_count(8)
+    expect(page.locator("#annotation-count")).to_have_text("2")
+    for width, height in ((768, 900), (390, 844), (340, 844)):
+        page.set_viewport_size({"width": width, "height": height})
+        last_view = page.locator(".snapshot-open").last
+        last_view.scroll_into_view_if_needed()
+        last_view.click()
+        expect(last_view).to_have_attribute("aria-pressed", "true")
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+        assert page.locator("#scene-snapshot-strip").evaluate("el => el.scrollWidth > el.clientWidth")
+        if screenshots:
+            page.screenshot(path=str(screenshots / f"snapshot-strip-{width}.png"))
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.evaluate("scrollTo(0, 0)")
     # Return to the initial fixture before the existing workspace regressions.
     page.locator("#clear-annotations").click()
     browse.click()
@@ -303,6 +351,43 @@ def verify_scene_modes(page, screenshots):
     page.locator("#reset-button").click()
     page.locator("#chat-launcher").click()
     mode(False)
+
+
+def verify_selection_panel(page, screenshots):
+    page.locator("#chat-history-toggle").click()
+    composer_before = page.locator("#feedback-note").bounding_box()
+    dock_before = page.locator("#chat-dock").bounding_box()
+    page.locator('[data-selection-level="part"]').click()
+    viewport = page.locator("#viewport").bounding_box()
+    for x, y in ((.5, .4), (.45, .45), (.55, .5)):
+        page.mouse.click(viewport["x"] + viewport["width"] * x, viewport["y"] + viewport["height"] * y)
+        if draft(page).get("selectedSceneNode"):
+            break
+    assert draft(page).get("selectedSceneNode"), "Fixture must select a real GLB part"
+    expect(page.locator("#selected-chip")).to_be_visible()
+    expect(page.locator("#chat-dock .selection-card")).to_have_count(0)
+    assert page.locator("#feedback-note").bounding_box() == composer_before
+    assert page.locator("#chat-dock").bounding_box() == dock_before
+    if screenshots:
+        page.screenshot(path=str(screenshots / "selected-part-compact-chat.png"))
+    page.locator("#references-dialog-button").click()
+    expect(page.locator("#references-dialog .current-selection")).to_be_visible()
+    expect(page.locator("#references-dialog .selected-reference-insert")).to_be_visible()
+    if screenshots:
+        page.screenshot(path=str(screenshots / "selected-part-panel.png"))
+    page.locator(".selected-reference-insert").click()
+    expect(page.locator("#references-dialog")).to_be_hidden()
+    expect(page.locator("#feedback-note")).to_be_focused()
+    assert "[[node:" in page.locator("#feedback-note").input_value()
+    assert draft(page)["referencedSceneNodes"]
+    page.locator("#references-dialog-button").click()
+    page.locator("#clear-selection").click()
+    expect(page.locator(".current-selection")).to_be_hidden()
+    expect(page.locator("#selected-chip")).to_be_hidden()
+    page.keyboard.press("Escape")
+    page.locator("#feedback-note").fill("")
+    page.locator('[data-selection-level="item"]').click()
+    page.locator("#chat-history-toggle").click()
 
 
 def verify_overlay_toolbar(page, store, screenshots):
@@ -342,8 +427,9 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(slider).to_have_value("75")
 
-    # Reopen the existing marked screenshot, preserving its original evidence.
-    page.locator("#snapshot-button").click()
+    # Explicitly reopen the existing marked screenshot, preserving its evidence.
+    page.locator(".view-popover summary").click()
+    page.locator("#saved-snapshot-button").click()
     expect(overlay).to_be_hidden()
     expect(toggle).to_be_disabled()
     expect(toggle).to_have_attribute("aria-pressed", "false")
@@ -594,7 +680,9 @@ def main():
                     return
 
                 verify_scene_modes(page, screenshots)
-                passed("persistent scene modes capture, draw, orbit, restore saved evidence and reload; explicit recapture confirms and can be undone")
+                passed("multiple static views preserve independent marks, current-camera capture, selection, legacy-draft upgrade, reload, deletion undo, eight-view capacity and narrow-screen gallery")
+                verify_selection_panel(page, screenshots)
+                passed("selecting a real GLB part leaves composer geometry unchanged; side panel inserts node references and clears selection")
                 expect(page.locator("#chat-dock")).to_be_visible()
                 expect(page.locator("#chat-history")).to_be_visible()
                 expect(page.locator("#conversation")).to_contain_text("请把柜子向左移动一点。")
@@ -750,6 +838,14 @@ def main():
                 composer.fill(note)
                 passed("IME composition and keyCode 229 block Ctrl/Cmd Enter; plain Enter only inserts a newline")
 
+                first_view = draft(page)["snapshot"]
+                page.locator("#browse-button").click()
+                page.locator("#capture-scene-button").click()
+                page.locator('[data-tool="point"]').click()
+                scene_box = page.locator("#scene-snapshot-image").bounding_box()
+                page.mouse.click(scene_box["x"] + scene_box["width"] * .72, scene_box["y"] + scene_box["height"] * .3)
+                expect(page.locator("#annotation-count")).to_have_text("2")
+                expect(page.locator(".snapshot-open")).to_have_count(2)
                 before_submit = draft(page)
                 # The app's textarea listener runs first. A second listener clicks
                 # Send in the same key event, avoiding timing-dependent retries.
@@ -769,13 +865,16 @@ def main():
                 assert len(submissions) == 1, len(submissions)
                 sent = submissions[0]
                 assert sent["note"] == note
-                assert len(sent["annotations"]) == 1
+                assert len(sent["annotations"]) == 2
+                assert len(sent["scene_snapshots"]) == 2
+                assert sent["scene_snapshots"][0]["camera"] == first_view["camera"]
+                assert {mark["snapshot_id"] for mark in sent["annotations"]} == {view["id"] for view in sent["scene_snapshots"]}
                 assert sent["scene_original_data_url"].startswith("data:image/")
                 assert sent["scene_annotated_data_url"].startswith("data:image/")
                 assert sent["camera"] == before_submit["snapshot"]["camera"]
                 assert len(store.list_all_feedback()) == 1
                 expect(page.locator("#feedback-note")).to_have_value("")
-                passed("real Ctrl Enter plus immediate duplicate click creates one feedback with frozen camera and image evidence")
+                passed("real Ctrl Enter plus immediate duplicate click creates one feedback containing both saved views and their own annotations")
 
                 expect(page.locator("#annotation-count")).to_have_text("0")
                 expect(page.locator("#undo-annotation")).to_be_disabled()
@@ -788,7 +887,9 @@ def main():
                 assert fresh["poseRefs"] == [] and fresh["humanPendingRequest"] is None
                 assert fresh["referencedSceneNodes"] == []
                 packet = store.list_all_feedback()[0]
-                assert len(packet["annotations"]) == 1 and packet["scene_original_url"]
+                assert len(packet["annotations"]) == 2 and packet["scene_original_url"]
+                assert len(packet["scene_snapshots"]) == 2
+                expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
                 page.reload()
                 wait_ready(page)
                 expect(page.locator("#annotation-count")).to_have_text("0")
@@ -839,13 +940,17 @@ def main():
                 page.locator("#browse-button").click()
                 page.locator("#timeline-prev").click()
                 expect(page.locator("#timeline-seek")).not_to_have_value(saved_time)
+                current_time = page.locator("#timeline-seek").input_value()
                 page.locator("#snapshot-button").click()
+                expect(page.locator("#timeline-seek")).to_have_value(current_time)
+                assert draft(page)["snapshot"]["id"] != moment["id"]
+                page.locator(".moment-card button").first.click()
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 assert draft(page)["snapshot"] == moment
                 page.locator("#browse-button").click()
                 page.locator("#clear-annotations").click()
-                passed("annotation mode reopens the saved dynamic frame and preserves its original camera and image")
+                passed("annotation mode captures the current dynamic frame; explicit moment selection restores the original frame and evidence")
 
                 expect(page.locator("#reference-view-select")).to_be_visible()
                 before_view_time = page.locator("#timeline-seek").input_value()
