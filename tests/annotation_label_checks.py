@@ -64,7 +64,7 @@ def verify_annotation_label_visibility(page, screenshots):
     expect(toggle).to_be_disabled()
     page.locator("#chat-collapse").click()
     expect(page.locator("#chat-dock")).to_be_hidden()
-    page.locator("#snapshot-button").click()
+    page.locator("#capture-scene-button").click()
     expect(toggle).to_be_enabled()
     first_snapshot = draft(page)["snapshot"]
     point_at = (.45, .43)

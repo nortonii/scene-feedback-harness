@@ -2108,18 +2108,17 @@ function captureLiveScene({includeSize=false}={}) {
   const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
   return includeSize ? {data_url:dataUrl, width:canvas.width, height:canvas.height} : dataUrl;
 }
-function enterSnapshotAnnotation() {
-  if (!editable() || state.sceneView === 'snapshot') return;
-  if (state.mode === 'select') state.mode = 'rectangle';
-  prepareSceneAnnotation();
-}
 async function openSavedSnapshot() {
-  if (!editable() || !state.snapshot || state.sceneView === 'snapshot') return;
-  if (state.snapshot?.time_sec !== undefined) {
-    await openMoment(state.snapshot.id);
-  } else if (state.snapshot) {
-    state.sceneView = 'snapshot';
-    renderSceneView();
+  if (!editable() || state.sceneView === 'snapshot') return;
+  const snapshot = state.snapshot || state.sceneSnapshots.at(-1) || state.dynamicSnapshots.at(-1);
+  if (!snapshot) {
+    announce('当前还没有截图，请点击「＋ 截图」新增。');
+    return;
+  }
+  if (snapshot.time_sec !== undefined) {
+    await openMoment(snapshot.id);
+  } else {
+    openSceneSnapshot(snapshot.id);
   }
 }
 function freezeScene() {
@@ -2283,7 +2282,7 @@ function renderSceneView({persist=true}={}) {
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
   ui.browse.setAttribute('aria-pressed', String(!showingSnapshot));
   ui.snapshotButton.setAttribute('aria-pressed', String(showingSnapshot));
-  ui.snapshotButton.title = '在当前 3D 视角上圈画；原截图和标记保留在缩略图列表中';
+  ui.snapshotButton.title = '浏览上一次操作的截图；新增截图请点击「＋ 截图」';
   ui.savedSnapshot.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
   ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
@@ -4465,7 +4464,7 @@ function bindEvents() {
   ui.captureScene.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', browseScene);
   ui.newSceneBadge.addEventListener('click', browseScene);
-  ui.snapshotButton.addEventListener('click', enterSnapshotAnnotation);
+  ui.snapshotButton.addEventListener('click', openSavedSnapshot);
   ui.compareToggle?.addEventListener('click', toggleCompare);
   ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
   for (const button of ui.comparePresets) {

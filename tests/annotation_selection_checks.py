@@ -86,7 +86,7 @@ def verify_annotation_selection(page, screenshots):
     assert not marks(), "Selection checks require an initially empty visual draft"
     note.fill("")
     collapse_chat()
-    page.locator("#snapshot-button").click()
+    page.locator("#capture-scene-button").click()
     first_snapshot = draft(page)["snapshot"]
     first_pixels = page.locator("#scene-snapshot-image").get_attribute("src")
     scene_point_at = (.52, .42)

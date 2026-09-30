@@ -278,7 +278,14 @@ def verify_scene_modes(page, screenshots):
 
     mode(False)
     page.locator("#chat-collapse").click()
+    expect(annotate).to_have_text("截图浏览")
+    empty = draft(page)
     annotate.click()
+    mode(False)
+    expect(page.locator("#toast")).to_contain_text("当前还没有截图")
+    assert draft(page) == empty
+    expect(page.locator(".snapshot-open")).to_have_count(0)
+    page.locator("#capture-scene-button").click()
     mode(True)
     expect(page.locator("body")).to_have_attribute("data-tool", "rectangle")
     stage = page.locator("#scene-snapshot-image").bounding_box()
@@ -321,8 +328,16 @@ def verify_scene_modes(page, screenshots):
     page.mouse.up()
     page.wait_for_timeout(500)
     assert draft(page)["camera"] != original["snapshot"]["camera"]
-    # A different camera creates a second view without destroying the first.
+    # Browsing returns to the last screenshot even after orbiting the live camera.
     annotate.click()
+    mode(True)
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["camera"] != original["snapshot"]["camera"]
+    expect(page.locator(".snapshot-open")).to_have_count(1)
+    expect(page.locator("body")).to_have_attribute("data-tool", "select")
+    # Only the explicit capture action creates the new camera's screenshot.
+    browse.click()
+    page.locator("#capture-scene-button").click()
     mode(True)
     current = draft(page)
     assert current["snapshot"]["id"] != original["snapshot"]["id"]
@@ -334,7 +349,7 @@ def verify_scene_modes(page, screenshots):
         assert current["snapshot"]["camera"][field] == current["camera"][field]
     browse.click()
     annotate.click()
-    assert draft(page)["snapshot"] == current["snapshot"], "Unchanged view should reuse its screenshot"
+    assert draft(page)["snapshot"] == current["snapshot"], "Browsing must reopen the last screenshot without recapturing"
     page.locator(".snapshot-open").first.click()
     assert draft(page)["snapshot"] == original["snapshot"]
     assert draft(page)["annotations"] == original["annotations"]
@@ -344,8 +359,11 @@ def verify_scene_modes(page, screenshots):
     page.mouse.click(image["x"] + image["width"] * .7, image["y"] + image["height"] * .5)
     expect(page.locator("#annotation-count")).to_have_text("2")
     assert all(mark["snapshot_id"] == original["snapshot"]["id"] for mark in draft(page)["annotations"])
+    browse.click()
     page.reload()
     wait_ready(page)
+    mode(False)
+    annotate.click()
     mode(True)
     expect(page.locator(".snapshot-open")).to_have_count(2)
     assert draft(page)["snapshot"] == original["snapshot"]
@@ -354,6 +372,10 @@ def verify_scene_modes(page, screenshots):
     mode(False)
     expect(page.locator(".snapshot-open")).to_have_count(1)
     expect(page.locator("#annotation-count")).to_have_text("0")
+    annotate.click()
+    mode(True)
+    assert draft(page)["snapshot"] == current["snapshot"], "Deleted active image falls back to a remaining screenshot"
+    expect(page.locator(".snapshot-open")).to_have_count(1)
     page.locator("#undo-annotation").click()
     mode(True)
     expect(page.locator(".snapshot-open")).to_have_count(2)
@@ -388,6 +410,10 @@ def verify_scene_modes(page, screenshots):
     verify_clear_confirmation(page, screenshots)
     page.locator("#clear-annotations").click()
     page.locator("#confirm-clear-annotations").click()
+    annotate.click()
+    mode(False)
+    expect(page.locator("#toast")).to_contain_text("当前还没有截图")
+    expect(page.locator(".snapshot-open")).to_have_count(0)
     browse.click()
     page.locator(".view-popover summary").click()
     page.locator("#reset-button").click()
@@ -416,7 +442,7 @@ def verify_eraser(page, screenshots):
     page.mouse.click(*position("#viewport", .6, .4))
     assert draft(page).get("snapshot") is None, "Erasing live 3D must not capture a screenshot"
     expect(page.locator(".snapshot-open")).to_have_count(0)
-    page.locator("#snapshot-button").click()
+    page.locator("#capture-scene-button").click()
     first = draft(page)["snapshot"]
     tool("line")
     stroke(scene, (.2, .35), (.8, .35))
@@ -508,7 +534,7 @@ def verify_workspace_controls(page, screenshots):
             assert box["x"] >= 0 and box["x"] + box["width"] <= page.viewport_size["width"] + 1, box
 
     page.locator("#chat-collapse").click()
-    page.locator("#snapshot-button").click()
+    page.locator("#capture-scene-button").click()
     page.locator('button[data-tool="point"]').click()
     page.mouse.click(*center("#reference-annotations"))
     page.mouse.click(*center("#scene-annotations"))
@@ -995,7 +1021,7 @@ def main():
                     browser.close()
                     return
                 verify_scene_modes(page, screenshots)
-                passed("multiple static views preserve independent marks, current-camera capture, selection, legacy-draft upgrade, reload, deletion undo, eight-view capacity, narrow-screen gallery and clear confirmation/cancel/Esc/Enter/undo")
+                passed("snapshot browsing restores the last operated view across camera changes and reload, reports empty state and retains explicit capture, independent marks, deletion fallback/undo, capacity, narrow screens and clear confirmation")
                 verify_eraser(page, screenshots)
                 passed("eraser sweeps only visible marks, preserves other screenshots, batches undo/redo, cancels previews and works after reference zoom and reload")
                 verify_workspace_controls(page, screenshots)
@@ -1261,7 +1287,7 @@ def main():
                 page.locator("#timeline-next").click()
                 expect(page.locator("#timeline-time")).not_to_have_text("0.000 s")
                 passed("dynamic timeline, frame navigation and range popover remain operable")
-                page.locator("#snapshot-button").click()
+                page.locator("#capture-scene-button").click()
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 moment = draft(page)["snapshot"]
                 page.locator('button[data-tool="point"]').click()
@@ -1273,6 +1299,12 @@ def main():
                 expect(page.locator("#timeline-seek")).not_to_have_value(saved_time)
                 current_time = page.locator("#timeline-seek").input_value()
                 page.locator("#snapshot-button").click()
+                expect(page.locator("#timeline-seek")).to_have_value(saved_time)
+                assert draft(page)["snapshot"] == moment
+                expect(page.locator(".moment-card")).to_have_count(1)
+                page.locator("#browse-button").click()
+                page.locator("#timeline-prev").click()
+                page.locator("#capture-scene-button").click()
                 expect(page.locator("#timeline-seek")).to_have_value(current_time)
                 assert draft(page)["snapshot"]["id"] != moment["id"]
                 other_moment = draft(page)["snapshot"]["id"]
@@ -1294,7 +1326,7 @@ def main():
                 page.locator("#browse-button").click()
                 page.locator("#clear-annotations").click()
                 page.locator("#confirm-clear-annotations").click()
-                passed("annotation mode captures the current dynamic frame; explicit moment selection restores the original frame and evidence")
+                passed("explicit capture saves the current dynamic frame; snapshot browsing restores the last operated moment without creating another")
 
                 expect(page.locator("#reference-view-select")).to_be_visible()
                 before_view_time = page.locator("#timeline-seek").input_value()
