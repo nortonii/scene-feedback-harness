@@ -487,10 +487,31 @@ def verify_workspace_controls(page, screenshots):
 
     before = geometry(page)
     toggle = page.locator("#snapshot-strip-toggle")
+    assert "截图" not in toggle.inner_text(), "The gallery control should show only an arrow/count"
+    assert page.locator("#snapshot-strip-count").evaluate("el => getComputedStyle(el).opacity") == "0"
     toggle.click()
     expect(toggle).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
     assert geometry(page) == before, "Folding thumbnails must not resize the saved view"
+    expect(page.locator("#snapshot-strip-count")).to_have_text("1")
+    assert page.locator("#snapshot-strip-count").evaluate("el => getComputedStyle(el).opacity") == "1"
+    assert page.locator("#scene-snapshot-reveal").evaluate("el => el.inert")
+    # Reversing an unfinished transition must settle on the last requested state.
+    page.evaluate("""async () => {
+      const toggle = document.getElementById('snapshot-strip-toggle');
+      for (let i=0; i<4; i++) {
+        toggle.click(); await new Promise(resolve => setTimeout(resolve, 45));
+      }
+    }""")
+    expect(toggle).to_have_attribute("aria-expanded", "false")
+    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
+    page.emulate_media(reduced_motion="reduce")
+    toggle.click()
+    expect(page.locator(".snapshot-open")).to_be_visible()
+    assert page.locator("#scene-snapshot-reveal").evaluate("el => el.getAnimations().length") == 0
+    toggle.click()
+    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
+    page.emulate_media(reduced_motion="no-preference")
     toggle.press("Enter")
     expect(page.locator(".snapshot-open")).to_be_visible()
     toggle.click()
@@ -540,6 +561,10 @@ def verify_workspace_controls(page, screenshots):
         assert_no_overflow()
         if width <= 640:
             expect(divider).to_be_hidden()
+        eraser_box = page.locator('[data-tool="erase"]').bounding_box()
+        arrow_box = page.locator("#eraser-settings summary").bounding_box()
+        assert abs(arrow_box["y"] - eraser_box["y"]) < 2
+        assert 0 <= arrow_box["x"] - eraser_box["x"] - eraser_box["width"] <= 1
         page.locator("#eraser-settings summary").click()
         box = page.locator("#eraser-settings .popover-content").bounding_box()
         assert box["x"] >= 0 and box["x"] + box["width"] <= width + 1, box

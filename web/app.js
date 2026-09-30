@@ -2124,7 +2124,6 @@ function openSceneSnapshot(snapshotId) {
   renderSceneView(); renderAnnotations();
 }
 function renderSceneSnapshots() {
-  workspaceControls?.refresh();
   ui.snapshotStrip.replaceChildren();
   for (const snapshot of state.sceneSnapshots) {
     const card = document.createElement('div'); card.className = 'snapshot-card';
@@ -2152,6 +2151,7 @@ function renderSceneSnapshots() {
     });
     card.append(open, remove); ui.snapshotStrip.append(card);
   }
+  workspaceControls?.refresh();
 }
 function updateSnapshotGeometry() {
   if (!state.snapshot) return;

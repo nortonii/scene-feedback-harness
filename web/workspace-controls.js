@@ -8,6 +8,8 @@ export function setupWorkspaceControls({getState}) {
   const gallery = byId('scene-snapshots');
   const strip = byId('scene-snapshot-strip');
   const toggle = byId('snapshot-strip-toggle');
+  const reveal = byId('scene-snapshot-reveal');
+  const countLabel = byId('snapshot-strip-count');
   const size = byId('eraser-size');
   const sizeValue = byId('eraser-size-value');
   const mobile = matchMedia('(max-width: 640px)');
@@ -43,6 +45,15 @@ export function setupWorkspaceControls({getState}) {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${side}" height="${side}"><circle cx="${center}" cy="${center}" r="${diameter/2}" fill="none" stroke="white" stroke-width="3"/><circle cx="${center}" cy="${center}" r="${diameter/2}" fill="none" stroke="#171715" stroke-width="1"/></svg>`;
     document.body.style.setProperty('--eraser-cursor', `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${center} ${center}, crosshair`);
   }
+  function sizeGallery() {
+    // Animate the actual visible width, including when the list overflows.
+    // A fixed oversized max-width would delay the start/end of the motion.
+    const gap = parseFloat(getComputedStyle(strip).columnGap) || 0;
+    const cards = [...strip.children];
+    const contentWidth = cards.reduce((total, card) => total + card.getBoundingClientRect().width, 0) + Math.max(0, cards.length-1) * gap;
+    const available = Math.max(0, gallery.parentElement.clientWidth - 20 - 6 - 28);
+    gallery.style.setProperty('--snapshot-strip-width', Math.min(contentWidth, available) + 'px');
+  }
   function refresh() {
     const state = getState();
     if (state.sessionId && sessionId !== state.sessionId) {
@@ -57,11 +68,14 @@ export function setupWorkspaceControls({getState}) {
     }
     const count = state.sceneSnapshots.length;
     gallery.classList.toggle('hidden', !count);
-    strip.classList.toggle('hidden', !count || collapsed);
+    gallery.classList.toggle('is-collapsed', collapsed);
+    reveal.inert = collapsed || !count;
+    reveal.setAttribute('aria-hidden', String(collapsed || !count));
     toggle.setAttribute('aria-expanded', String(!collapsed));
     toggle.setAttribute('aria-label', (collapsed ? '展开' : '收起') + '截图栏，共 ' + count + ' 张');
-    toggle.title = collapsed ? '展开截图栏' : '收起截图栏';
-    toggle.textContent = '截图 ' + count + (collapsed ? ' ›' : ' ‹');
+    toggle.title = (collapsed ? '展开' : '收起') + '截图栏 · ' + count + ' 张';
+    countLabel.textContent = String(count);
+    sizeGallery();
   }
   toggle.addEventListener('click', () => { collapsed = !collapsed; refresh(); save(); });
   size.addEventListener('input', () => { diameter = Number(size.value); applySize(); save(); });
@@ -103,6 +117,7 @@ export function setupWorkspaceControls({getState}) {
   window.addEventListener('blur', () => finish(true));
   mobile.addEventListener('change', () => { finish(true); applySplit(); });
   new ResizeObserver(applySplit).observe(workspace);
+  new ResizeObserver(sizeGallery).observe(gallery.parentElement);
   applySplit(); applySize(); refresh();
   return {refresh, eraserRadius:() => diameter / 2};
 }
