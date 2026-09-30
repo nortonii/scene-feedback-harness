@@ -9,11 +9,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
-from build_plugin import ROOT, runtime_files, validate_package
-
-
-def json_bytes(value: object) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+from build_plugin import ROOT, json_bytes, runtime_files, sync_compatibility, validate_package
 
 
 def configure(files: dict[str, bytes], *, project_id: str | None = None,
@@ -57,6 +53,7 @@ def configure(files: dict[str, bytes], *, project_id: str | None = None,
         mcp["mcpServers"]["scene_feedback"]["env"] = env
         result["mcp.json"] = json_bytes(mcp)
     result["plugin.json"] = json_bytes(manifest)
+    result = sync_compatibility(result)
     validate_package(result)
     return result
 
