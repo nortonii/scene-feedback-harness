@@ -29,6 +29,31 @@ _CREATE_PERMISSION_POLICIES = {
     "workspace_write": ("on-request", "workspace-write"),
     "read_only": ("on-request", "read-only"),
 }
+_TURN_SANDBOX_TYPES = {
+    "full_access": "dangerFullAccess",
+    "workspace_write": "workspaceWrite",
+    "read_only": "readOnly",
+}
+_PERMISSION_PROFILE_IDS = {
+    "full_access": ":danger-full-access",
+    "workspace_write": ":workspace",
+    "read_only": ":read-only",
+}
+
+
+def _permission_overrides(permission_mode: str | None, *, for_turn: bool = False) -> dict[str, Any]:
+    """Translate an explicitly saved mode without changing daemon defaults."""
+    if permission_mode is None:
+        return {}
+    if not isinstance(permission_mode, str) or permission_mode not in _CREATE_PERMISSION_POLICIES:
+        raise ValueError("permission_mode must be full_access, workspace_write, or read_only")
+    approval, sandbox = _CREATE_PERMISSION_POLICIES[permission_mode]
+    result: dict[str, Any] = {"approvalPolicy": approval, "approvalsReviewer": "user"}
+    if for_turn:
+        result["sandboxPolicy"] = {"type": _TURN_SANDBOX_TYPES[permission_mode]}
+    else:
+        result["sandbox"] = sandbox
+    return result
 
 
 class SharedThreadBridgeError(RuntimeError):
@@ -54,6 +79,14 @@ class SharedThreadRPCRejected(SharedThreadBridgeError):
         self.method = method
         self.error = error
         super().__init__(f"{method} failed: {error}")
+
+
+class SharedThreadPermissionMismatch(SharedThreadBridgeError):
+    """The daemon did not apply the explicitly saved task permission mode."""
+
+    def __init__(self, message: str, *, created_thread_id: str | None = None) -> None:
+        self.created_thread_id = created_thread_id
+        super().__init__(message)
 
 
 class OwnedEmptyThreadMissing(SharedThreadBridgeError):
@@ -133,6 +166,124 @@ class SharedThreadBridge:
         self._pending: deque[dict[str, Any]] = deque()
         self._closed = False
         self._active_turn_id: str | None = None
+        self._permission_cwd: str | None = None
+        self._permission_catalogs: dict[str | None, dict[str, bool] | None] = {}
+
+    def _saved_permission_overrides(self, mode: str | None, *, cwd: str | None = None, for_turn: bool = False) -> dict[str, Any]:
+        legacy = _permission_overrides(mode, for_turn=for_turn)
+        if mode is None:
+            return legacy
+        directory = cwd if cwd is not None else self._permission_cwd
+        if directory not in self._permission_catalogs:
+            profiles: dict[str, bool] = {}
+            cursor: str | None = None
+            for _ in range(10):
+                params: dict[str, Any] = {"limit": 100}
+                if directory is not None:
+                    params["cwd"] = directory
+                if cursor is not None:
+                    params["cursor"] = cursor
+                try:
+                    response = self._rpc("permissionProfile/list", params)
+                except SharedThreadRPCRejected as exc:
+                    if isinstance(exc.error, dict) and exc.error.get("code") == -32601 and cursor is None:
+                        self._permission_catalogs[directory] = None
+                        break
+                    raise
+                page = response.get("data")
+                if not isinstance(page, list):
+                    raise SharedThreadBridgeError("permissionProfile/list returned invalid profiles")
+                for item in page:
+                    if (not isinstance(item, dict) or not isinstance(item.get("id"), str)
+                            or not isinstance(item.get("allowed"), bool) or item["id"] in profiles):
+                        raise SharedThreadBridgeError("permissionProfile/list returned invalid profiles")
+                    profiles[item["id"]] = item["allowed"]
+                next_cursor = response.get("nextCursor")
+                if next_cursor is None:
+                    self._permission_catalogs[directory] = profiles
+                    break
+                if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+                    raise SharedThreadBridgeError("permissionProfile/list returned an invalid cursor")
+                cursor = next_cursor
+            else:
+                raise SharedThreadBridgeError("too many permission profiles to list safely")
+        catalog = self._permission_catalogs[directory]
+        if catalog is None:
+            # Older daemons explicitly report method-not-found. Other errors,
+            # missing profiles and requirements denials must never fall back.
+            return legacy
+        profile_id = _PERMISSION_PROFILE_IDS[mode]
+        if catalog.get(profile_id) is not True:
+            raise SharedThreadBridgeError(f"saved permission profile {profile_id} is unavailable or disallowed")
+        return {"approvalPolicy": legacy["approvalPolicy"], "approvalsReviewer": "user", "permissions": profile_id}
+
+    @staticmethod
+    def _verify_saved_permissions(result: dict[str, Any], mode: str | None, *, created_thread_id: str | None = None) -> None:
+        if mode is None:
+            return
+        expected_approval, _sandbox = _CREATE_PERMISSION_POLICIES[mode]
+        profile = result.get("activePermissionProfile")
+        sandbox_key = "sandbox" if "sandbox" in result else "sandboxPolicy"
+        actual_sandbox = result.get(sandbox_key)
+        mismatch = False
+        if profile is not None:
+            mismatch = not isinstance(profile, dict) or profile.get("id") != _PERMISSION_PROFILE_IDS[mode]
+        if sandbox_key in result:
+            mismatch = mismatch or not isinstance(actual_sandbox, dict) or actual_sandbox.get("type") != _TURN_SANDBOX_TYPES[mode]
+        if "approvalPolicy" in result:
+            mismatch = mismatch or result["approvalPolicy"] != expected_approval
+        if "approvalsReviewer" in result:
+            mismatch = mismatch or result["approvalsReviewer"] != "user"
+        if mismatch:
+            raise SharedThreadPermissionMismatch(f"Codex did not apply saved permission mode {mode}; task was not bound", created_thread_id=created_thread_id)
+
+    def sync_saved_permissions(self, mode: str, *, current_settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Apply a saved mode to an idle owned task without starting a turn.
+
+        Callers enforce workbench ownership and subscribe the connection.
+        Monitor connections never call
+        this method. A daemon without settings/update keeps the explicit
+        override for the next legitimate turn.
+        """
+        thread = self.read_thread()
+        if thread.get("status", {}).get("type") != "idle":
+            return None
+        if thread.get("id") != self.thread_id:
+            raise SharedThreadBridgeError("daemon returned the wrong task")
+        overrides = self._saved_permission_overrides(mode, cwd=thread.get("cwd"), for_turn=True)
+        if current_settings is None:
+            current_settings = self._rpc("thread/resume", {"threadId": self.thread_id})
+        current_thread = current_settings.get("thread")
+        if not isinstance(current_thread, dict) or current_thread.get("id") != self.thread_id:
+            raise SharedThreadBridgeError("thread/resume returned the wrong task settings")
+
+        def verify_metadata(settings: dict[str, Any]) -> None:
+            if not {"sandbox", "approvalPolicy", "approvalsReviewer"}.issubset(settings):
+                raise SharedThreadBridgeError("thread/resume returned incomplete permission settings")
+            if "permissions" in overrides and not isinstance(settings.get("activePermissionProfile"), dict):
+                raise SharedThreadBridgeError("thread/resume did not confirm the named permission profile")
+            self._verify_saved_permissions(settings, mode)
+
+        try:
+            verify_metadata(current_settings)
+        except SharedThreadBridgeError:
+            pass  # Incomplete or different current settings require an update.
+        else:
+            return current_settings
+        try:
+            self._rpc("thread/settings/update", {"threadId": self.thread_id, **overrides})
+        except SharedThreadRPCRejected as exc:
+            if isinstance(exc.error, dict) and exc.error.get("code") == -32601:
+                return None
+            raise
+        # No-op updates do not emit a notification. Reading the subscribed
+        # task's current settings verifies both no-op and changed settings.
+        settings = self._rpc("thread/resume", {"threadId": self.thread_id})
+        resumed = settings.get("thread")
+        if not isinstance(resumed, dict) or resumed.get("id") != self.thread_id:
+            raise SharedThreadBridgeError("thread/resume returned the wrong task after settings update")
+        verify_metadata(settings)
+        return settings
 
     @classmethod
     def connect_for_thread(
@@ -145,6 +296,8 @@ class SharedThreadBridge:
         subscribe: bool = False,
         allow_owned_resume: bool = False,
         thread_config: dict[str, Any] | None = None,
+        permission_mode: str | None = None,
+        sync_owned_permissions: bool = False,
         connector: Callable[[Path, float], Any] = _connect,
     ) -> "SharedThreadBridge":
         """Select the single daemon where ``thread_id`` is already loaded.
@@ -156,10 +309,15 @@ class SharedThreadBridge:
         """
         if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id):
             raise ValueError("thread_id must be a Codex task UUID")
+        permission_overrides = _permission_overrides(permission_mode)
+        if permission_overrides and not allow_owned_resume:
+            raise ValueError("permission overrides require a workbench-owned task")
         loaded: list[tuple[SharedThreadBridge, dict[str, Any]]] = []
         unloaded: list[SharedThreadBridge] = []
         errors: list[str] = []
         missing_empty_rollout = False
+        already_subscribed = False
+        current_permission_settings = None
         candidates = _private_socket_candidates(socket_dir)
         for path in candidates:
             bridge: SharedThreadBridge | None = None
@@ -168,6 +326,8 @@ class SharedThreadBridge:
                 bridge = cls(ws, thread_id, timeout=timeout, socket_path=path)
                 bridge._initialize()
                 thread = bridge.read_thread()
+                if isinstance(thread.get("cwd"), str):
+                    bridge._permission_cwd = thread["cwd"]
                 if thread.get("id") != thread_id:
                     raise SharedThreadBridgeError("daemon returned the wrong task")
                 if thread.get("status", {}).get("type") != "notLoaded":
@@ -183,15 +343,19 @@ class SharedThreadBridge:
         if not loaded and allow_owned_resume and len(unloaded) == 1 and len(candidates) == 1:
             bridge = unloaded.pop()
             try:
-                params = {"threadId": thread_id}
+                params = {"threadId": thread_id, **bridge._saved_permission_overrides(permission_mode)}
                 if thread_config is not None:
                     params["config"] = thread_config
-                resumed = bridge._rpc("thread/resume", params).get("thread")
+                result = bridge._rpc("thread/resume", params)
+                current_permission_settings = result
+                bridge._verify_saved_permissions(result, permission_mode)
+                resumed = result.get("thread")
                 if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
                     raise SharedThreadBridgeError("thread/resume returned the wrong owned task")
                 thread = bridge.read_thread()
                 loaded.append((bridge, thread))
                 subscribe = False  # thread/resume already subscribed this connection
+                already_subscribed = True
             except SharedThreadRPCRejected as exc:
                 bridge.close()
                 if "no rollout found" in str(exc).lower():
@@ -215,14 +379,29 @@ class SharedThreadBridge:
         if require_idle and thread.get("status", {}).get("type") != "idle":
             bridge.close()
             raise SharedThreadNotIdle(f"Codex task status is {thread.get('status')!r}")
+        if (sync_owned_permissions and permission_mode is not None
+                and thread.get("status", {}).get("type") == "idle" and not already_subscribed):
+            subscribe = True
         if subscribe:
             try:
-                params = {"threadId": thread_id}
+                resume_mode = permission_mode if thread.get("status", {}).get("type") == "idle" else None
+                params = {"threadId": thread_id, **bridge._saved_permission_overrides(resume_mode)}
                 if thread_config is not None:
                     params["config"] = thread_config
-                resumed = bridge._rpc("thread/resume", params).get("thread")
+                result = bridge._rpc("thread/resume", params)
+                current_permission_settings = result
+                # Loaded daemon sessions can return their existing profile
+                # even when resume carries an override. The saved mode must
+                # also be sent with the next legitimate turn/start.
+                resumed = result.get("thread")
                 if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
                     raise SharedThreadBridgeError("thread/resume returned the wrong task")
+            except Exception:
+                bridge.close()
+                raise
+        if permission_mode is not None and (subscribe or sync_owned_permissions):
+            try:
+                bridge.sync_saved_permissions(permission_mode, current_settings=current_permission_settings)
             except Exception:
                 bridge.close()
                 raise
@@ -291,18 +470,15 @@ class SharedThreadBridge:
         config: dict[str, Any] | None = None,
     ) -> str:
         """Create one persistent blank task on this exact Desktop daemon."""
-        try:
-            approval_policy, sandbox = _CREATE_PERMISSION_POLICIES[permission_mode]
-        except (KeyError, TypeError) as exc:
-            raise ValueError("invalid permission_mode") from exc
+        if permission_mode is None:
+            raise ValueError("invalid permission_mode")
+        overrides = self._saved_permission_overrides(permission_mode, cwd=str(cwd))
         params: dict[str, Any] = {
             "model": model,
             "cwd": str(cwd),
             "ephemeral": False,
             "serviceName": "scene_feedback_workspace",
-            "approvalPolicy": approval_policy,
-            "sandbox": sandbox,
-            "approvalsReviewer": "user",
+            **overrides,
         }
         if config is not None:
             params["config"] = dict(config)
@@ -313,6 +489,9 @@ class SharedThreadBridge:
         thread_id = thread.get("id") if isinstance(thread, dict) else None
         if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id) or thread.get("ephemeral") is True:
             raise SharedThreadBridgeError("thread/start returned no persistent task ID")
+        self.thread_id = thread_id
+        self._permission_cwd = str(cwd)
+        self._verify_saved_permissions(result, permission_mode, created_thread_id=thread_id)
         if title:
             try:
                 self._rpc("thread/name/set", {"threadId": thread_id, "name": title})
@@ -400,7 +579,7 @@ class SharedThreadBridge:
             self._pending.append(message)
 
     def _initialize(self) -> None:
-        self._rpc("initialize", {"clientInfo": {"name": "scene_feedback_shared_bridge", "title": "Scene Feedback Shared Bridge", "version": "0.1.0"}})
+        self._rpc("initialize", {"clientInfo": {"name": "scene_feedback_shared_bridge", "title": "Scene Feedback Shared Bridge", "version": "0.1.0"}, "capabilities": {"experimentalApi": True}})
         self._send({"method": "initialized", "params": {}})
 
     def read_thread(self, *, include_turns: bool = False) -> dict[str, Any]:
@@ -499,6 +678,7 @@ class SharedThreadBridge:
         *,
         client_user_message_id: str,
         cwd: str | os.PathLike[str] | None = None,
+        permission_mode: str | None = None,
     ) -> str:
         """Start exactly one turn in the bound idle task; never retry blindly.
 
@@ -528,9 +708,12 @@ class SharedThreadBridge:
             if not directory.is_dir():
                 raise ValueError("cwd must be a directory")
             params["cwd"] = str(directory)
-        status = self.read_thread().get("status", {})
+        thread = self.read_thread()
+        status = thread.get("status", {})
         if status.get("type") != "idle":
             raise SharedThreadNotIdle(f"Codex task status is {status!r}")
+        permission_cwd = params.get("cwd") or thread.get("cwd") or self._permission_cwd
+        params.update(self._saved_permission_overrides(permission_mode, cwd=permission_cwd, for_turn=True))
         try:
             result = self._rpc("turn/start", params)
         except SharedThreadRPCRejected as exc:

@@ -52,6 +52,7 @@ class FakeBridge:
         self.daemon = daemon
         self.incoming: queue.Queue[dict] = queue.Queue()
         self.started: list[tuple[str, list[str], str]] = []
+        self.permission_modes: list[str | None] = []
         self.responses: list[tuple[int | str, dict]] = []
         self.active_turn_id: str | None = None
         self.closed = False
@@ -74,8 +75,9 @@ class FakeBridge:
             }
         return {"id": THREAD_ID, "status": {"type": "idle"}, "turns": []}
 
-    def start_turn(self, text: str, image_paths, *, client_user_message_id: str) -> str:
+    def start_turn(self, text: str, image_paths, *, client_user_message_id: str, permission_mode: str | None = None) -> str:
         self.started.append((text, list(image_paths), client_user_message_id))
+        self.permission_modes.append(permission_mode)
         if self.uncertain:
             raise UncertainTurnDelivery("socket closed after turn/start")
         if self.daemon is not None:
@@ -134,6 +136,60 @@ class FakeBoundAdapter:
 
 
 class SharedDesktopAdapterTests(unittest.TestCase):
+    def test_owned_start_syncs_saved_permissions_but_monitor_refresh_does_not(self) -> None:
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True, permission_mode="full_access")
+        try:
+            with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=FakeBridge()) as connect:
+                adapter.start()
+                self.assertTrue(connect.call_args.kwargs["sync_owned_permissions"])
+                self.assertTrue(connect.call_args.kwargs["subscribe"])
+                self.assertEqual(connect.call_args.kwargs["permission_mode"], "full_access")
+                adapter.refresh()
+                self.assertNotIn("sync_owned_permissions", connect.call_args.kwargs)
+                self.assertNotIn("permission_mode", connect.call_args.kwargs)
+                self.assertFalse(connect.call_args.kwargs["allow_owned_resume"])
+                self.assertFalse(connect.call_args.kwargs["subscribe"])
+        finally:
+            adapter.close()
+
+    def test_saved_modes_reach_initial_and_reconnected_feedback_turns(self) -> None:
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/new-scene"}}}}
+        for mode in ("full_access", "workspace_write", "read_only"):
+            with self.subTest(mode=mode):
+                initial, later = FakeBridge(), FakeBridge()
+                adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True,
+                                               initial_bridge=initial, thread_config=config, permission_mode=mode)
+                try:
+                    with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=later) as connect:
+                        adapter.start()
+                        adapter.start_turn("first feedback", [], message_id="feedback-first")
+                        connect.assert_not_called()
+                        self.assertEqual(initial.permission_modes, [mode])
+                        initial.incoming.put({"method": "turn/completed", "params": {"threadId": THREAD_ID, "turn": {"id": "turn-1", "status": "completed"}}})
+                        wait_for(lambda: initial.closed)
+                        adapter.start_turn("later feedback", [], message_id="feedback-later")
+                        self.assertEqual(connect.call_args.kwargs["permission_mode"], mode)
+                        self.assertEqual(connect.call_args.kwargs["thread_config"], config)
+                        self.assertTrue(connect.call_args.kwargs["subscribe"])
+                        self.assertEqual(later.permission_modes, [mode])
+                finally:
+                    adapter.close()
+
+    def test_external_and_legacy_tasks_keep_daemon_permissions(self) -> None:
+        for owned in (False, True):
+            with self.subTest(owned=owned):
+                bridge = FakeBridge()
+                adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=owned)
+                try:
+                    with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=bridge) as connect:
+                        adapter.start_turn("feedback", [], message_id="feedback-1")
+                        self.assertNotIn("permission_mode", connect.call_args.kwargs)
+                        self.assertEqual(bridge.permission_modes, [None])
+                finally:
+                    adapter.close()
+        with self.assertRaisesRegex(ValueError, "workbench-owned"):
+            SharedDesktopAdapter(THREAD_ID, lambda _event: None, permission_mode="full_access")
+
     def test_owned_task_reconnect_carries_its_scene_mcp_config(self) -> None:
         config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/new-scene"}}}}
         adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True, thread_config=config)

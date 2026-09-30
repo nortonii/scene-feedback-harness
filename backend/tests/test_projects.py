@@ -53,7 +53,7 @@ class ProjectTests(unittest.TestCase):
         with gateway.store.lock:
             workspace = gateway.store.state["workspace"]
             workspace["created_thread_ids"].append(thread_id)
-            workspace["created_thread_specs"][thread_id] = {"model": model, "title": title}
+            workspace["created_thread_specs"][thread_id] = {"model": model, "title": title, "permission_mode": permission_mode}
         gateway.store.workspace_thread(thread_id)
         return {"thread_id": thread_id, "workspace": gateway.state()}
 
@@ -156,6 +156,39 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(restored["project"], first["project"])
         self.assertEqual(self.root_context.project_id, original_id)
         self.assertEqual(len(self.created), 1)
+
+    def test_child_restart_preserves_owned_permission_and_mcp_config(self):
+        class RestoredAdapter:
+            def __init__(self, thread_id, on_event, **kwargs):
+                self.thread_id = thread_id
+                self.kwargs = kwargs
+                self.thread_config = kwargs.get("thread_config")
+
+            def close(self):
+                pass
+
+        _, first, _ = self.create()
+        project_id = first["project"]["project_id"]
+        context = self.server.project_registry.get(project_id)
+        target_id = context.store.workspace()["thread_id"]
+        for owned, mode in ((True, "full_access"), (True, "workspace_write"), (True, "read_only"), (False, "full_access"), (True, None)):
+            with self.subTest(owned=owned, mode=mode):
+                with context.store.lock:
+                    workspace = context.store.state["workspace"]
+                    workspace["created_thread_ids"] = [target_id] if owned else []
+                    workspace["created_thread_specs"][target_id] = {"permission_mode": mode} if mode else {}
+                    context.store._save()
+                self.stop_server()
+                with patch("shared_thread_adapter.SharedDesktopAdapter", RestoredAdapter):
+                    self.start_server()
+                context = self.server.project_registry.get(project_id)
+                adapter = context.gateway.adapter
+                self.assertEqual(adapter.thread_id, target_id)
+                self.assertEqual(adapter.kwargs.get("allow_owned_resume", False), owned)
+                self.assertEqual(adapter.kwargs.get("permission_mode"), mode if owned else None)
+                env = adapter.thread_config["mcp_servers"]["scene_feedback"]["env"]
+                self.assertEqual(env["SCENE_FEEDBACK_PROJECT_DIR"], str(context.project_dir))
+                self.assertEqual(env["SCENE_FEEDBACK_DATA_DIR"], str(context.store.data_dir))
 
     def test_prefixes_and_mcp_tokens_select_their_own_resources(self):
         _, first, _ = self.create(name="A")

@@ -17,7 +17,7 @@ from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
 from shared_thread_adapter import DeliveryNotReadyError, DeliveryRejectedError
 from shared_thread_adapter import SharedDesktopAdapter
 from shared_thread_bridge import OwnedEmptyThreadMissing, SharedThreadBridge, SharedThreadNotIdle
-from shared_thread_bridge import SharedThreadBridgeError, SharedThreadRPCRejected
+from shared_thread_bridge import SharedThreadBridgeError, SharedThreadRPCRejected, SharedThreadPermissionMismatch
 
 
 class WorkspaceGateway:
@@ -278,8 +278,16 @@ class WorkspaceGateway:
     def _creation_config(self) -> dict[str, Any]:
         return {"config": copy.deepcopy(self.thread_config)} if self.thread_config is not None else {}
 
-    def _owned_adapter_config(self) -> dict[str, Any]:
-        return {"thread_config": copy.deepcopy(self.thread_config)} if self.thread_config is not None else {}
+    def _owned_adapter_config(self, thread_id: str | None = None) -> dict[str, Any]:
+        config = {"thread_config": copy.deepcopy(self.thread_config)} if self.thread_config is not None else {}
+        with self.store.lock:
+            workspace = self.store.state.get("workspace") or {}
+            if thread_id in workspace.get("created_thread_ids", []):
+                spec = workspace.get("created_thread_specs", {}).get(thread_id)
+                mode = spec.get("permission_mode") if isinstance(spec, dict) else None
+                if isinstance(mode, str) and mode in {"full_access", "workspace_write", "read_only"}:
+                    config["permission_mode"] = mode
+        return config
 
     def scoped_adapter_callback(self, token: object | None = None):
         """Ignore events from a Desktop adapter after it has been replaced.
@@ -505,14 +513,21 @@ class WorkspaceGateway:
                 # narrower behavior when recreating them instead of silently
                 # granting workspace writes.
                 spec.setdefault("permission_mode", "read_only")
-                new_id = bridge.create_thread(
-                    spec["model"],
-                    self.project_dir,
-                    reasoning_effort=spec["reasoning_effort"],
-                    title=spec.get("title"),
-                    permission_mode=spec["permission_mode"],
-                    **self._creation_config(),
-                )
+                permission_error = None
+                try:
+                    new_id = bridge.create_thread(
+                        spec["model"],
+                        self.project_dir,
+                        reasoning_effort=spec["reasoning_effort"],
+                        title=spec.get("title"),
+                        permission_mode=spec["permission_mode"],
+                        **self._creation_config(),
+                    )
+                except SharedThreadPermissionMismatch as exc:
+                    if exc.created_thread_id is None:
+                        raise
+                    new_id = exc.created_thread_id
+                    permission_error = exc
                 self._validate_target(new_id)
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
@@ -526,10 +541,12 @@ class WorkspaceGateway:
                         owned.remove(new_id)
                         specs.pop(new_id, None)
                         raise
+                if permission_error is not None:
+                    raise permission_error
                 if bridge.read_thread().get("status", {}).get("type") != "idle":
                     raise SharedThreadBridgeError("replacement empty task is not idle")
                 token = object()
-                replacement = SharedDesktopAdapter(new_id, on_event=self.scoped_adapter_callback(token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config())
+                replacement = SharedDesktopAdapter(new_id, on_event=self.scoped_adapter_callback(token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config(new_id))
                 replacement.start()
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
@@ -628,6 +645,7 @@ class WorkspaceGateway:
                 effort = reasoning_effort if reasoning_effort is not None else selection["default_reasoning_effort"]
                 if effort is not None and effort not in efforts:
                     raise APIError(400, "reasoning_effort is not supported by the selected model")
+                permission_error = None
                 try:
                     created_id = bridge.create_thread(
                         model,
@@ -637,6 +655,11 @@ class WorkspaceGateway:
                         permission_mode=permission_mode,
                         **self._creation_config(),
                     )
+                except SharedThreadPermissionMismatch as exc:
+                    if exc.created_thread_id is None:
+                        raise
+                    created_id = exc.created_thread_id
+                    permission_error = exc
                 except SharedThreadRPCRejected as exc:
                     raise APIError(409, f"Codex Desktop rejected task creation: {exc}") from exc
                 except SharedThreadBridgeError as exc:
@@ -661,8 +684,10 @@ class WorkspaceGateway:
                             owned.remove(created_id)
                             workspace["created_thread_specs"].pop(created_id, None)
                             raise
+                if permission_error is not None:
+                    raise APIError(503, str(permission_error)) from permission_error
                 replacement_token = object()
-                replacement = SharedDesktopAdapter(created_id, on_event=self.scoped_adapter_callback(replacement_token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config())
+                replacement = SharedDesktopAdapter(created_id, on_event=self.scoped_adapter_callback(replacement_token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config(created_id))
                 replacement.start()
                 if replacement.inspect_thread_status() != "idle":
                     raise APIError(409, "new Codex task is not idle")
@@ -751,7 +776,7 @@ class WorkspaceGateway:
             owned = thread_id in self.store.state["workspace"].get("created_thread_ids", [])
         replacement_token = object()
         kwargs = {"allow_owned_resume": True} if owned else {}
-        kwargs.update(self._owned_adapter_config())
+        kwargs.update(self._owned_adapter_config(thread_id))
         replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token), **kwargs)
         try:
             try:

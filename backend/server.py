@@ -121,6 +121,7 @@ def _make_server_unlocked(
         target_id = persisted_id or shared_thread_id
         owned_ids = (store.state.get("workspace") or {}).get("created_thread_ids", [])
         kwargs = {"allow_owned_resume": True} if target_id in owned_ids else {}
+        kwargs.update(gateway._owned_adapter_config(target_id))
         gateway.adapter = SharedDesktopAdapter(target_id, on_event=gateway.scoped_adapter_callback(), **kwargs)
     if enable_codex and adapter is None:
         from appserver_adapter import CodexAppServerAdapter
@@ -645,7 +646,8 @@ def _make_server_unlocked(
             target_id = child_workspace.get("thread_id")
             if external_review and target_id and feedback_transport == "legacy":
                 from shared_thread_adapter import SharedDesktopAdapter
-                kwargs = {"allow_owned_resume": True, "thread_config": child_gateway.thread_config} if target_id in child_workspace.get("created_thread_ids", []) else {}
+                kwargs = {"allow_owned_resume": True} if target_id in child_workspace.get("created_thread_ids", []) else {}
+                kwargs.update(child_gateway._owned_adapter_config(target_id))
                 child_gateway.adapter = SharedDesktopAdapter(target_id, on_event=child_gateway.scoped_adapter_callback(), **kwargs)
             return context
         except BaseException:

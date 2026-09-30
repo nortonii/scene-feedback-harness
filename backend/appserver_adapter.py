@@ -168,6 +168,7 @@ class CodexAppServerAdapter:
                                 "cwd": str(self.project_dir),
                                 "approvalPolicy": self.approval_policy,
                                 "approvalsReviewer": "user",
+                                "sandbox": self.sandbox,
                                 "config": self._thread_config,
                             },
                         )
@@ -206,6 +207,7 @@ class CodexAppServerAdapter:
                 if not stored_id:
                     self._save_thread_state(thread_id, has_turn_attempt=False)
                     self._has_turn_attempt = False
+                self._verify_permissions(result)
                 if replaced_empty_id:
                     self._emit(
                         "adapter/empty_thread_recreated",
@@ -219,6 +221,40 @@ class CodexAppServerAdapter:
             except Exception:
                 self._disconnect(self._generation, "initialization or thread resume failed", terminate=True)
                 raise
+
+    def _verify_permissions(self, result: dict[str, Any]) -> None:
+        """Reject an authoritative response that ignored configured access.
+
+        This isolated transport keeps the legacy workspace network setting.
+        A Desktop named profile must never silently replace that contract.
+        Older servers omit effective metadata; explicit turn overrides still
+        carry the configured policy for those servers.
+        """
+        expected_type = {
+            "read-only": "readOnly",
+            "workspace-write": "workspaceWrite",
+            "danger-full-access": "dangerFullAccess",
+        }[self.sandbox]
+        if "sandbox" in result:
+            policy = result["sandbox"]
+            if not isinstance(policy, dict) or policy.get("type") != expected_type:
+                raise AppServerError("Codex did not apply the configured sandbox permissions")
+            if self.sandbox == "workspace-write" and "networkAccess" in policy:
+                if policy["networkAccess"] != self.network_access:
+                    raise AppServerError("Codex did not apply the configured workspace network access")
+        if "approvalPolicy" in result and result["approvalPolicy"] != self.approval_policy:
+            raise AppServerError("Codex did not apply the configured approval policy")
+        if "approvalsReviewer" in result and result["approvalsReviewer"] != "user":
+            raise AppServerError("Codex did not apply the configured approvals reviewer")
+        profile = result.get("activePermissionProfile")
+        if profile is not None:
+            expected_profile = {
+                "read-only": ":read-only",
+                "workspace-write": ":workspace",
+                "danger-full-access": ":danger-full-access",
+            }[self.sandbox]
+            if not isinstance(profile, dict) or profile.get("id") != expected_profile:
+                raise AppServerError("Codex selected a different permission profile")
 
     def start_turn(
         self,
@@ -258,12 +294,17 @@ class CodexAppServerAdapter:
                 self._turn_state = "starting"
             items = [{"type": "text", "text": text}]
             items.extend({"type": "localImage", "path": path} for path in images)
-            params: dict[str, Any] = {"threadId": thread_id, "input": items}
-            if self.sandbox in {"workspace-write", "read-only"}:
-                params["sandboxPolicy"] = {
-                    "type": "workspaceWrite" if self.sandbox == "workspace-write" else "readOnly",
-                    "networkAccess": self.network_access,
-                }
+            params: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": items,
+                "approvalPolicy": self.approval_policy,
+                "approvalsReviewer": "user",
+                "sandboxPolicy": {
+                    "read-only": {"type": "readOnly"},
+                    "workspace-write": {"type": "workspaceWrite", "networkAccess": self.network_access},
+                    "danger-full-access": {"type": "dangerFullAccess"},
+                }[self.sandbox],
+            }
             if message_id is not None:
                 params["clientUserMessageId"] = message_id
             try:
