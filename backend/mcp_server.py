@@ -67,33 +67,33 @@ def ensure_http_server() -> None:
         raise RuntimeError(f"Workspace Gateway at {BASE_URL} belongs to another project or data directory; check SCENE_FEEDBACK_* settings")
 
 
-def _image_path(url: str) -> Path:
+def _image_path(url: str, data_dir: Path | None = None) -> Path:
     match = IMAGE_URL_RE.fullmatch(url)
     if match is None:
         raise ValueError("feedback contains an invalid image URL")
-    directory = DATA_DIR / match.group(1)
+    directory = (data_dir or DATA_DIR) / match.group(1)
     return directory / match.group(2)
 
 
-def _feedback_with_local_paths(result: dict[str, Any]) -> dict[str, Any]:
+def _feedback_with_local_paths(result: dict[str, Any], data_dir: Path | None = None) -> dict[str, Any]:
     for item in result.get("items", []):
         for reference in item.get("reference_images", []):
-            reference["path"] = str(_image_path(reference["url"]))
+            reference["path"] = str(_image_path(reference["url"], data_dir))
         for reference in item.get("reference_annotated_images", []):
-            reference["path"] = str(_image_path(reference["url"]))
+            reference["path"] = str(_image_path(reference["url"], data_dir))
         for crop in item.get("crops", []):
-            crop["path"] = str(_image_path(crop["url"]))
+            crop["path"] = str(_image_path(crop["url"], data_dir))
         for pose in item.get("human_pose", []):
             for name in ("reference_original", "pose_overlay"):
-                pose[name + "_path"] = str(_image_path(pose[name + "_url"]))
+                pose[name + "_path"] = str(_image_path(pose[name + "_url"], data_dir))
         for name in ("scene_original", "scene_annotated", "screenshot"):
             url = item.get(f"{name}_url")
             if url:
-                item[f"{name}_path"] = str(_image_path(url))
+                item[f"{name}_path"] = str(_image_path(url, data_dir))
         for frame in item.get("dynamic_frames", []):
             for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
                 if frame.get(name + "_url"):
-                    frame[name + "_path"] = str(_image_path(frame[name + "_url"]))
+                    frame[name + "_path"] = str(_image_path(frame[name + "_url"], data_dir))
     return result
 
 
@@ -117,8 +117,8 @@ def _preview_image(path: Path) -> ImageContent:
     return ImageContent(type="image", data=base64.b64encode(output.getvalue()).decode("ascii"), mime_type="image/jpeg")
 
 
-def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
-    enriched = _feedback_with_local_paths(result)
+def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) -> CallToolResult:
+    enriched = _feedback_with_local_paths(result, data_dir)
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(enriched, ensure_ascii=False))]
     for item in enriched.get("items", []):
         for index, reference in enumerate(item.get("reference_images", []), 1):

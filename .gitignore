@@ -7,4 +7,5 @@ backend/data/
 .coverage
 *.egg-info/
 .DS_Store
+dist/
 examples/room_demo/output/

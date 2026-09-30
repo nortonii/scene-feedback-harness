@@ -1,0 +1,27 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "scene-feedback-harness",
+  "version": "0.1.0",
+  "description": "Review reference images and reconstructed scenes, annotate visual errors, and deliver image feedback through MCP tools and events.",
+  "author": { "name": "nortonii" },
+  "homepage": "https://github.com/nortonii/scene-feedback-harness",
+  "repository": "https://github.com/nortonii/scene-feedback-harness",
+  "license": "MIT",
+  "keywords": ["3d", "visual-feedback", "reconstruction", "mcp-events"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Scene Feedback",
+        "shortDescription": "Annotate images and 3D scenes to guide reconstruction",
+        "developerName": "nortonii",
+        "category": "Productivity",
+        "capabilities": ["Read", "Write", "Interactive"],
+        "websiteURL": "https://github.com/nortonii/scene-feedback-harness",
+        "defaultPrompt": [
+          "进入人工调试模式，让我在参考图和当前场景上指出问题。",
+          "Review this reconstruction with annotated visual feedback."
+        ]
+      }
+    }
+  }
+}

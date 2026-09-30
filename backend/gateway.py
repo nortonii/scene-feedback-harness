@@ -23,7 +23,13 @@ from shared_thread_bridge import SharedThreadBridgeError, SharedThreadRPCRejecte
 class WorkspaceGateway:
     def __init__(self, store: SceneStore, project_dir: str | Path, *, adapter: Any = None, external_review: bool = False,
                  desktop_seed_thread_id: str | None = None, thread_config: dict[str, Any] | None = None,
-                 target_validator: Any = None):
+                 target_validator: Any = None, feedback_transport: str = "legacy"):
+        if feedback_transport not in {"legacy", "mcp_events"}:
+            raise ValueError("unknown feedback transport")
+        if feedback_transport == "mcp_events" and (adapter is not None or not external_review):
+            raise ValueError("MCP events require external review without a Codex adapter")
+        self.feedback_transport = feedback_transport
+        self.mcp_events: Any = None
         self.store = store
         self.project_dir = Path(project_dir).expanduser().resolve()
         self.adapter = adapter
@@ -54,19 +60,32 @@ class WorkspaceGateway:
         mode = "external" if self.external_review else "appserver"
         with self.store.lock:
             stored = self.store.state["workspace"]
+            transport = stored.get("feedback_transport", "legacy")
             existing = stored.get("delivery_mode")
             if existing is not None and existing != mode:
                 raise APIError(409, f"workspace is already bound to {existing} delivery")
-            if existing is None:
-                if self.external_review and (stored.get("thread_id") or stored.get("queue")):
-                    raise APIError(409, "workspace already contains Codex App Server activity")
+            if transport != self.feedback_transport:
+                if stored.get("thread_id") or stored.get("queue") or "feedback_transport" in stored:
+                    raise APIError(409, "workspace feedback transport differs; use a separate data directory")
+            if existing is None and self.external_review and (stored.get("thread_id") or stored.get("queue")):
+                raise APIError(409, "workspace already contains Codex App Server activity")
+            changed = existing is None
+            if changed:
                 stored["delivery_mode"] = mode
+            if self.feedback_transport == "mcp_events" and "feedback_transport" not in stored:
+                stored["feedback_transport"] = self.feedback_transport
+                changed = True
+            if changed:
                 self.store._save()
             return copy.deepcopy(stored)
 
     def state(self, *, include_capability: bool = False, preferred_session_id: str | None = None) -> dict[str, Any]:
         self.ensure(preferred_session_id)
         result = self.store.workspace()
+        result["feedback_transport"] = self.feedback_transport
+        if self.mcp_events is not None:
+            result["event_delivery"] = self.mcp_events.status(result["session_id"])
+            self._sync_event_queue(result)
         result.pop("events", None)
         result["events_cursor"] = result.pop("event_seq")
         result["object_prompts_supported"] = True
@@ -85,8 +104,27 @@ class WorkspaceGateway:
             result["browser_capability"] = self.store.browser_token
         return result
 
+    def _sync_event_queue(self, result: dict[str, Any]) -> None:
+        """Project event receipts are separate from Codex turn completion."""
+        for item in result["queue"]:
+            if item.get("feedback_transport") == "mcp_events":
+                item.update(self.mcp_events.feedback_status(item["feedback_id"]))
+
     def start(self) -> None:
         self.ensure()
+        if self.feedback_transport == "mcp_events":
+            if self.mcp_events is None:
+                raise RuntimeError("MCP events service is not configured")
+            self._started = True
+            with self.store.lock:
+                pending = [self.store.feedback_by_id(item["feedback_id"]) for item in self.store.state["workspace"]["queue"]
+                           if item.get("feedback_transport") == "mcp_events"]
+            if self.store.get_session(self.ensure()["session_id"])["status"] == "open":
+                for packet in pending:
+                    self.mcp_events.emit_feedback(packet)
+            self.mcp_events.start()
+            self.store.workspace_agent(status="external_idle")
+            return
         self._restore_blocked_visual_feedback()
         self._started = True
         if self.external_review and self.adapter is None:
@@ -191,6 +229,8 @@ class WorkspaceGateway:
                 self.store.workspace_event("saved_visual_feedback_resumed", {"feedback_ids": restored})
 
     def close(self) -> None:
+        if self.mcp_events is not None:
+            self.mcp_events.close()
         if self.pose_jobs is not None:
             self.pose_jobs.close()
         with self._worker_lock:
@@ -290,6 +330,8 @@ class WorkspaceGateway:
 
     def list_targets(self) -> dict[str, Any]:
         """Show compatible user tasks and the current task's saved title."""
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         current_id, seed_id = self._desktop_entry()
         try:
             discovered = SharedThreadBridge.discover_loaded_threads()
@@ -371,6 +413,8 @@ class WorkspaceGateway:
         return {"models": models, "default_model": default_model or (models[0]["model"] if models else None)}
 
     def list_models(self) -> dict[str, Any]:
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         _, current_id = self._desktop_entry()
         try:
             bridge = SharedThreadBridge.connect_to_desktop(current_id)
@@ -549,6 +593,8 @@ class WorkspaceGateway:
         permission_mode: Any = "workspace_write",
     ) -> dict[str, Any]:
         """Create a fresh Desktop task, then route future feedback to it."""
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         current_id, seed_id = self._desktop_entry()
         if not isinstance(model, str) or not model:
             raise APIError(400, "select a Codex model")
@@ -644,6 +690,8 @@ class WorkspaceGateway:
 
     def switch_target(self, thread_id: Any) -> dict[str, Any]:
         """Route future feedback to another idle task without moving old packets."""
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         current_id, seed_id = self._desktop_entry()
         if not isinstance(thread_id, str):
             raise APIError(400, "thread_id must be a Codex task UUID")
@@ -937,7 +985,14 @@ class WorkspaceGateway:
             raise APIError(409, "feedback belongs to another session; use the workspace session")
         if not payload.get("idempotency_key"):
             raise APIError(400, "idempotency_key is required for direct Codex delivery")
+        if self.feedback_transport == "mcp_events" and self.mcp_events is None:
+            raise APIError(503, "MCP events service is not configured")
         feedback = self.store.submit_feedback(session_id, payload)
+        if self.feedback_transport == "mcp_events":
+            delivery = self.mcp_events.emit_feedback(feedback)
+            result = copy.deepcopy(feedback)
+            result["delivery"] = delivery
+            return result
         if self.external_review and self.adapter is not None:
             bound_id = workspace.get("thread_id") or getattr(self.adapter, "thread_id", None)
             if bound_id:
@@ -1262,6 +1317,8 @@ class WorkspaceGateway:
             return {"session_id": workspace["session_id"], "next_cursor": cursor, "scene_revision": self.store.state["scene"]["revision"], "delivery_mode": "external", "thread_id": current.get("thread_id")}
 
     def take_external_feedback(self, session_id: str, cursor: int) -> dict[str, Any]:
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "event feedback is read by ID; this transport has no legacy wait/poll delivery")
         if not self.external_review:
             raise APIError(409, "this workspace uses direct Codex delivery")
         if self.adapter is not None:

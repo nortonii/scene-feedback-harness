@@ -8,6 +8,10 @@
 
 ![参考图、场景与可收起的玻璃会话框](preview.png)
 
+## 插件与 MCP Events（试验）
+
+可将工作台安装为本地 Codex 插件，并为支持 MCP 2.0 的宿主提供事件订阅与反馈读取。当前本地 Codex 的插件安装不保证事件自动唤醒原任务；启用事件模式前需验证宿主订阅与回调。安装、项目绑定、ZIP 打包和 hosted 连接步骤见 [插件与 MCP Events](docs/mcp-events-plugin.md)。
+
 ## 工作方式
 
 ```text

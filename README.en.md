@@ -8,6 +8,10 @@ In the default mode, mark the reference image and the current 3D scene, write on
 
 ![Reference and scene with a collapsible glass conversation dock](preview.png)
 
+## Plugin and MCP Events (experimental)
+
+Install the workbench as a local Codex plugin, or connect an MCP 2.0 host through event subscriptions and visual evidence read tools. Installing a local plugin does not guarantee native event wake-up of an existing Codex task; verify host subscriptions and callbacks before switching delivery. See [Plugin and MCP Events setup](docs/mcp-events-plugin.md) (Chinese) for project binding, ZIP packaging, and registered hosted connections.
+
 ## How it works
 
 ```text
