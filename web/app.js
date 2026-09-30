@@ -68,7 +68,8 @@ const ui = {
   clearSelection:id('clear-selection'), selectedChip:id('selected-chip'),
   annotationList:id('annotation-list'), annotationCount:id('annotation-count'),
   undoAnnotation:id('undo-annotation'), redoAnnotation:id('redo-annotation'),
-  clearAnnotations:id('clear-annotations'),
+  clearAnnotations:id('clear-annotations'), clearDialog:id('clear-annotations-dialog'),
+  confirmClear:id('confirm-clear-annotations'), cancelClear:id('cancel-clear-annotations'),
   referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
   submit:id('submit-button'), caption:id('submit-caption'),
@@ -327,6 +328,7 @@ function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
   ui.clearAnnotations.disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length && !state.sceneSnapshots.length && !state.snapshot);
+  ui.confirmClear.disabled = ui.clearAnnotations.disabled;
   ui.referenceAllAnnotations.disabled = !editable() || !state.annotations.length;
 }
 function annotationEditState() {
@@ -4502,7 +4504,18 @@ function bindEvents() {
     finally { ui.stop.disabled = false; }
   });
   ui.clearAnnotations.addEventListener('click', () => {
-    if (!editable()) return;
+    if (!editable() || ui.clearAnnotations.disabled) return;
+    ui.clearDialog.showModal();
+    ui.cancelClear.focus();
+  });
+  ui.cancelClear.addEventListener('click', () => ui.clearDialog.close());
+  ui.clearDialog.addEventListener('close', () => {
+    const target = ui.clearAnnotations.disabled ? ui.undoAnnotation : ui.clearAnnotations;
+    if (!target.disabled) target.focus({preventScroll:true});
+  });
+  ui.confirmClear.addEventListener('click', () => {
+    if (!ui.clearDialog.open) return;
+    if (!editable()) { ui.clearDialog.close(); return; }
     pauseTimeline(); hideTextEditor(); state.drag = null;
     const before = annotationEditState();
     state.annotations = [];
@@ -4514,7 +4527,8 @@ function bindEvents() {
     renderAnnotations();
     drawOverlays();
     saveDraft();
-    announce('已清空标注，可点击「撤销」恢复。');
+    ui.clearDialog.close();
+    announce('已清空标记和截图，可点击「撤销」恢复。');
   });
   ui.undoAnnotation.addEventListener('click', undoAnnotationEdit);
   ui.redoAnnotation.addEventListener('click', redoAnnotationEdit);
@@ -4572,7 +4586,7 @@ function bindEvents() {
   });
   document.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.isComposing &&
-        !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false])')) {
+        !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false]), dialog[open]')) {
       const key = event.key.toLowerCase();
       if (key === 'z' || (event.ctrlKey && key === 'y')) {
         if (!editable()) return;

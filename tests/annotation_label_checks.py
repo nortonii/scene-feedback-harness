@@ -163,6 +163,7 @@ def verify_annotation_label_visibility(page, screenshots):
     expect(toggle).to_have_attribute("aria-pressed", "true")
     assert any(pixels(scene, label_box(scene, scene_mark))[3::4]), "Names should reappear immediately"
     page.locator("#clear-annotations").click()
+    page.locator("#confirm-clear-annotations").click()
     expect(page.locator("#annotation-count")).to_have_text("0")
     page.locator("#browse-button").click()
     page.locator("#chat-launcher").click()

@@ -222,6 +222,46 @@ def verify_chat_resize(page, store, submissions, screenshots):
         page.screenshot(path=str(screenshots / "resized-reset.png"))
 
 
+def verify_clear_confirmation(page, screenshots):
+    before = draft(page)
+    dialog = page.locator("#clear-annotations-dialog")
+    clear = page.locator("#clear-annotations")
+    cancel = page.locator("#cancel-clear-annotations")
+    assert before["annotations"] and before["sceneSnapshotIds"]
+    for action in ("cancel", "Escape", "Enter"):
+        clear.click()
+        expect(dialog).to_be_visible()
+        expect(cancel).to_be_focused()
+        # Undo/delete shortcuts must not change evidence behind the modal.
+        page.keyboard.press("Control+z")
+        page.keyboard.press("Backspace")
+        assert draft(page) == before
+        if action == "cancel":
+            if screenshots:
+                page.screenshot(path=str(screenshots / "clear-confirmation.png"))
+            cancel.click()
+        else:
+            page.keyboard.press(action)
+        expect(dialog).to_be_hidden()
+        expect(clear).to_be_focused()
+        assert draft(page) == before
+    clear.click()
+    page.set_viewport_size({"width": 340, "height": 844})
+    box = dialog.bounding_box()
+    assert box["x"] >= 0 and box["x"] + box["width"] <= 340
+    expect(page.locator("#confirm-clear-annotations")).to_be_visible()
+    page.locator("#confirm-clear-annotations").click()
+    expect(dialog).to_be_hidden()
+    after = draft(page)
+    assert not after["annotations"] and not after["sceneSnapshotIds"] and not after["snapshot"]
+    expect(clear).to_be_disabled()
+    expect(page.locator("#undo-annotation")).to_be_focused()
+    page.locator("#undo-annotation").click()
+    for key in ("annotations", "sceneSnapshotIds", "snapshot", "sceneView", "note"):
+        assert draft(page).get(key) == before.get(key), key
+    page.set_viewport_size({"width": 1440, "height": 900})
+
+
 def verify_scene_modes(page, screenshots):
     browse = page.locator("#browse-button")
     annotate = page.locator("#snapshot-button")
@@ -345,7 +385,9 @@ def verify_scene_modes(page, screenshots):
     page.set_viewport_size({"width": 1440, "height": 900})
     page.evaluate("scrollTo(0, 0)")
     # Return to the initial fixture before the existing workspace regressions.
+    verify_clear_confirmation(page, screenshots)
     page.locator("#clear-annotations").click()
+    page.locator("#confirm-clear-annotations").click()
     browse.click()
     page.locator(".view-popover summary").click()
     page.locator("#reset-button").click()
@@ -443,6 +485,7 @@ def verify_eraser(page, screenshots):
     assert draft(page)["snapshot"] == first
     page.locator("#reference-zoom-reset").click()
     page.locator("#clear-annotations").click()
+    page.locator("#confirm-clear-annotations").click()
     page.locator("#browse-button").click()
     page.locator("#chat-launcher").click()
 
@@ -585,6 +628,7 @@ def verify_workspace_controls(page, screenshots):
     expect(page.locator("#eraser-size")).to_have_value("20")
     page.keyboard.press("Escape")
     page.locator("#clear-annotations").click()
+    page.locator("#confirm-clear-annotations").click()
     page.locator("#browse-button").click()
     page.locator("#chat-launcher").click()
 
@@ -951,7 +995,7 @@ def main():
                     browser.close()
                     return
                 verify_scene_modes(page, screenshots)
-                passed("multiple static views preserve independent marks, current-camera capture, selection, legacy-draft upgrade, reload, deletion undo, eight-view capacity and narrow-screen gallery")
+                passed("multiple static views preserve independent marks, current-camera capture, selection, legacy-draft upgrade, reload, deletion undo, eight-view capacity, narrow-screen gallery and clear confirmation/cancel/Esc/Enter/undo")
                 verify_eraser(page, screenshots)
                 passed("eraser sweeps only visible marks, preserves other screenshots, batches undo/redo, cancels previews and works after reference zoom and reload")
                 verify_workspace_controls(page, screenshots)
@@ -1249,6 +1293,7 @@ def main():
                 passed("eraser removes only the active dynamic frame's marks and preserves both evidence frames")
                 page.locator("#browse-button").click()
                 page.locator("#clear-annotations").click()
+                page.locator("#confirm-clear-annotations").click()
                 passed("annotation mode captures the current dynamic frame; explicit moment selection restores the original frame and evidence")
 
                 expect(page.locator("#reference-view-select")).to_be_visible()

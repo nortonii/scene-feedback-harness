@@ -234,6 +234,7 @@ def verify_annotation_selection(page, screenshots):
 
     # Leave the shared fixture clean for subsequent checks.
     page.locator("#clear-annotations").click()
+    page.locator("#confirm-clear-annotations").click()
     count(0)
     browse.click()
     open_chat()
