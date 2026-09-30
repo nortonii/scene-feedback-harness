@@ -222,6 +222,89 @@ def verify_chat_resize(page, store, submissions, screenshots):
         page.screenshot(path=str(screenshots / "resized-reset.png"))
 
 
+def verify_scene_modes(page, screenshots):
+    browse = page.locator("#browse-button")
+    annotate = page.locator("#snapshot-button")
+
+    def mode(snapshot):
+        expect(browse).to_be_visible()
+        expect(annotate).to_be_visible()
+        expect(browse).to_have_attribute("aria-pressed", str(not snapshot).lower())
+        expect(annotate).to_have_attribute("aria-pressed", str(snapshot).lower())
+        if snapshot:
+            expect(page.locator("#scene-snapshot-media")).to_be_visible()
+        else:
+            expect(page.locator("#scene-snapshot-media")).to_be_hidden()
+
+    mode(False)
+    page.locator("#chat-collapse").click()
+    annotate.click()
+    mode(True)
+    expect(page.locator("body")).to_have_attribute("data-tool", "rectangle")
+    stage = page.locator("#scene-snapshot-image").bounding_box()
+    page.mouse.move(stage["x"] + stage["width"] * .3, stage["y"] + stage["height"] * .3)
+    page.mouse.down()
+    page.mouse.move(stage["x"] + stage["width"] * .5, stage["y"] + stage["height"] * .5, steps=5)
+    page.mouse.up()
+    expect(page.locator("#annotation-count")).to_have_text("1")
+    original = draft(page)
+    annotate.click()
+    assert draft(page)["snapshot"] == original["snapshot"]
+    browse.click()
+    mode(False)
+    expect(page.locator("body")).to_have_attribute("data-tool", "select")
+    viewport = page.locator("#viewport").bounding_box()
+    page.mouse.move(viewport["x"] + viewport["width"] * .4, viewport["y"] + viewport["height"] * .4)
+    page.mouse.down()
+    page.mouse.move(viewport["x"] + viewport["width"] * .6, viewport["y"] + viewport["height"] * .45, steps=8)
+    page.mouse.up()
+    page.wait_for_timeout(500)
+    assert draft(page)["camera"] != original["snapshot"]["camera"]
+    annotate.click()
+    mode(True)
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["annotations"] == original["annotations"]
+    page.reload()
+    wait_ready(page)
+    mode(True)
+    expect(page.locator("body")).to_have_attribute("data-tool", "rectangle")
+    assert draft(page)["snapshot"] == original["snapshot"]
+    if screenshots:
+        page.screenshot(path=str(screenshots / "scene-mode-annotation.png"))
+    page.locator(".view-popover summary").click()
+    page.locator("#reset-button").click()
+    mode(False)
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["annotations"] == original["annotations"]
+    annotate.click()
+    mode(True)
+    browse.click()
+    mode(False)
+    page.locator(".view-popover summary").click()
+    page.once("dialog", lambda dialog: dialog.dismiss())
+    page.locator("#freeze-button").click()
+    mode(False)
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["annotations"] == original["annotations"]
+    page.locator(".view-popover summary").click()
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#freeze-button").click()
+    mode(True)
+    expect(page.locator("#annotation-count")).to_have_text("0")
+    assert draft(page)["snapshot"]["id"] != original["snapshot"]["id"]
+    page.locator("#undo-annotation").click()
+    assert draft(page)["snapshot"] == original["snapshot"]
+    assert draft(page)["annotations"] == original["annotations"]
+    mode(False)
+    # Return to the initial fixture before the existing workspace regressions.
+    page.locator("#clear-annotations").click()
+    browse.click()
+    page.locator(".view-popover summary").click()
+    page.locator("#reset-button").click()
+    page.locator("#chat-launcher").click()
+    mode(False)
+
+
 def verify_overlay_toolbar(page, store, screenshots):
     toggle = page.locator("#compare-toggle")
     panel = page.locator("#compare-panel")
@@ -510,6 +593,8 @@ def main():
                     browser.close()
                     return
 
+                verify_scene_modes(page, screenshots)
+                passed("persistent scene modes capture, draw, orbit, restore saved evidence and reload; explicit recapture confirms and can be undone")
                 expect(page.locator("#chat-dock")).to_be_visible()
                 expect(page.locator("#chat-history")).to_be_visible()
                 expect(page.locator("#conversation")).to_contain_text("请把柜子向左移动一点。")
@@ -568,6 +653,8 @@ def main():
                 page.mouse.move(stage["x"] + stage["width"] * .50, stage["y"] + stage["height"] * .55, steps=8)
                 page.mouse.up()
                 expect(page.locator("#annotation-count")).to_have_text("1")
+                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
+                expect(page.locator("#browse-button")).to_have_attribute("aria-pressed", "false")
                 annotated = draft(page)
                 assert annotated["snapshot"]
                 page.locator("#chat-launcher").click()
@@ -637,22 +724,10 @@ def main():
                 page.locator("#human-pose-panel summary").click()
                 expect(page.locator("#human-pose-runtime")).to_contain_text("隔离测试", timeout=10000)
                 expect(page.locator("#human-pose-run")).to_be_disabled()
-                page.locator("#human-pose-draw").click()
-                reference = page.locator("#reference-image").bounding_box()
-                page.mouse.move(reference["x"] + reference["width"] * .10, reference["y"] + reference["height"] * .20)
-                page.mouse.down()
-                page.mouse.move(reference["x"] + reference["width"] * .30, reference["y"] + reference["height"] * .40, steps=6)
-                page.mouse.up()
-                page.wait_for_function("""() => {
-                  const key='astra-visual-draft:' + new URL(location.href).searchParams.get('session_id');
-                  return !!JSON.parse(localStorage.getItem(key) || '{}').humanSeed;
-                }""")
                 expect(page.locator("#annotation-count")).to_have_text("1")
-                page.locator("#human-pose-panel summary").click()
-                expect(page.locator("#human-pose-run")).to_be_disabled()
                 assert page.locator("#human-pose-overlay").evaluate("el => getComputedStyle(el).pointerEvents") == "none"
                 page.keyboard.press("Escape")
-                passed("human pose ROI remains separate from feedback marks and unavailable runtime cannot start a job")
+                passed("automatic human pose results leave feedback marks unchanged and unavailable runtime cannot start a job")
 
                 composer = page.locator("#feedback-note")
                 composer.focus()
@@ -704,11 +779,13 @@ def main():
 
                 expect(page.locator("#annotation-count")).to_have_text("0")
                 expect(page.locator("#undo-annotation")).to_be_disabled()
-                expect(page.locator("#snapshot-button")).to_be_hidden()
+                expect(page.locator("#snapshot-button")).to_be_visible()
+                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "false")
+                expect(page.locator("#browse-button")).to_have_attribute("aria-pressed", "true")
                 fresh = draft(page)
                 assert fresh["annotations"] == [] and fresh["snapshot"] is None
                 assert fresh["selectedId"] is None and fresh["sceneView"] == "live"
-                assert fresh["poseRefs"] == [] and fresh["humanSeed"] is None
+                assert fresh["poseRefs"] == [] and fresh["humanPendingRequest"] is None
                 assert fresh["referencedSceneNodes"] == []
                 packet = store.list_all_feedback()[0]
                 assert len(packet["annotations"]) == 1 and packet["scene_original_url"]
@@ -719,7 +796,7 @@ def main():
                 expect(page.locator("#undo-annotation")).to_be_disabled()
                 assert draft(page)["snapshot"] is None
                 assert store.list_all_feedback()[0] == packet
-                passed("acknowledged send clears draft, marks, snapshot, pose seed and undo history across reload while saved evidence remains immutable")
+                passed("acknowledged send clears draft, marks, snapshot, pending pose request and undo history across reload while saved evidence remains immutable")
 
                 page.locator("#activity-dialog-button").click()
                 expect(page.locator("#activity-dialog")).to_be_visible()
@@ -755,6 +832,20 @@ def main():
                 page.locator("#timeline-next").click()
                 expect(page.locator("#timeline-time")).not_to_have_text("0.000 s")
                 passed("dynamic timeline, frame navigation and range popover remain operable")
+                page.locator("#snapshot-button").click()
+                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
+                moment = draft(page)["snapshot"]
+                saved_time = page.locator("#timeline-seek").input_value()
+                page.locator("#browse-button").click()
+                page.locator("#timeline-prev").click()
+                expect(page.locator("#timeline-seek")).not_to_have_value(saved_time)
+                page.locator("#snapshot-button").click()
+                expect(page.locator("#timeline-seek")).to_have_value(saved_time)
+                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
+                assert draft(page)["snapshot"] == moment
+                page.locator("#browse-button").click()
+                page.locator("#clear-annotations").click()
+                passed("annotation mode reopens the saved dynamic frame and preserves its original camera and image")
 
                 expect(page.locator("#reference-view-select")).to_be_visible()
                 before_view_time = page.locator("#timeline-seek").input_value()
@@ -778,6 +869,16 @@ def main():
                     page.set_viewport_size({"width": width, "height": height})
                     page.wait_for_timeout(350)
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                    for selector in ("#browse-button", "#snapshot-button"):
+                        control = page.locator(selector)
+                        control.scroll_into_view_if_needed()
+                        expect(control).to_be_visible()
+                        bounds = control.bounding_box()
+                        assert bounds["x"] >= 0 and bounds["x"] + bounds["width"] <= width
+                        assert control.evaluate("""el => {
+                          const r = el.getBoundingClientRect();
+                          return el.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+                        }""")
                     expect(page.locator("#projects-dialog-button")).to_be_visible()
                     expect(page.locator("#human-pose-panel summary")).to_be_visible()
                     page.locator("#human-pose-panel summary").click()

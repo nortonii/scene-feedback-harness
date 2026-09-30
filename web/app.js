@@ -2075,6 +2075,17 @@ function captureLiveScene({includeSize=false}={}) {
   const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
   return includeSize ? {data_url:dataUrl, width:canvas.width, height:canvas.height} : dataUrl;
 }
+async function enterSnapshotAnnotation() {
+  if (!editable() || state.sceneView === 'snapshot') return;
+  if (state.snapshot?.time_sec !== undefined) {
+    await openMoment(state.snapshot.id);
+  } else if (state.snapshot) {
+    state.sceneView = 'snapshot';
+    renderSceneView();
+  } else {
+    freezeScene();
+  }
+}
 function freezeScene() {
   if (!editable() || state.sceneView !== 'live') return;
   if (dynamicEnabled()) { ensureDynamicMoment({showSnapshot:true}); return; }
@@ -2147,7 +2158,7 @@ function renderCompareControls() {
   const visible = available && enabled && opacity > 0;
   const summary = !hasReference ? '—' : paused ? '暂停' : visible ? opacity + '%' : '关';
   const status = !hasReference ? '先添加参考图，再使用叠图对比。'
-    : paused ? '固定截图中暂停叠图；点击「返回 3D」恢复。'
+    : paused ? '固定截图中暂停叠图；点击「3D 浏览」恢复。'
     : visible ? '调整透明度，对照参考图与实时场景。' : '叠图已关闭，点击「叠图」开启。';
   ui.compareImage.classList.toggle('hidden', !visible);
   ui.compareImage.style.opacity = opacity / 100;
@@ -2192,11 +2203,14 @@ function renderSceneView({persist=true}={}) {
   const hasSnapshot = !!state.snapshot;
   if (!hasSnapshot) state.sceneView = 'live';
   const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
+  // Reload, undo and saved moments must also enter a usable annotation mode.
+  if (showingSnapshot && state.mode === 'select') state.mode = 'rectangle';
   if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
-  ui.browse.classList.toggle('hidden', !showingSnapshot);
-  ui.snapshotButton.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
-  ui.freeze.classList.toggle('hidden', showingSnapshot);
+  ui.browse.setAttribute('aria-pressed', String(!showingSnapshot));
+  ui.snapshotButton.setAttribute('aria-pressed', String(showingSnapshot));
+  ui.snapshotButton.title = hasSnapshot ? '继续已保存截图上的标注；保留原视角和标记' : '固定当前 3D 画面并开始圈画';
+  ui.freeze.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
   ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
     ui.newSceneBadge.textContent = '标注 v' + state.snapshot.scene_revision + ' · 查看最新 v' + state.sceneRevision + ' ↗';
@@ -3277,7 +3291,7 @@ function updateSceneHint() {
       ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
       : '直接在渲染图上圈画，自动保留当前截图';
   } else if (state.mode === 'select') {
-    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「返回 3D」可继续选择';
+    ui.sceneHint.textContent = '固定截图 · 版本 ' + state.snapshot.scene_revision + ' · 点击「3D 浏览」可继续选择';
   } else {
     ui.sceneHint.textContent = '在场景上' +
       ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
@@ -4198,7 +4212,7 @@ function bindEvents() {
   ui.freeze.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', () => { if (editable()) setMode('select'); });
   ui.newSceneBadge.addEventListener('click', () => { if (editable()) setMode('select'); });
-  ui.snapshotButton.addEventListener('click', () => { if (!editable()) return; if (state.snapshot?.time_sec !== undefined) openMoment(state.snapshot.id); else { state.sceneView = 'snapshot'; renderSceneView(); } });
+  ui.snapshotButton.addEventListener('click', enterSnapshotAnnotation);
   ui.compareToggle?.addEventListener('click', toggleCompare);
   ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
   for (const button of ui.comparePresets) {
@@ -4259,12 +4273,13 @@ function bindEvents() {
   });
   id('frame-button').addEventListener('click', () => {
     if (!editable()) return;
+    setMode('select');
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
     if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
     else if (state.selectedId) frameBox(objectBox(state.selectedId));
     else frameAll();
   });
-  id('reset-button').addEventListener('click', () => { if (editable()) frameAll(); });
+  id('reset-button').addEventListener('click', () => { if (editable()) { setMode('select'); frameAll(); } });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
   ui.annotationText.addEventListener('keydown', (event) => {
