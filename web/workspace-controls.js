@@ -1,7 +1,7 @@
 import { ERASER_RADIUS } from './eraser.js';
 
 // View preferences are separate from feedback evidence and scoped to the session.
-export function setupWorkspaceControls({getState}) {
+export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   const byId = id => document.getElementById(id);
   const workspace = document.querySelector('.workspace');
   const divider = byId('workspace-divider');
@@ -12,14 +12,16 @@ export function setupWorkspaceControls({getState}) {
   const countLabel = byId('snapshot-strip-count');
   const size = byId('eraser-size');
   const sizeValue = byId('eraser-size-value');
+  const labelsToggle = byId('scene-labels-toggle');
   const mobile = matchMedia('(max-width: 640px)');
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   let sessionId = null, ratio = .5, collapsed = false, diameter = ERASER_RADIUS * 2;
+  let sceneLabelsVisible = true;
   let drag = null;
 
   function save() {
     if (!sessionId) return;
-    try { localStorage.setItem('astra-visual-workspace:' + sessionId, JSON.stringify({ratio, collapsed, diameter})); }
+    try { localStorage.setItem('astra-visual-workspace:' + sessionId, JSON.stringify({ratio, collapsed, diameter, sceneLabelsVisible})); }
     catch { /* Controls still work without browser storage. */ }
   }
   function limits() {
@@ -57,15 +59,20 @@ export function setupWorkspaceControls({getState}) {
   function refresh() {
     const state = getState();
     if (state.sessionId && sessionId !== state.sessionId) {
-      sessionId = state.sessionId; ratio = .5; collapsed = false; diameter = ERASER_RADIUS * 2;
+      sessionId = state.sessionId; ratio = .5; collapsed = false; diameter = ERASER_RADIUS * 2; sceneLabelsVisible = true;
       try {
         const stored = JSON.parse(localStorage.getItem('astra-visual-workspace:' + sessionId) || 'null');
         if (Number.isFinite(stored?.ratio)) ratio = clamp(stored.ratio, .2, .8);
         if (typeof stored?.collapsed === 'boolean') collapsed = stored.collapsed;
+        if (typeof stored?.sceneLabelsVisible === 'boolean') sceneLabelsVisible = stored.sceneLabelsVisible;
         if (Number.isFinite(stored?.diameter)) diameter = clamp(Math.round(stored.diameter / 2) * 2, 8, 96);
       } catch { /* Ignore invalid preferences. */ }
       applySplit(); applySize();
     }
+    labelsToggle.disabled = state.sceneView !== 'snapshot' || !state.snapshot;
+    labelsToggle.setAttribute('aria-pressed', String(sceneLabelsVisible));
+    labelsToggle.textContent = sceneLabelsVisible ? '隐藏名称' : '显示名称';
+    labelsToggle.title = sceneLabelsVisible ? '仅隐藏截图上的标记名称，标记和引用保留' : '显示截图上的标记名称';
     const count = state.sceneSnapshots.length;
     gallery.classList.toggle('hidden', !count);
     gallery.classList.toggle('is-collapsed', collapsed);
@@ -77,6 +84,9 @@ export function setupWorkspaceControls({getState}) {
     countLabel.textContent = String(count);
     sizeGallery();
   }
+  labelsToggle.addEventListener('click', () => {
+    sceneLabelsVisible = !sceneLabelsVisible; refresh(); save(); onLabelsChange();
+  });
   toggle.addEventListener('click', () => { collapsed = !collapsed; refresh(); save(); });
   size.addEventListener('input', () => { diameter = Number(size.value); applySize(); save(); });
   divider.addEventListener('pointerdown', event => {
@@ -119,5 +129,5 @@ export function setupWorkspaceControls({getState}) {
   new ResizeObserver(applySplit).observe(workspace);
   new ResizeObserver(sizeGallery).observe(gallery.parentElement);
   applySplit(); applySize(); refresh();
-  return {refresh, eraserRadius:() => diameter / 2};
+  return {refresh, eraserRadius:() => diameter / 2, sceneLabelsVisible:() => sceneLabelsVisible};
 }

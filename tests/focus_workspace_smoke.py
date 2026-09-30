@@ -858,6 +858,7 @@ def verify_project_isolation(page, server, screenshots):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--screenshots", type=Path)
+    parser.add_argument("--labels-only", action="store_true", help="Run only snapshot label visibility checks.")
     parser.add_argument("--selection-only", action="store_true", help="Run only annotation selection and referencing checks.")
     parser.add_argument("--controls-only", action="store_true", help="Run only workspace size and layout controls.")
     parser.add_argument("--eraser-only", action="store_true", help="Run only the eraser interaction regression.")
@@ -923,6 +924,13 @@ def main():
                     browser.close()
                     return
 
+                if args.labels_only:
+                    from annotation_label_checks import verify_annotation_label_visibility
+                    verify_annotation_label_visibility(page, screenshots)
+                    assert not errors, errors
+                    passed("snapshot label visibility preserves marks and references")
+                    browser.close()
+                    return
                 if args.selection_only:
                     from annotation_selection_checks import verify_annotation_selection
                     verify_annotation_selection(page, screenshots)
@@ -951,6 +959,9 @@ def main():
                 from annotation_selection_checks import verify_annotation_selection
                 verify_annotation_selection(page, screenshots)
                 passed("named marks remain selectable on screenshots, delete only selection, drag into chat and keep stable names across screenshots and reload")
+                from annotation_label_checks import verify_annotation_label_visibility
+                verify_annotation_label_visibility(page, screenshots)
+                passed("snapshot name toggle hides only labels and their hit targets, preserves ink, text, references and reload preferences")
                 from chat_activity_checks import verify_chat_activity
                 verify_chat_activity(page, store, screenshots)
                 passed("collapsed conversation reflects running status, smooth reversal and reduced motion while preserving draft, focus and viewport")

@@ -3566,7 +3566,7 @@ function selectAnnotationFromPointer(event,pane) {
     if (!annotationVisibleInPane(mark,pane)) return false;
     const textWidth = mark.type === 'text' ? Math.min(context.measureText(String(mark.text||'').slice(0,100)).width,canvas.clientWidth-12)*zoom : 0;
     return eraserHitsAnnotation(mark,point,point,{width:rect.width,height:rect.height,scale,textWidth,radius:5}) ||
-      hitsAnnotationName(context,mark,point,point,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius:3});
+      ((pane !== 'scene' || workspaceControls.sceneLabelsVisible()) && hitsAnnotationName(context,mark,point,point,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius:3}));
   });
   context.restore();
   state.selectedAnnotationId = mark?.id || null;
@@ -3625,7 +3625,7 @@ function sweepEraser(to, canvas) {
     const textWidth = mark.type === 'text' ? Math.min(context.measureText(String(mark.text || '').slice(0,100)).width, canvas.clientWidth - 12) * zoom : 0;
     const radius = workspaceControls.eraserRadius();
     if (eraserHitsAnnotation(mark, drag.end, to, {width:rect.width, height:rect.height, scale, textWidth, radius}) ||
-        hitsAnnotationName(context,mark,drag.end,to,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius})) drag.erased.add(mark.id);
+        ((drag.pane !== 'scene' || workspaceControls.sceneLabelsVisible()) && hitsAnnotationName(context,mark,drag.end,to,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius}))) drag.erased.add(mark.id);
   }
   context.restore(); drag.end = to;
 }
@@ -3724,7 +3724,7 @@ function saveTextAnnotation() {
   hideTextEditor();
 }
 
-function drawAnnotation(ctx, annotation, width, height, preview=false, selected=false) {
+function drawAnnotation(ctx, annotation, width, height, preview=false, selected=false, showName=true) {
   const p = annotation.coordinates || {};
   const x = clamp(Number(p.x) || 0, 0, 1) * width;
   const y = clamp(Number(p.y) || 0, 0, 1) * height;
@@ -3788,7 +3788,7 @@ function drawAnnotation(ctx, annotation, width, height, preview=false, selected=
     ctx.fillText(circled[Number(annotation.group_id)], x - 3 * scale, y - 12 * scale);
   }
   ctx.restore();
-  if (!preview) drawAnnotationName(ctx,annotation,width,height,selected);
+  if (!preview && showName) drawAnnotationName(ctx,annotation,width,height,selected);
 }
 function prepareCanvas(canvas) {
   // clientWidth is the bitmap's untransformed size. Using the transformed
@@ -3818,7 +3818,7 @@ function drawOverlays() {
     if (!surface) continue;
     for (const annotation of state.annotations) {
       if (!annotationVisibleInPane(annotation, pane) || state.drag?.erased?.has(annotation.id)) continue;
-      drawAnnotation(surface.context, annotation, surface.width, surface.height, false, annotation.id === state.selectedAnnotationId);
+      drawAnnotation(surface.context, annotation, surface.width, surface.height, false, annotation.id === state.selectedAnnotationId, pane !== 'scene' || workspaceControls.sceneLabelsVisible());
     }
     if (state.drag?.pane === pane && state.drag.type !== 'erase') {
       drawAnnotation(surface.context, {
@@ -4357,7 +4357,7 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
-  workspaceControls = setupWorkspaceControls({getState:() => state});
+  workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   minimalLayout = setupMinimalLayout({getState:() => state});
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);
