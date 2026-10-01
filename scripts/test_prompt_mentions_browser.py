@@ -37,6 +37,30 @@ def choose(page, kind, text=None):
     page.wait_for_function("document.getElementById('prompt-mentions').classList.contains('hidden')")
 
 
+def select_model(page, level):
+    return page.evaluate("""level=>{const m=__mentionCheck,root=m.state.objectNodes.get('fixture_model')?.userData.gltfRoot;
+        const node=level==='part' ? root?.children[0]?.children[0] : root?.children[0];
+        if(!node) throw new Error('fixture GLB is not loaded');
+        m.state.selectionLevel=level;
+        const ref=m.nodeReference('fixture_model',node,level);m.selectObject('fixture_model',ref,node);return ref;}""",level)
+
+
+def draw_mark(page, pane, tool):
+    page.locator(f'[data-tool="{tool}"]').click()
+    bounds=page.locator(f'#{pane}-annotations').bounding_box(); assert bounds
+    count=page.evaluate('__mentionCheck.state.annotations.length')
+    page.mouse.move(bounds['x']+bounds['width']*.2,bounds['y']+bounds['height']*.2); page.mouse.down()
+    page.mouse.move(bounds['x']+bounds['width']*.4,bounds['y']+bounds['height']*.5,steps=8); page.mouse.up()
+    page.wait_for_function('(n)=>__mentionCheck.state.annotations.length===n+1',arg=count)
+    return page.evaluate('structuredClone(__mentionCheck.state.annotations.at(-1))')
+
+
+def reject_old_candidate(page, candidate):
+    return page.evaluate("""candidate=>{const m=__mentionCheck,before=m.ui.note.value,nodes=JSON.stringify(m.state.referencedSceneNodes);
+        let result=false;try{result=m.insertPromptMention(candidate);}catch(error){}
+        return !result && before===m.ui.note.value && nodes===JSON.stringify(m.state.referencedSceneNodes);}""",candidate)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser-executable")
@@ -74,14 +98,24 @@ def main():
                     **({"executable_path":args.browser_executable} if args.browser_executable else {}),
                     args=["--no-sandbox","--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"])
                 context = browser.new_context(viewport={"width":1440,"height":950})
-                hook = "\nwindow.__mentionCheck={state,ui,camera,cameraData,renderAnnotations,humanCurrentFrame,getPromptMentionCandidates,insertPromptMention,promptMentions};"
+                hook = "\nwindow.__mentionCheck={state,ui,camera,cameraData,renderAnnotations,renderSelection,humanCurrentFrame,getPromptMentionCandidates,insertPromptMention,promptMentions,selectObject,nodeReference,removeAnnotation,undoAnnotationEdit};"
                 context.route("**/app.js", lambda route: route.fulfill(status=200,content_type="application/javascript",body=(ROOT/"web/app.js").read_text()+hook))
                 page = context.new_page(); page.on("pageerror",lambda error:errors.append(str(error)))
                 page.goto(base+"/"); ready(page)
                 page.wait_for_function("__mentionCheck.humanCurrentFrame(__mentionCheck.state.humanJobs[0]) !== null")
                 field = page.locator("#feedback-note")
 
+                query(page,'',note='')
+                assert page.locator('.prompt-mention-option').count()==0
+                assert page.locator('#prompt-mention-status').inner_text()=='先选中物体或添加标记'
+                assert page.evaluate('__mentionCheck.state.sceneObjects.length')==2
+                assert page.evaluate('__mentionCheck.state.humanJobs.length')==1
+                field.press('Enter'); assert not store.state['feedback']
+                field.press('Escape')
+                print('PASS: unselected objects, GLB children and loaded human evidence never populate the empty @ menu',flush=True)
+
                 # Real typing in the middle of Chinese text preserves both sides.
+                page.evaluate("__mentionCheck.selectObject('standalone_box')")
                 field.fill("把  放在这里"); field.evaluate("n=>n.setSelectionRange(1,1)")
                 query(page,"standalone")
                 assert page.locator('.prompt-mention-option[data-mention-kind="object"]').count() == 1
@@ -89,60 +123,93 @@ def main():
                 assert "[[object:standalone_box]]" in field.input_value()
                 assert field.input_value().startswith("把") and field.input_value().endswith("  放在这里")
                 assert not store.state["feedback"], "Enter selection must not send"
-                print("PASS: @ search replaces only its middle-of-sentence range; keyboard picks a real object without submitting",flush=True)
+                assert page.evaluate("__mentionCheck.getPromptMentionCandidates().map(c=>c.kind)")==['object']
+                object_draft=field.input_value()
+                print("PASS: only the selected object is searchable; middle-of-sentence keyboard insertion preserves surrounding text",flush=True)
 
-                # Named GLB children are searchable without an earlier viewport pick.
-                query(page,"Cabinet"); choose(page,"node","Cabinet")
-                if not page.locator('[data-selection-level="part"]').is_visible():
-                    page.locator('#references-dialog-button').click()
-                page.locator('[data-selection-level="part"]').click()
-                if page.locator('#references-dialog').is_visible():
-                    page.locator('[data-close-dialog="references-dialog"]').click()
+                # Switching/clearing selection invalidates cached entries and an open popup.
+                selected=page.evaluate('__mentionCheck.getPromptMentionCandidates()[0]')
+                query(page,'standalone')
+                select_model(page,'item')
+                assert page.locator('.prompt-mention-option').count()==0
+                old_note=field.input_value(); field.press('Enter'); assert field.input_value()==old_note
+                assert reject_old_candidate(page,selected)
+                item_candidate=page.evaluate('__mentionCheck.getPromptMentionCandidates()[0]')
+                page.evaluate("__mentionCheck.state.selectedId=null;__mentionCheck.state.selectedSceneNode=null;__mentionCheck.renderSelection()")
+                assert not page.evaluate('__mentionCheck.getPromptMentionCandidates()')
+                assert reject_old_candidate(page,item_candidate)
+                field.press('Escape')
+                print('PASS: changing or clearing selection removes old menu entries and rejects cached targets without altering the prompt',flush=True)
+
+                # Only the one picked GLB item/part appears, even after both have been cited.
+                select_model(page,'item')
+                query(page,"Cabinet",note=object_draft+' '); choose(page,"node","Cabinet")
+                select_model(page,'part')
                 query(page,"Door"); choose(page,"node","Door")
                 assert field.input_value().count("[[node:fixture_model:") == 2
                 assert len(page.evaluate("__mentionCheck.state.referencedSceneNodes")) == 2
-                print("PASS: item/part mode exposes actual named GLB nodes with registered source paths",flush=True)
+                candidates=page.evaluate('__mentionCheck.getPromptMentionCandidates()')
+                assert len(candidates)==1 and candidates[0]['kind']=='node' and candidates[0]['label']=='Door'
+                assert reject_old_candidate(page,{**candidates[0],'sessionId':'another-session'})
+                print("PASS: a selected GLB part has one candidate; its parent, wrapper and prior references are excluded",flush=True)
 
-                page.locator('[data-tool="rectangle"]').click()
-                bounds = page.locator("#reference-annotations").bounding_box(); assert bounds
-                page.mouse.move(bounds["x"]+bounds["width"]*.2,bounds["y"]+bounds["height"]*.2); page.mouse.down()
-                page.mouse.move(bounds["x"]+bounds["width"]*.4,bounds["y"]+bounds["height"]*.5,steps=8); page.mouse.up()
-                page.wait_for_function("__mentionCheck.state.annotations.length===1")
-                mark = page.evaluate("structuredClone(__mentionCheck.state.annotations[0])")
+                mark=draw_mark(page,'reference','rectangle')
                 query(page,"框"); choose(page,"annotation")
                 assert f"[[annotation:{mark['id']}]]" in field.input_value()
                 query(page,mark['name']); choose(page,"annotation",mark['name'])
                 assert field.input_value().count(f"[[annotation:{mark['id']}]]") == 2
                 assert "正面" in field.input_value() and "帧" in field.input_value()
-                query(page,"左图"); choose(page,"current-image")
+                page.locator('#drag-reference-image').click()
                 left = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[0])")
                 assert left["reference_id"] == first["frames"][0]["id"]
                 assert left.get("annotated_data_url") != left["original_data_url"]
-                query(page,"右图"); choose(page,"current-image")
+                page.locator("#reference-view-select").select_option(second["clip_id"])
+                page.wait_for_function("(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking && __mentionCheck.humanCurrentFrame(__mentionCheck.state.humanJobs[0])",arg=second["frames"][0]["id"])
+                page.locator('#timeline-seek').focus(); page.locator('#timeline-seek').press('End')
+                page.wait_for_function('(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking',arg=second['frames'][-1]['id'])
+                side_mark=draw_mark(page,'reference','line')
+                page.locator('#capture-scene-button').click()
+                page.wait_for_function("__mentionCheck.state.sceneView==='snapshot' && !!__mentionCheck.state.snapshot")
+                scene_mark=draw_mark(page,'scene','arrow')
+                page.evaluate("__mentionCheck.state.selectedId=null;__mentionCheck.state.selectedSceneNode=null;__mentionCheck.renderSelection()")
+                candidates=page.evaluate('__mentionCheck.getPromptMentionCandidates()')
+                assert {c['descriptor']['annotationId'] for c in candidates if c['kind']=='annotation'}=={mark['id'],side_mark['id'],scene_mark['id']}
+                assert set(c['kind'] for c in candidates)<= {'node','object','annotation'}
+                for m in (side_mark,scene_mark):
+                    query(page,m['name']); choose(page,'annotation',m['name'])
+                    assert f"[[annotation:{m['id']}]]" in field.input_value()
+                assert '侧面' in field.input_value()
+                print('PASS: all unsent marks across reference views, frames and a frozen scene screenshot remain selectable in this round',flush=True)
+
+                old_mark=next(c for c in candidates if c['kind']=='annotation' and c['descriptor']['annotationId']==mark['id'])
+                query(page,mark['name'])
+                page.evaluate('(id)=>__mentionCheck.removeAnnotation(id)',mark['id'])
+                assert page.locator('.prompt-mention-option').count()==0
+                old_note=field.input_value(); field.press('Enter'); assert field.input_value()==old_note
+                assert reject_old_candidate(page,old_mark)
+                page.evaluate('__mentionCheck.undoAnnotationEdit()')
+                assert page.locator('.prompt-mention-option').count()==1
+                choose(page,'annotation',mark['name'])
+                print('PASS: deleting a mark immediately removes its candidate; undo restores it and stale insertion fails safely',flush=True)
+
+                page.locator('#drag-scene-image').click()
                 right = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[1])")
                 page.evaluate("__mentionCheck.camera.position.x += .2")
                 assert page.evaluate("structuredClone(__mentionCheck.state.imageRefs[1])") == right
-                query(page,left["id"]); choose(page,"saved-image")
-                assert field.input_value().count(f"[[image:{left['id']}]]") == 2
-                assert page.evaluate("__mentionCheck.state.imageRefs.length") == 2
-                print("PASS: annotation/source frame and both actual images stay frozen; saved-image mentions reuse the original capture",flush=True)
-
-                query(page,"人体"); choose(page,"pose")
-                page.locator("#reference-view-select").select_option(second["clip_id"])
-                page.wait_for_function("(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking && __mentionCheck.humanCurrentFrame(__mentionCheck.state.humanJobs[0])",arg=second["frames"][0]["id"])
-                query(page,"人体"); choose(page,"pose")
-                assert page.evaluate("__mentionCheck.state.poseRefs.length") == 2
                 assert page.evaluate("(id)=>structuredClone(__mentionCheck.state.imageRefs.find(image=>image.id===id))", left["id"]) == left
-                edited = page.evaluate("""()=>{const m=__mentionCheck,j=m.state.humanJobs[0],f=m.humanCurrentFrame(j);
+                draft=field.input_value()
+                page.evaluate("""()=>{const m=__mentionCheck,j=m.state.humanJobs[0],f=m.humanCurrentFrame(j);
                     const e={id:'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',job_id:j.job_id,reference_id:f.reference_id,
                      image_sha256:f.image_sha256,image_orientation:f.image_orientation,keypoint_profile:j.keypoint_profile,
                      label:'侧面手指',edits:[{name:'left_thumb4',x:.5,y:.6,visibility:'visible'}]};
-                    m.state.poseEdits.push(e);return e;}""")
-                query(page,"修正"); choose(page,"pose-edit")
-                query(page,"修正"); choose(page,"pose-edit")
-                assert field.input_value().count(f"[[pose_edit:{edited['id']}]]") == 2
-                print("PASS: two camera-specific pose citations and repeated hand-edit mentions retain exact source identities",flush=True)
-                draft = field.input_value()
+                    m.state.poseEdits.push(e);}""")
+                query(page,'',note=field.input_value()+' ')
+                assert set(page.evaluate('__mentionCheck.promptMentions.candidates.map(c=>c.kind)'))<= {'node','object','annotation'}
+                for term in ('左图','右图','人体','修正',left['id']):
+                    query(page,term,note='')
+                    assert page.locator('.prompt-mention-option').count()==0
+                    field.press('Escape')
+                print('PASS: image buttons retain frozen evidence; images, human results and hand edit drafts never appear in @',flush=True)
 
                 field.fill("foo@example.com"); field.focus()
                 assert page.locator("#prompt-mentions").is_hidden()
@@ -150,6 +217,7 @@ def main():
                 assert page.locator(".prompt-mention-option").count() == 0
                 field.press("Enter"); assert not store.state["feedback"]
                 field.press("Escape"); assert page.locator("#prompt-mentions").is_hidden()
+                page.evaluate("__mentionCheck.selectObject('standalone_box')")
                 field.fill(""); query(page,"standalone")
                 page.dispatch_event("#feedback-note","compositionstart")
                 page.dispatch_event("#feedback-note","keydown",{"key":"Enter","code":"Enter","isComposing":True,"keyCode":229,"ctrlKey":True})
@@ -160,6 +228,7 @@ def main():
                 assert "[[object:standalone_box]]" in field.input_value() and not store.state["feedback"]
                 print("PASS: literal email, no results, Escape, Chinese IME and Ctrl+Enter do not accidentally send",flush=True)
 
+                select_model(page,'part')
                 saved_nodes = page.evaluate("structuredClone(__mentionCheck.state.referencedSceneNodes)")
                 page.evaluate("__mentionCheck.state.referencedSceneNodes=__mentionCheck.state.referencedSceneNodes.filter(n=>n.node_name!=='Door')")
                 original_nodes = page.evaluate("structuredClone(__mentionCheck.state.referencedSceneNodes)")
@@ -172,26 +241,22 @@ def main():
                 assert not store.state["feedback"]
                 field.press("Escape")
                 page.evaluate("nodes=>{__mentionCheck.state.referencedSceneNodes=nodes}",saved_nodes)
-                page.evaluate("__mentionCheck.state.imageReferencesSupported=false;__mentionCheck.state.poseCorrectionsSupported=false")
-                query(page,"",note="")
-                assert page.locator('[data-mention-kind="current-image"],[data-mention-kind="saved-image"],[data-mention-kind="pose-edit"]').count() == 0
-                field.press("Escape")
-                page.evaluate("__mentionCheck.state.imageReferencesSupported=true;__mentionCheck.state.poseCorrectionsSupported=true")
-                print("PASS: capacity failure preserves query and reference registration; older services cannot add image/manual evidence",flush=True)
+                print("PASS: a full prompt preserves its @ query and does not register a failed part citation",flush=True)
 
                 for width in (390,340):
                     page.set_viewport_size({"width":width,"height":920})
-                    query(page,"standalone",note="")
+                    query(page,"Door",note="")
                     bounds = page.locator("#prompt-mentions").bounding_box(); assert bounds
                     assert bounds["x"] >= -1 and bounds["x"]+bounds["width"] <= width+1, (width,bounds)
                     assert bounds["y"] >= -1 and bounds["y"]+bounds["height"] <= 921, (width,bounds)
-                    choose(page,"object")
+                    choose(page,"node")
                 page.set_viewport_size({"width":1440,"height":950})
                 field.fill(draft); field.focus(); field.press("End")
                 page.reload(); ready(page)
                 page.wait_for_function("__mentionCheck.state.imageRefs.length===2 && __mentionCheck.state.poseEdits.length===1")
                 assert field.input_value() == draft
-                print("PASS: 390/340px popup stays inside the viewport; reload restores every quoted source and the one prompt",flush=True)
+                assert {c['descriptor']['annotationId'] for c in page.evaluate('__mentionCheck.getPromptMentionCandidates()') if c['kind']=='annotation'}=={mark['id'],side_mark['id'],scene_mark['id']}
+                print("PASS: 390/340px popup stays in bounds; reload restores the prompt, selected part and this round’s cross-view marks",flush=True)
 
                 failures = []
                 def reject(route):
@@ -206,15 +271,20 @@ def main():
                 page.wait_for_function("__mentionCheck.state.feedbackCount===1 && !__mentionCheck.state.submitting")
                 packet = store.state["feedback"][0]
                 assert packet["note"] == draft
-                assert len(packet["image_refs"]) == 2 and len(packet["human_pose"]) == 2 and len(packet["human_pose_edits"]) == 1
-                assert {p["frame"]["reference_id"] for p in packet["human_pose"]} == {first["frames"][0]["id"],second["frames"][0]["id"]}
-                assert packet["human_pose_edits"][0]["document"]["frames"][0]["effective_keypoints"][95]["score"] == .15
+                assert len(packet['image_refs'])==2
+                assert {m['id'] for m in packet['annotations']}=={mark['id'],side_mark['id'],scene_mark['id']}
                 result = _visual_tool_result({"items":[copy.deepcopy(packet)]},store.data_dir)
-                assert sum(item.type=="image" for item in result.content) >= 8
+                assert sum(item.type=="image" for item in result.content) >= 4
                 assert field.input_value() == "" and not page.evaluate("__mentionCheck.state.poseEdits")
                 assert page.locator("#prompt-mentions").is_hidden()
-                print("PASS: rejected save keeps the draft; accepted feedback/MCP return real images, named nodes and source-bound pose corrections",flush=True)
+                query(page,'',note='')
+                assert page.locator('.prompt-mention-option').count()==0
+                assert page.locator('#prompt-mention-status').inner_text()=='先选中物体或添加标记'
+                field.press('Escape')
+                print("PASS: rejected save keeps the draft; accepted feedback/MCP deliver real evidence and clear round marks and selection",flush=True)
 
+                select_model(page,'part')
+                old_candidate=page.evaluate('__mentionCheck.getPromptMentionCandidates()[0]')
                 field.fill(""); query(page,"Door")
                 replacement = root/"replacement.glb"; tiny_named_glb(replacement)
                 replacement.write_bytes(replacement.read_bytes().replace(b'Door',b'Wall'))
@@ -226,6 +296,7 @@ def main():
                 assert "[[node:" not in field.input_value()
                 assert "@Door" in field.input_value()
                 assert not page.evaluate("__mentionCheck.state.referencedSceneNodes")
+                assert reject_old_candidate(page,old_candidate)
                 assert not errors,errors
                 print("PASS: an open old GLB suggestion cannot insert the same path from a replacement model",flush=True)
                 browser.close()
