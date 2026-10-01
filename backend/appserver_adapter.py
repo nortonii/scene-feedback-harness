@@ -74,6 +74,7 @@ class CodexAppServerAdapter:
         on_event: EventCallback | None = None,
         command: Sequence[str] | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
         approval_policy: str = "on-request",
         sandbox: str = "workspace-write",
         network_access: bool = True,
@@ -92,6 +93,7 @@ class CodexAppServerAdapter:
         self.on_event = on_event
         self.command = list(command or ("codex", "app-server", "--stdio"))
         self.model = model
+        self.reasoning_effort = reasoning_effort
         if approval_policy not in {"on-request", "untrusted", "never"}:
             raise ValueError("invalid approval_policy")
         if sandbox not in {"read-only", "workspace-write", "danger-full-access"}:
@@ -166,6 +168,7 @@ class CodexAppServerAdapter:
                             {
                                 "threadId": stored_id,
                                 "cwd": str(self.project_dir),
+                                "model": self.model,
                                 "approvalPolicy": self.approval_policy,
                                 "approvalsReviewer": "user",
                                 "sandbox": self.sandbox,
@@ -256,6 +259,29 @@ class CodexAppServerAdapter:
             if not isinstance(profile, dict) or profile.get("id") != expected_profile:
                 raise AppServerError("Codex selected a different permission profile")
 
+    def list_models(self) -> list[dict[str, Any]]:
+        """Read the account's image-model catalog without sending a user turn."""
+        self.start()
+        entries: list[dict[str, Any]] = []
+        cursor = None
+        seen = set()
+        for _ in range(10):
+            params = {"limit": 100, "includeHidden": False}
+            if cursor is not None:
+                params["cursor"] = cursor
+            response = self._rpc("model/list", params)
+            page = response.get("data")
+            if not isinstance(page, list) or any(not isinstance(item, dict) for item in page):
+                raise AppServerError("model/list returned invalid models")
+            entries.extend(page)
+            cursor = response.get("nextCursor")
+            if cursor is None:
+                return entries
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise AppServerError("model/list returned an invalid cursor")
+            seen.add(cursor)
+        raise AppServerError("too many Codex models to list safely")
+
     def start_turn(
         self,
         text: str,
@@ -305,6 +331,10 @@ class CodexAppServerAdapter:
                     "danger-full-access": {"type": "dangerFullAccess"},
                 }[self.sandbox],
             }
+            if self.model:
+                params["model"] = self.model
+            if self.reasoning_effort:
+                params["effort"] = self.reasoning_effort
             if message_id is not None:
                 params["clientUserMessageId"] = message_id
             try:
@@ -441,6 +471,7 @@ class CodexAppServerAdapter:
             ),
         }
         return {
+            **({"model_reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}),
             "mcp_servers": {
                 "scene_feedback": {
                     "command": sys.executable,

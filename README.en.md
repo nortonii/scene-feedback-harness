@@ -78,13 +78,13 @@ Scene input currently uses a self-contained `.glb` file. Publishing requires geo
 
 ## Switch scenes and start a new reconstruction task
 
-Click the scene name at the top to open the scene list. Return to an existing scene, or enter a name and choose a model, reasoning effort, and permissions to create **a new scene and a new Codex Desktop task**. Import reference images or video, then send your reconstruction instructions from the prompt box. An initial GLB is optional.
+Click the scene name at the top to open the scene list. Return to an existing scene, or enter a name and choose a model, reasoning effort, and permissions to create **a new scene and an independent Codex conversation**. Import reference images or video, then send your reconstruction instructions from the prompt box. An initial GLB is optional.
 
 Each scene keeps its own references, cameras, dynamic views, reconstruction, feedback history, and receiving task. Switching saves the current draft; returning restores it. Separate tabs can view different scenes while previous tasks and queued feedback stay with their original scene. Finish an in-progress submission or import before switching.
 
 New working directories live under `projects/<project_id>/workspace` in the service data directory, using the same LAN address and port. Each new task gets MCP configured for its own directory; existing MCP clients keep their original scene. If task creation is uncertain or binding fails, the scene stays in the list for recovery. Repeating the same creation request does not create another task.
 
-Creating Desktop tasks requires a workbench connected to Codex Desktop (`--external-review --shared-thread-id`); the browser may run on another LAN device. The existing task panel still switches or creates tasks **within the current scene**.
+The default CLI (App Server) mode supports scene creation without Desktop. Model, reasoning effort, permissions, and the independent conversation persist across restarts. Desktop mode requires a connected task (`--external-review --shared-thread-id`). The browser can use configured LAN access or SSH forwarding. The existing task panel remains Desktop-only for tasks **within the current scene**.
 
 ## Align to a reference camera
 

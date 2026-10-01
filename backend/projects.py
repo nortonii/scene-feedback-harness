@@ -297,6 +297,13 @@ class ProjectRegistry:
                     self._refresh_creation(context)
                     self._save()
                     return self._creation_result(context)
+            if not self.root.gateway.external_review:
+                catalog = self.root.gateway.list_models()
+                selected = next((item for item in catalog["models"] if item["model"] == spec["model"]), None)
+                if selected is None:
+                    raise APIError(400, "selected model is not available with image input")
+                if spec["reasoning_effort"] is not None and spec["reasoning_effort"] not in selected["supported_reasoning_efforts"]:
+                    raise APIError(400, "reasoning_effort is not supported by the selected model")
             project_id = uuid.uuid4().hex
             base = self.managed_dir / project_id
             record = {"project_id": project_id, "name": spec["name"],
@@ -314,12 +321,19 @@ class ProjectRegistry:
                 self._refresh_creation(context)
                 self._save()
                 context.gateway.start()
-                result = context.gateway.create_target(spec["model"], reasoning_effort=spec["reasoning_effort"],
-                                                       permission_mode=spec["permission_mode"], title=spec["name"])
-                record["created_thread_id"] = result["thread_id"]
+                if context.gateway.external_review:
+                    result = context.gateway.create_target(spec["model"], reasoning_effort=spec["reasoning_effort"],
+                                                           permission_mode=spec["permission_mode"], title=spec["name"])
+                    thread_id = result["thread_id"]
+                else:
+                    workspace = context.store.workspace()
+                    thread_id = workspace.get("thread_id")
+                    if not thread_id or workspace["agent"]["status"] == "disconnected":
+                        raise APIError(503, workspace["agent"].get("error") or "cannot create Codex CLI session")
+                record["created_thread_id"] = thread_id
                 record["creation_status"] = "ready"
                 self._refresh_creation(context)
-                if context.gateway._supervisor_thread is None:
+                if context.gateway.external_review and context.gateway._supervisor_thread is None:
                     context.gateway.start()
                 self._save()
                 return self._creation_result(context)

@@ -866,19 +866,22 @@ def verify_compact_header(page, store, screenshots):
 
 
 def verify_project_isolation(page, server, screenshots):
-    """Use real project routing/stores while stubbing only Codex Desktop I/O."""
+    """Use real project routing/stores while stubbing Codex session I/O."""
     original_state = WorkspaceGateway.state
     created_tasks = []
 
     def fixture_state(gateway, **kwargs):
         result = original_state(gateway, **kwargs)
         result["desktop_available"] = True
+        result["project_creation_supported"] = True
         return result
 
     def fixture_start(gateway):
         gateway.ensure()
         gateway.store.workspace_agent(status="idle")
         gateway._started = True
+        if gateway is not root.gateway and not gateway.store.workspace().get("thread_id"):
+            fixture_target(gateway, "fixture-model", title=gateway.project_name)
 
     def fixture_target(gateway, model, *, reasoning_effort=None, title=None, permission_mode="workspace_write"):
         thread_id = str(uuid.uuid4())

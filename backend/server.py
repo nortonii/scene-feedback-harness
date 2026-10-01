@@ -666,6 +666,25 @@ def _make_server_unlocked(
                 kwargs = {"allow_owned_resume": True} if target_id in child_workspace.get("created_thread_ids", []) else {}
                 kwargs.update(child_gateway._owned_adapter_config(target_id))
                 child_gateway.adapter = SharedDesktopAdapter(target_id, on_event=child_gateway.scoped_adapter_callback(), **kwargs)
+            if enable_codex and not external_review:
+                from appserver_adapter import CodexAppServerAdapter
+                thread_path = child_data / "codex_app_server_thread.json"
+                # Do not silently retry an interrupted thread/start without a persisted ID.
+                if newly_created or thread_path.is_file():
+                    spec = record.get("creation_spec", {})
+                    permission = spec.get("permission_mode", "workspace_write")
+                    child_gateway.adapter = CodexAppServerAdapter(
+                        child_project, state_path=thread_path,
+                        on_event=child_gateway.on_adapter_event,
+                        model=spec.get("model"), reasoning_effort=spec.get("reasoning_effort"),
+                        sandbox={"workspace_write": "workspace-write", "read_only": "read-only",
+                                 "full_access": "danger-full-access"}[permission],
+                        approval_policy="never" if permission == "full_access" else "on-request",
+                        env_overrides={"SCENE_FEEDBACK_PORT": str(server.server_port),
+                                       "SCENE_FEEDBACK_DATA_DIR": str(child_data),
+                                       "SCENE_FEEDBACK_PROJECT_DIR": str(child_project),
+                                       "SCENE_FEEDBACK_WEB_DIR": str(web_root)},
+                    )
             return context
         except BaseException:
             try:
