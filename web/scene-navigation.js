@@ -7,6 +7,7 @@ export class SceneNavigation extends THREE.EventDispatcher {
   constructor(camera, element) {
     super();
     this.camera = camera;
+    this.worldUp = camera.up.clone();
     this.element = element;
     this.orbit = new OrbitControls(camera, element);
     this.free = new TrackballControls(camera, element);
@@ -61,11 +62,28 @@ export class SceneNavigation extends THREE.EventDispatcher {
     this.syncEnabled();
     this.dispatchEvent({type:'end'});
   }
+  setWorldUp(up) {
+    if (this.worldUp.equals(up)) return;
+    this.cancelTransition();
+    this.flush();
+    this.worldUp.copy(up);
+    this.camera.up.copy(up);
+    // OrbitControls captures its up-axis transform at construction.
+    const old = this.orbit;
+    old.dispose();
+    this.orbit = new OrbitControls(this.camera, this.element);
+    for (const key of ['enableDamping','dampingFactor','minDistance','maxDistance','screenSpacePanning','zoomToCursor']) this.orbit[key] = old[key];
+    this.orbit.target = this.target;
+    for (const type of ['start','end','change']) this.orbit.addEventListener(type, () => this.dispatchEvent({type}));
+    this.free.handleResize();
+    this.syncEnabled();
+    this.update();
+  }
   setFree(value, {notify=true}={}) {
     this.cancelTransition();
     this.flush();
     this.freeRotation = !!value;
-    if (!this.freeRotation) this.camera.up.set(0, 0, 1);
+    if (!this.freeRotation) this.camera.up.copy(this.worldUp);
     this.free.handleResize();
     this.syncEnabled();
     this.update();

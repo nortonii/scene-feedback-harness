@@ -1,6 +1,7 @@
 """Isolated browser checks for inline decisions and camera navigation. No model calls."""
 from pathlib import Path
 import json
+import struct
 import sys
 import tempfile
 import threading
@@ -93,18 +94,21 @@ def main():
     with store.lock:store.state['workspace']['queue']=[];store._save()
     page.evaluate('__navCheck.refreshWorkspace()')
     page.locator('#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
+    def choose(view):
+      if not page.locator('.view-popover').get_attribute('open') == '': page.locator('.view-popover summary').click()
+      page.locator(f'[data-camera-view="{view}"]').click()
     geometry=page.evaluate('__navCheck.geometry()')
     # Six precise directions and an opposite-side transition without crossing the pivot.
     for view,axis,sign in [('front',1,-1),('back',1,1),('left',0,-1),('right',0,1),('top',2,1),('bottom',2,-1)]:
-      page.locator(f'[data-camera-view="{view}"]').click()
+      choose(view)
       if view=='back':
         radii=page.evaluate('''()=>new Promise(resolve=>{const a=[];function sample(){a.push(__navCheck.controls.getDistance());if(a.length<10)requestAnimationFrame(sample);else resolve(a)}requestAnimationFrame(sample)})''')
         assert min(radii)>0 and max(radii)-min(radii)<.001,radii
       page.wait_for_function('!__navCheck.controls.transition')
       d=page.evaluate('(()=>{const c=__navCheck;return c.camera.position.clone().sub(c.controls.target).normalize().toArray()})()')
       assert d[axis]*sign>.999,(view,d)
-    page.locator('[data-camera-view="iso"]').click();page.wait_for_function('!__navCheck.controls.transition')
-    page.locator('#frame-all').click();page.wait_for_function('!__navCheck.controls.transition')
+    choose('iso');page.wait_for_function('!__navCheck.controls.transition')
+    page.locator('.view-popover summary').click();page.locator('#frame-all').click();page.wait_for_function('!__navCheck.controls.transition')
     page.wait_for_timeout(150)
     # Pick an actual visible object with a real double click.
     xy=page.evaluate('''()=>{const c=document.querySelector('#viewport canvas'),r=c.getBoundingClientRect();for(let y=.35;y<.85;y+=.1)for(let x=.2;x<.8;x+=.1){const p={clientX:r.x+r.width*x,clientY:r.y+r.height*y};if(__navCheck.pickScene(p))return [p.clientX,p.clientY];}throw Error('No visible scene object');}''')
@@ -146,14 +150,17 @@ def main():
     page.locator('#capture-scene-button').click()
     expect(page.locator('#camera-navigation')).to_be_hidden()
     snapshot=page.evaluate('JSON.stringify(__navCheck.state.snapshot)')
-    page.locator('#browse-button').click();page.locator('[data-camera-view="back"]').click();page.wait_for_function('!__navCheck.controls.transition')
+    page.locator('#browse-button').click();choose('back');page.wait_for_function('!__navCheck.controls.transition')
     page.locator('#snapshot-button').click()
     assert page.evaluate('JSON.stringify(__navCheck.state.snapshot)')==snapshot
     print('PASS free rotation, persisted tilted camera, upright reset and frozen snapshot protection',flush=True)
     page.locator('#browse-button').click()
     page.set_viewport_size({'width':390,'height':844});page.wait_for_timeout(250)
-    r=page.locator('#camera-navigation').bounding_box();stage=page.locator('#scene-stage').bounding_box()
-    assert r['x']>=stage['x'] and r['x']+r['width']<=stage['x']+stage['width']+1
+    expect(page.locator('#camera-navigation')).to_be_hidden()
+    page.locator('.view-popover summary').click()
+    r=page.locator('.view-popover .popover-content').bounding_box()
+    assert r['x']>=0 and r['x']+r['width']<=391
+    assert page.locator('#scene-stage #camera-navigation').count()==0
     out=ROOT.parent/'inspection/navigation-approval';out.mkdir(parents=True,exist_ok=True)
     page.screenshot(path=str(out/'mobile-navigation.png'))
     page.set_viewport_size({'width':1440,'height':900})
@@ -161,6 +168,31 @@ def main():
     store.workspace_agent(status='awaiting_approval');page.evaluate('__navCheck.refreshWorkspace()')
     page.locator('#chat-launcher').click();expect(page.locator('#chat-approvals')).to_be_visible();page.wait_for_timeout(650)
     page.screenshot(path=str(out/'inline-confirmation.png'))
+    # Publish a standard Y-up GLB in the isolated fixture, retaining its geometry coordinates.
+    raw=(tmp/'room.glb').read_bytes();length=struct.unpack_from('<I',raw,12)[0];doc=json.loads(raw[20:20+length])
+    doc['asset']['generator']='Y-up fixture'
+    children=doc['scenes'][doc.get('scene',0)]['nodes'];parent=len(doc['nodes'])
+    doc['nodes'].append({'name':'Y-up export','children':children,'rotation':[-2**-.5,0,0,2**-.5]})
+    doc['scenes'][doc.get('scene',0)]['nodes']=[parent]
+    encoded=json.dumps(doc).encode();encoded+=b' '*((-len(encoded))%4);tail=raw[20+length:]
+    target=tmp/'standard.glb';target.write_bytes(struct.pack('<4sII',b'glTF',2,20+len(encoded)+len(tail))+struct.pack('<I4s',len(encoded),b'JSON')+encoded+tail)
+    # The server owns a separate store instance; use it to publish the fixture.
+    store.set_scene_preview(str(target))
+    page.reload();page.wait_for_function("window.__navCheck && !__navCheck.state.sceneLoading && __navCheck.state.detectedUpAxis==='y'")
+    assert page.evaluate('__navCheck.position().up')==[0,1,0]
+    choose('top');page.wait_for_function('!__navCheck.controls.transition')
+    pose=page.evaluate('__navCheck.position()');delta=[a-b for a,b in zip(pose['p'],pose['t'])]
+    assert delta[1]>0 and abs(delta[0])+abs(delta[2])<abs(delta[1])*.001,delta
+    geometry=page.evaluate('__navCheck.geometry()')
+    page.locator('.view-popover summary').click();page.locator('#ground-axis').select_option('z')
+    page.wait_for_function('!__navCheck.controls.transition');assert page.evaluate('__navCheck.position().up')==[0,0,1]
+    page.reload();page.wait_for_function('window.__navCheck && !__navCheck.state.sceneLoading')
+    assert page.evaluate('__navCheck.position().up')==[0,0,1]
+    assert page.evaluate('__navCheck.state.groundAxis')=='z'
+    page.locator('.view-popover summary').click();page.locator('#ground-axis').select_option('auto')
+    page.wait_for_function('!__navCheck.controls.transition');assert page.evaluate('__navCheck.position().up')==[0,1,0]
+    assert page.evaluate('__navCheck.geometry()')==geometry
+    print('PASS standard Y-up GLB, legacy Z-up demo, axis override persistence and unchanged model transforms',flush=True)
     assert not errors,errors
     browser.close();print('PASS responsive navigation and no browser errors',flush=True)
   finally:

@@ -127,6 +127,7 @@ const state = {
   sceneSnapshots:[], snapshot:null, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
   referencePanning:null, spacePan:false,
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
+  groundAxis:'auto', detectedUpAxis:'z', restoredUpAxis:null,
   restoredSceneRevision:null, restoredModelUrl:null
 };
 Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
@@ -178,7 +179,8 @@ controls.minDistance = 0.3;
 controls.maxDistance = 250;
 controls.screenSpacePanning = true;
 controls.update();
-threeScene.add(new THREE.HemisphereLight(0xdcefff, 0x7e8a93, 2.3));
+const hemisphereLight = new THREE.HemisphereLight(0xdcefff, 0x7e8a93, 2.3);
+threeScene.add(hemisphereLight);
 const keyLight = new THREE.DirectionalLight(0xffedda, 3.5);
 keyLight.position.set(5, -4, 10);
 threeScene.add(keyLight);
@@ -264,6 +266,7 @@ function saveDraft() {
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
+      groundAxis:state.groundAxis, worldUpAxis:controls.worldUp.y === 1 ? 'y' : 'z',
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
         alignmentExact:state.alignmentExact, freeRotation:controls.freeRotation,
@@ -336,6 +339,9 @@ function restoreDraft() {
     const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
     const currentNote = typeof draft.note === 'string' ? draft.note : '';
     ui.note.value = [oldPrompts, currentNote].filter(Boolean).join('\n\n');
+    state.groundAxis = ['y','z'].includes(draft.groundAxis) ? draft.groundAxis : 'auto';
+    state.restoredUpAxis = ['y','z'].includes(draft.worldUpAxis) ? draft.worldUpAxis : null;
+    applyGroundAxis(state.groundAxis === 'auto' ? state.restoredUpAxis || 'z' : state.groundAxis);
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
       controls.setFree(draft.camera.freeRotation === true, {notify:false});
       camera.position.set(...draft.camera.position);
@@ -1926,10 +1932,13 @@ async function addObject(item) {
     root.scale.set(...(item.size || [1,1,1]));
     root.add(gltf.scene);
     root.userData.gltfRoot = gltf.scene;
+    const asset = gltf.parser.json.asset || {};
+    const declaredUp = String(gltf.scene.userData.up_axis || asset.extras?.up_axis || '').toLowerCase();
+    root.userData.upAxis = ['y','z'].includes(declaredUp) ? declaredUp :
+      asset.generator === 'scene-feedback-harness room demo' ? 'z' : 'y';
     root.userData.loaded = true;
     registerAnimations(item, gltf);
     if (state.selectedId === item.id) renderSelection();
-    if (state.firstFrame) frameAllIfReady();
   } catch (error) {
     placeholder.material.color.set(0xc47472);
     root.userData.loaded = true;
@@ -1937,6 +1946,22 @@ async function addObject(item) {
   }
 }
 
+function applyGroundAxis(axis) {
+  const yUp = axis === 'y';
+  controls.setWorldUp(new THREE.Vector3(0, yUp ? 1 : 0, yUp ? 0 : 1));
+  grid.rotation.set(yUp ? 0 : Math.PI / 2, 0, 0);
+  grid.position.copy(controls.worldUp).multiplyScalar(-.003);
+  ground.rotation.set(yUp ? -Math.PI / 2 : 0, 0, 0);
+  ground.position.copy(controls.worldUp).multiplyScalar(-.008);
+  hemisphereLight.position.copy(controls.worldUp);
+  keyLight.position.copy(navigationDirection([5,-4,10]));
+  fillLight.position.copy(navigationDirection([-5,6,5]));
+  id('ground-axis').value = state.groundAxis;
+}
+function navigationDirection(values) {
+  const vector = new THREE.Vector3(...values);
+  return controls.worldUp.y === 1 ? vector.set(vector.x, vector.z, -vector.y) : vector;
+}
 function frameAllIfReady() {
   if (!state.firstFrame) return;
   if (state.sceneObjects.some((item) => item.type === 'model' && !state.objectNodes.get(item.id)?.userData.loaded)) return;
@@ -2044,7 +2069,7 @@ function leaveReferenceCamera() {
   if (!state.alignedReferenceId) return;
   state.alignedReferenceId = null;
   state.alignmentExact = false;
-  camera.up.set(0, 0, 1);
+  camera.up.copy(controls.worldUp);
   camera.fov = 44;
   camera.updateProjectionMatrix();
   controls.update();
@@ -2096,7 +2121,7 @@ function frameBox(box, {smooth=false, keepDirection=false}={}) {
   if (!box || box.isEmpty()) return;
   controls.cancelTransition();
   controls.flush();
-  const direction = keepDirection ? camera.position.clone().sub(controls.target).normalize() : new THREE.Vector3(1,-1.4,0.95).normalize();
+  const direction = keepDirection ? camera.position.clone().sub(controls.target).normalize() : navigationDirection([1,-1.4,0.95]).normalize();
   leaveReferenceCamera();
   const center = box.getCenter(new THREE.Vector3());
   const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.45);
@@ -2260,6 +2285,16 @@ async function loadScene(sceneData) {
     objectLayer.clear();
     state.objectNodes.clear();
     await Promise.allSettled(state.sceneObjects.map(addObject));
+    const axes = new Set([...state.objectNodes.values()].filter(root => root.userData.loaded).map(root => root.userData.upAxis || 'z'));
+    // Mixed or primitive scenes retain the workspace convention; GLB uses Y-up unless explicitly declared.
+    state.detectedUpAxis = axes.size === 1 ? [...axes][0] : 'z';
+    const axis = state.groundAxis === 'auto' ? state.detectedUpAxis : state.groundAxis;
+    const changedAxis = (controls.worldUp.y === 1 ? 'y' : 'z') !== axis;
+    const alignedPose = state.alignedReferenceId ? {position:camera.position.clone(), up:camera.up.clone(), quaternion:camera.quaternion.clone()} : null;
+    applyGroundAxis(axis);
+    if (alignedPose) {
+      camera.position.copy(alignedPose.position); camera.up.copy(alignedPose.up); camera.quaternion.copy(alignedPose.quaternion);
+    } else if (changedAxis) state.firstFrame = true;
     applyAnimationTime(state.time);
     renderTimeline();
     renderAnimationChoices();
@@ -3907,6 +3942,7 @@ function updateMode() {
   controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
   id('camera-navigation').classList.toggle('hidden', state.sceneView !== 'live' || state.mode !== 'select');
   id('camera-navigation').querySelectorAll('button').forEach(button => button.disabled = !controls.enabled);
+  id('ground-axis').disabled = !controls.enabled;
   id('free-rotation').disabled = id('upright-camera').disabled = !controls.enabled;
   id('free-rotation').setAttribute('aria-pressed', String(controls.freeRotation));
   ui.referenceHint.classList.toggle('hidden', !activeReference());
@@ -5539,9 +5575,16 @@ function bindEvents() {
     if (!button || !editable() || state.sceneView !== 'live') return;
     leaveReferenceCamera();
     controls.setFree(false);
-    const direction = new THREE.Vector3(...directions[button.dataset.cameraView]).normalize();
-    controls.moveTo(controls.target.clone().addScaledVector(direction, Math.max(.3, controls.getDistance())), controls.target, {up:new THREE.Vector3(0,0,1)});
+    const direction = navigationDirection(directions[button.dataset.cameraView]).normalize();
+    controls.moveTo(controls.target.clone().addScaledVector(direction, Math.max(.3, controls.getDistance())), controls.target, {up:controls.worldUp});
     updateMode();
+  });
+  id('ground-axis').addEventListener('change', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera();
+    state.groundAxis = id('ground-axis').value;
+    applyGroundAxis(state.groundAxis === 'auto' ? state.detectedUpAxis : state.groundAxis);
+    controls.setFree(false); frameAll({smooth:true}); updateMode(); saveDraft();
   });
   id('free-rotation').addEventListener('click', () => {
     if (!editable() || state.sceneView !== 'live') return;

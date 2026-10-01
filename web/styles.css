@@ -567,18 +567,17 @@ body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annot
 .chat-launcher.needs-approval .chat-launcher-icon, .chat-launcher.needs-approval .chat-launcher-spinner { display: none; }
 .chat-launcher.needs-approval .chat-launcher-attention { display: inline-grid; }
 /* A compact direction pad stays inside the live 3D view, above its canvas. */
-.camera-navigation { position: absolute; z-index: 8; top: 12px; right: 12px; padding: 5px; border: 1px solid #ffffffb3; border-radius: 14px; background: #f5f4efb8; backdrop-filter: blur(16px); box-shadow: 0 3px 16px #1717150c; }
-.camera-directions { display: grid; grid-template-columns: repeat(3, 30px); gap: 2px; }
-.camera-directions button { min-width: 0; height: 29px; padding: 0; border-radius: 8px; font-size: var(--text-caption); color: var(--muted); }
-.camera-directions button:hover:not(:disabled), .camera-directions button:focus-visible { color: var(--ink); background: #ffffffb0; }
+/* Direction choices stay inside the camera menu, leaving the model unobstructed. */
+.view-popover .popover-content { width: 224px; max-width: calc(100vw - 32px); gap: 6px; border: 1px solid #ffffffb3; border-radius: 16px; background: #f5f4efed; backdrop-filter: blur(20px); box-shadow: 0 8px 28px #17171518; }
+.camera-navigation { padding-bottom: 10px; border-bottom: 1px solid #17171514; }
+.camera-directions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.camera-directions button { min-width: 0; height: 32px; padding: 0 8px; border-radius: 9px; font-size: var(--text-caption); color: var(--muted); background: #ffffff66; }
+.camera-directions button:hover:not(:disabled), .camera-directions button:focus-visible { color: var(--ink); background: #ffffffcc; }
 .camera-directions #frame-all { grid-column: span 2; }
-.scene-stage:has(.camera-navigation:not(.hidden)) .scene-snapshots { max-width: calc(100% - 130px); }
+.ground-axis-label { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; font-size: var(--text-caption); color: var(--muted); }
+.ground-axis-label select { width: auto; min-width: 0; padding: 5px 8px; font: inherit; border-radius: 8px; }
 #free-rotation[aria-pressed=true] { background: var(--ink); color: var(--paper); }
 @media (max-width: 600px) {
-  .camera-navigation { top: 8px; right: 8px; }
-  .camera-directions { grid-template-columns: repeat(3, 27px); }
-  .camera-directions button { height: 28px; }
-  .scene-stage:has(.camera-navigation:not(.hidden)) .scene-snapshots { max-width: calc(100% - 114px); }
   .chat-approvals { max-height: min(30dvh, 220px); }
 }
 .chat-approvals .queue-list { margin: 0; gap: 0; }
@@ -586,4 +585,5 @@ body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annot
 .chat-approvals .queue-card:focus-visible { outline: 2px solid #8a5721; outline-offset: -3px; }
 .chat-approvals .queue-actions button { border-radius: 16px; min-height: 34px; }
 
-.scene-stage:has(.camera-navigation:not(.hidden)) .scene-snapshot-reveal { min-width: 0; flex-shrink: 1; }
+
+.scene-snapshot-reveal { min-width: 0; flex-shrink: 1; }
