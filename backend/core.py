@@ -1214,7 +1214,7 @@ class SceneStore:
                 historic_referenced_nodes = payload.get("referenced_scene_nodes", [])
                 if isinstance(historic_referenced_nodes, list):
                     model_ids.update(node.get("parent_object_id") for node in historic_referenced_nodes if isinstance(node, dict) and isinstance(node.get("parent_object_id"), str) and ID_RE.fullmatch(node["parent_object_id"]))
-                for frame in payload.get("dynamic_frames", []) if isinstance(payload.get("dynamic_frames", []), list) else []:
+                for frame in [*payload.get("dynamic_frames", []), *payload.get("scene_snapshots", [])] if isinstance(payload.get("dynamic_frames", []), list) and isinstance(payload.get("scene_snapshots", []), list) else []:
                     if not isinstance(frame, dict):
                         continue
                     selected = frame.get("selected_object_ids", [])
@@ -1237,9 +1237,17 @@ class SceneStore:
             if aligned_reference_id is not None and (aligned_reference_id not in reference_ids or "camera" not in references_by_id[aligned_reference_id]):
                 raise APIError(400, "aligned_reference_id must identify a calibrated reference")
             normalized_annotations = [self._normalize_annotation(item, object_ids, model_ids, reference_ids) for item in annotations]
-            from dynamic import prepare_dynamic_feedback, validate_timed_annotations
-            timeline, dynamic_frames = prepare_dynamic_feedback(self, session, payload, revision, object_ids, model_ids)
+            from dynamic import prepare_dynamic_feedback, validate_timed_annotations, prepare_scene_snapshots, validate_snapshot_annotations
+            timeline, dynamic_frames = prepare_dynamic_feedback(self, session, payload, revision, object_ids, model_ids, require_oldest=not payload.get("scene_snapshots"))
             validate_timed_annotations(normalized_annotations, timeline, dynamic_frames)
+            scene_snapshots = prepare_scene_snapshots(self, session, payload, revision, object_ids, model_ids)
+            if scene_snapshots:
+                validate_snapshot_annotations(normalized_annotations, scene_snapshots)
+                if {item["frame"]["id"] for item in scene_snapshots} & {item["frame"]["id"] for item in dynamic_frames}:
+                    raise APIError(400, "scene snapshots and dynamic frames must have distinct ids")
+                if min(item["frame"]["scene_revision"] for item in [*scene_snapshots, *dynamic_frames]) != revision:
+                    raise APIError(409, "scene_revision must be the oldest saved evidence revision",
+                                   detail={"code": "feedback_revision_conflict", "current_scene_revision": self.state["scene"]["revision"]})
             referenced_scene_nodes = payload.get("referenced_scene_nodes", [])
             if not isinstance(referenced_scene_nodes, list) or len(referenced_scene_nodes) > 64:
                 raise APIError(400, "referenced_scene_nodes must be an array of at most 64 nodes")
@@ -1275,7 +1283,7 @@ class SceneStore:
                         raise APIError(400, "object prompt refers to an unknown object id")
                     normalized["object_id"] = object_id
                 normalized_prompts.append(normalized)
-            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images") and not dynamic_frames and not payload.get("pose_refs") and not payload.get("pose_edits"):
+            if not annotations and not note.strip() and not normalized_prompts and not session.get("reference_images") and not dynamic_frames and not scene_snapshots and not payload.get("pose_refs") and not payload.get("pose_edits"):
                 raise APIError(400, "add a reference, annotation, object prompt or note before submitting")
             camera = payload.get("camera")
             if camera is not None:
@@ -1313,6 +1321,8 @@ class SceneStore:
             if "screenshot_data_url" in payload and payload["screenshot_data_url"] is not None and "scene_annotated_data_url" not in prepared_scene:
                 prepared_scene["scene_annotated_data_url"] = self._decode_image_data_url(payload["screenshot_data_url"])
             crops = payload.get("crops", [])
+            from comparison import prepare_comparison
+            comparison_fields, comparison_images = prepare_comparison(self, session, payload)
             from human_pose import prepare_pose_feedback, prepare_pose_edit_feedback, _atomic_json
             prepared_pose = prepare_pose_feedback(self, session_id, payload.get("pose_refs"), note)
             prepared_pose_edits = prepare_pose_edit_feedback(self, session_id, payload)
@@ -1357,6 +1367,10 @@ class SceneStore:
                         "corrections_path": str(correction_path.resolve()),
                         "corrections_url": f"/api/workspace/pose/corrections/{feedback['feedback_id']}/{item['id']}",
                     })
+            feedback.update(comparison_fields)
+            feedback.update({key + "_url": self._write_media(data) for key, data in comparison_images.items()})
+            if scene_snapshots:
+                feedback["scene_snapshots"] = [{**item["frame"], **{field + "_url": self._write_media(data) for field, data in item["images"].items()}} for item in scene_snapshots]
             if timeline is not None:
                 feedback["timeline"] = timeline
                 feedback["dynamic_frames"] = [{**item["frame"], **{field + "_url": self._write_media(data) for field, data in item["images"].items()}} for item in dynamic_frames]

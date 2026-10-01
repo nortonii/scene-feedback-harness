@@ -385,6 +385,7 @@ __promptDragCheck.selectModelPart = () => {
 
                 # A right-pane arrow freezes a scene screenshot. Dragging that
                 # view must carry the exact original plus its painted version.
+                page.locator('#capture-scene-button').click()
                 page.locator('button[data-tool="arrow"]').click()
                 viewport = page.locator("#viewport")
                 box = viewport.bounding_box()
@@ -402,6 +403,7 @@ __promptDragCheck.selectModelPart = () => {
                 assert marked["camera"] == snapshot["camera"] and marked["scene_revision"] == snapshot["scene_revision"]
                 assert marked.get("annotated_data_url") and marked["annotated_data_url"] != marked["original_data_url"]
                 page.locator('button[data-tool="select"]').click()
+                page.locator('#browse-button').click()
                 view_box = viewport.bounding_box()
                 assert view_box
                 page.mouse.move(view_box["x"] + view_box["width"] * .4, view_box["y"] + view_box["height"] * .5)

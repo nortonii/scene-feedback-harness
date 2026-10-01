@@ -93,7 +93,11 @@ def main():
 
                 # Named GLB children are searchable without an earlier viewport pick.
                 query(page,"Cabinet"); choose(page,"node","Cabinet")
+                if not page.locator('[data-selection-level="part"]').is_visible():
+                    page.locator('#references-dialog-button').click()
                 page.locator('[data-selection-level="part"]').click()
+                if page.locator('#references-dialog').is_visible():
+                    page.locator('[data-close-dialog="references-dialog"]').click()
                 query(page,"Door"); choose(page,"node","Door")
                 assert field.input_value().count("[[node:fixture_model:") == 2
                 assert len(page.evaluate("__mentionCheck.state.referencedSceneNodes")) == 2
@@ -107,6 +111,8 @@ def main():
                 mark = page.evaluate("structuredClone(__mentionCheck.state.annotations[0])")
                 query(page,"框"); choose(page,"annotation")
                 assert f"[[annotation:{mark['id']}]]" in field.input_value()
+                query(page,mark['name']); choose(page,"annotation",mark['name'])
+                assert field.input_value().count(f"[[annotation:{mark['id']}]]") == 2
                 assert "正面" in field.input_value() and "帧" in field.input_value()
                 query(page,"左图"); choose(page,"current-image")
                 left = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[0])")

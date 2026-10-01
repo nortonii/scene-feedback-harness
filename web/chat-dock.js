@@ -17,6 +17,9 @@ export function setupChatDock({getState}) {
   let resizeDrag = null;
   let resizeFrame = 0;
   let lastHeightBounds = {min:1, max:window.innerHeight};
+  let launcherStatus = '';
+  const visibilityTransitions = new Map();
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
   const historyVisible = () => !!dock && !collapsed && !historyCollapsed;
   const atLatest = () => !conversation ||
@@ -43,7 +46,8 @@ export function setupChatDock({getState}) {
       unreadCount.classList.toggle('hidden', !unread);
     }
     if (launcher) {
-      launcher.setAttribute('aria-label', '打开会话' + (unread ? '，' + unread + ' 条新消息' : ''));
+      launcher.setAttribute('aria-label', '打开会话' + (launcherStatus ? '，' + launcherStatus : '') +
+        (unread ? '，' + unread + ' 条新消息' : ''));
       launcher.classList.toggle('has-unread', !!unread);
     }
     if (historyToggle) {
@@ -152,9 +156,85 @@ export function setupChatDock({getState}) {
     persist();
   }
 
-  function applyLayout() {
-    dock?.classList.toggle('hidden', collapsed);
-    launcher?.classList.toggle('hidden', !collapsed);
+  function launcherBounds() {
+    // Measure the real button, including unread counts and mobile safe areas.
+    // Restoring display in this same task avoids painting a second launcher.
+    const hidden = launcher.classList.contains('hidden');
+    launcher.classList.remove('hidden');
+    const rect = launcher.getBoundingClientRect();
+    launcher.classList.toggle('hidden', hidden);
+    return rect;
+  }
+
+  function setVisible(element, visible, animate) {
+    if (!element) return;
+    const previous = visibilityTransitions.get(element);
+    if (animate && previous?.visible === visible) return;
+    const hidden = element.classList.contains('hidden');
+    // Capture every animated property before cancelling. Reversals then continue
+    // from this exact visible shape, without an old completion hiding the panel.
+    const style = getComputedStyle(element);
+    const start = {opacity:hidden ? '0' : style.opacity};
+    if (element === dock) {
+      start.clipPath = style.clipPath;
+      start.translate = style.translate === 'none' ? '0px 0px' : style.translate;
+    }
+    const contents = element === dock ? [dock.querySelector('.chat-dock-header'), byId('chat-dock-body')] : [];
+    const contentOpacity = contents.map(child => hidden ? '0' : getComputedStyle(child).opacity);
+    previous?.animation?.cancel();
+    previous?.contents?.forEach(animation => animation.cancel());
+    element.inert = !visible;
+    element.setAttribute('aria-hidden', String(!visible));
+    element.classList.toggle('is-closing', !visible);
+    if (!animate || reducedMotion.matches || typeof element.animate !== 'function') {
+      element.classList.toggle('hidden', !visible);
+      element.classList.remove('is-transitioning');
+      visibilityTransitions.set(element, {visible});
+      return;
+    }
+    element.classList.remove('hidden');
+    element.classList.add('is-transitioning');
+    let end = {opacity:visible ? '1' : '0'};
+    if (element === dock) {
+      const rect = dock.getBoundingClientRect();
+      const button = launcherBounds();
+      const small = {
+        clipPath:`inset(${Math.max(0, rect.height - button.height)}px 0px 0px ${Math.max(0, rect.width - button.width)}px round 24px)`,
+        translate:`${button.right - rect.right}px ${button.bottom - rect.bottom}px`,
+        opacity:'0.35',
+      };
+      // Leave space around the open shape for its shadow and resize handle.
+      const large = {clipPath:'inset(-48px -48px -48px -48px round 24px)', translate:'0px 0px', opacity:'1'};
+      if (hidden) Object.assign(start, small);
+      else if (start.clipPath === 'none') start.clipPath = large.clipPath;
+      end = visible ? large : small;
+    }
+    const opening = !collapsed;
+    const timing = {duration:opening ? 560 : 460, easing:'cubic-bezier(.22, .68, .2, 1)', fill:'both'};
+    // Hand the surface from the button to the panel early on opening, and
+    // reveal the button near the end of closing instead of showing two panels.
+    const frames = element === launcher && !previous?.animation
+      ? (visible ? [start, {...start, offset:.65}, end] : [start, {...end, offset:.35}, end])
+      : [start, end];
+    const animation = element.animate(frames, timing);
+    // The panel reveals content at its natural size; only the glass boundary
+    // grows. Text never scales, wraps or squeezes during the transition.
+    const contentAnimations = contents.map((child, index) => child.animate([
+      {opacity:contentOpacity[index]},
+      {opacity:visible ? '1' : '0'},
+    ], timing));
+    visibilityTransitions.set(element, {visible, animation, contents:contentAnimations});
+    animation.finished.then(() => {
+      if (visibilityTransitions.get(element)?.animation !== animation) return;
+      element.classList.toggle('hidden', !visible);
+      element.classList.remove('is-transitioning');
+      visibilityTransitions.set(element, {visible});
+      animation.cancel();
+      contentAnimations.forEach(content => content.cancel());
+    }, () => { /* A reversed transition continues from its current frame. */ });
+  }
+
+  function applyLayout({animate=false}={}) {
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
@@ -166,8 +246,13 @@ export function setupChatDock({getState}) {
       resizeHandle.tabIndex = enabled ? 0 : -1;
       resizeHandle.setAttribute('aria-disabled', String(!enabled));
     }
+    const hidden = dock?.classList.contains('hidden');
+    if (!collapsed) dock?.classList.remove('hidden');
     applyHeight({restoreScroll:false});
+    if (hidden) dock?.classList.add('hidden');
     updateCounts();
+    setVisible(dock, !collapsed, animate);
+    setVisible(launcher, collapsed, animate);
     if (historyVisible()) {
       // Let the restored history acquire its height before restoring its position.
       requestAnimationFrame(() => {
@@ -181,7 +266,7 @@ export function setupChatDock({getState}) {
   function open({focus=false}={}) {
     if (collapsed) {
       collapsed = false;
-      applyLayout();
+      applyLayout({animate:true});
       persist();
     }
     if (focus) byId('feedback-note')?.focus({preventScroll:true});
@@ -218,15 +303,21 @@ export function setupChatDock({getState}) {
         waiting:'反馈已排队', disconnected:'Codex 连接中断', delivery_uncertain:'送达待核实',
         error:'Codex 执行出错', waiting_for_mcp:'等待 MCP 读取', external_idle:'等待 MCP 读取'})[status] || '正在连接';
     const compactStatus = byId('chat-status');
+    const running = !failed && state.sessionStatus === 'open' && (state.submitting || status === 'running');
     if (compactStatus) {
       compactStatus.textContent = label;
       compactStatus.title = state.networkError || state.agent?.error || byId('agent-status')?.textContent || label;
       compactStatus.classList.toggle('error', failed);
-      compactStatus.classList.toggle('running', !failed && (state.submitting || status === 'running'));
+      compactStatus.classList.toggle('running', running);
       compactStatus.classList.toggle('queued', !failed && ['awaiting_approval', 'waiting'].includes(status));
     }
     launcher?.classList.toggle('has-attention', failed || status === 'awaiting_approval');
-    if (launcher) launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
+    launcherStatus = label;
+    if (launcher) {
+      launcher.classList.toggle('is-running', running);
+      launcher.setAttribute('aria-busy', String(running));
+      launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
+    }
     updateCounts();
   }
 
@@ -276,12 +367,21 @@ export function setupChatDock({getState}) {
     persist();
   });
   window.addEventListener('blur', () => finishResize());
-  window.addEventListener('resize', scheduleHeightUpdate);
-  window.visualViewport?.addEventListener('resize', scheduleHeightUpdate);
+  reducedMotion.addEventListener('change', () => {
+    if (reducedMotion.matches) applyLayout();
+  });
+  function resizeViewport() {
+    // A viewport change invalidates the launcher-to-panel path. Settle at the
+    // requested state before fitting the new screen instead of drifting outside it.
+    if ([dock, launcher].some(element => visibilityTransitions.get(element)?.animation)) applyLayout();
+    scheduleHeightUpdate();
+  }
+  window.addEventListener('resize', resizeViewport);
+  window.visualViewport?.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
-    for (const element of [dock, dock?.querySelector('.chat-dock-header'), dock?.querySelector('.feedback-heading'),
+    for (const element of [dock, dock?.querySelector('.chat-dock-header'),
       dock?.querySelector('.composer'), byId('timeline-panel')]) {
       if (element) observer.observe(element);
     }
@@ -291,7 +391,7 @@ export function setupChatDock({getState}) {
     finishResize();
     rememberScroll();
     collapsed = true;
-    applyLayout();
+    applyLayout({animate:true});
     persist();
     launcher?.focus({preventScroll:true});
   });
