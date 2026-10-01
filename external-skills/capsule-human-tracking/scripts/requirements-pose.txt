@@ -1,12 +1,14 @@
-# Optional ViTPose worker environment, separate from the HTTP server venv.
+# Optional standalone ViTPose observer environment for this skill.
 # Reuse or install a GPU-compatible PyTorch build first. This file deliberately
 # excludes torch/torchvision to preserve an existing CUDA/vendor environment.
 # Verified with Python 3.12, torch 2.14.0+cu130 and an RTX 5060.
 # Automatic all-camera/all-frame mode also needs a torchvision build compatible
 # with the installed Torch and the official Faster R-CNN MobileNet V3 320 COCO
-# checkpoint. Set SCENE_FEEDBACK_POSE_DETECTOR to its local .pth path, or place
-# it in ~/.cache/torch/hub/checkpoints/fasterrcnn_mobilenet_v3_large_320_fpn-907ea3f9.pth.
-# The worker never downloads detector weights during a tracking job.
+# checkpoint. Default WholeBody133 also needs the genuine 133-channel
+# ViTPose++ Base WholeBody associate head. Convert the original multi-task
+# checkpoint with convert_wholebody_checkpoint.py before --model-path; the
+# ordinary Hugging Face 17-channel Base model alone cannot infer hand joints.
+# Neither conversion nor tracking downloads checkpoints implicitly.
 transformers==5.3.0
 opencv-python==5.0.0.93
 safetensors==0.8.0

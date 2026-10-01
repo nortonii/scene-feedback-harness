@@ -24,10 +24,21 @@ FAKE_SERVER = r'''
 import json, sys
 from pathlib import Path
 log = Path(sys.argv[1])
+permission_metadata = sys.argv[2] if len(sys.argv) > 2 else None
 turn_number = 0
 def send(value):
     sys.stdout.write(json.dumps(value) + "\n")
     sys.stdout.flush()
+def thread_result(thread_id):
+    result = {"thread": {"id": thread_id, "ephemeral": False, "status": {"type": "idle"}, "turns": []}}
+    if permission_metadata == "read-only":
+        result.update(sandbox={"type": "readOnly", "networkAccess": False}, approvalPolicy="never",
+                      activePermissionProfile={"id": ":read-only", "extends": None})
+    elif permission_metadata == "workspace-no-network":
+        result.update(sandbox={"type": "workspaceWrite", "networkAccess": False}, approvalPolicy="on-request")
+    elif permission_metadata == "external":
+        result.update(sandbox={"type": "externalSandbox"}, approvalPolicy="never")
+    return result
 for line in sys.stdin:
     msg = json.loads(line)
     with log.open("a") as handle:
@@ -37,12 +48,12 @@ for line in sys.stdin:
     if method == "initialize":
         send({"id": request_id, "result": {"userAgent": "fake"}})
     elif method == "thread/start":
-        send({"id": request_id, "result": {"thread": {"id": "thread-test", "ephemeral": False, "status": {"type": "idle"}, "turns": []}}})
+        send({"id": request_id, "result": thread_result("thread-test")})
     elif method == "thread/resume":
         if msg["params"]["threadId"] == "lost-empty":
             send({"id": request_id, "error": {"code": -32000, "message": "no rollout found for thread id lost-empty"}})
         else:
-            send({"id": request_id, "result": {"thread": {"id": msg["params"]["threadId"], "ephemeral": False, "status": {"type": "idle"}, "turns": []}}})
+            send({"id": request_id, "result": thread_result(msg["params"]["threadId"])})
     elif method == "thread/read":
         send({"id": request_id, "result": {"thread": {"id": "thread-test", "status": {"type": "idle"}, "turns": []}}})
     elif method == "turn/start":
@@ -73,15 +84,16 @@ def until(predicate, timeout: float = 3.0) -> None:
 
 
 class AppServerAdapterTests(unittest.TestCase):
-    def fixture(self, directory: str, events: list[dict]):
+    def fixture(self, directory: str, events: list[dict], **options):
         root = Path(directory)
         script = root / "fake_app_server.py"
         script.write_text(FAKE_SERVER)
         log = root / "wire.jsonl"
+        permission_metadata = options.pop("permission_metadata", "")
         adapter = CodexAppServerAdapter(
             root,
             state_path=root / "thread.json",
-            command=[sys.executable, "-u", str(script), str(log)],
+            command=[sys.executable, "-u", str(script), str(log), permission_metadata],
             env_overrides={
                 "SCENE_FEEDBACK_PORT": "19876",
                 "SCENE_FEEDBACK_DATA_DIR": str(root / "isolated-data"),
@@ -90,6 +102,7 @@ class AppServerAdapterTests(unittest.TestCase):
             verify_version=False,
             on_event=events.append,
             request_timeout=2,
+            **options,
         )
         return adapter, log
 
@@ -148,6 +161,65 @@ class AppServerAdapterTests(unittest.TestCase):
                 self.assertEqual([frame for frame in after if frame.get("id") == 900][0]["result"], {"decision": "decline"})
             finally:
                 adapter.close()
+
+    def test_selected_permissions_survive_process_restart_and_later_turns(self) -> None:
+        for sandbox, approval, effective in (
+            ("danger-full-access", "never", {"type": "dangerFullAccess"}),
+            ("workspace-write", "on-request", {"type": "workspaceWrite", "networkAccess": True}),
+            ("read-only", "on-request", {"type": "readOnly"}),
+        ):
+            with self.subTest(sandbox=sandbox), tempfile.TemporaryDirectory() as directory:
+                for round_number in (1, 2):
+                    adapter, log = self.fixture(directory, [], sandbox=sandbox, approval_policy=approval)
+                    try:
+                        self.assertEqual(adapter.start(), "thread-test")
+                        adapter.start_turn(f"round {round_number}", message_id=f"feedback-{round_number}")
+                        until(lambda: adapter.status()["turn_state"] == "idle")
+                    finally:
+                        adapter.close()
+                frames = [json.loads(line) for line in log.read_text().splitlines()]
+                starts = [item for item in frames if item.get("method") in {"thread/start", "thread/resume"}]
+                self.assertEqual([item["method"] for item in starts], ["thread/start", "thread/resume"])
+                for frame in starts:
+                    self.assertEqual(frame["params"]["sandbox"], sandbox)
+                    self.assertEqual(frame["params"]["approvalPolicy"], approval)
+                turns = [item for item in frames if item.get("method") == "turn/start"]
+                self.assertEqual(len(turns), 2)
+                for frame in turns:
+                    self.assertEqual(frame["params"]["sandboxPolicy"], effective)
+                    self.assertEqual(frame["params"]["approvalPolicy"], approval)
+
+    def test_effective_read_only_override_is_rejected_without_losing_created_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            for attempt in range(2):
+                adapter, log = self.fixture(directory, [], sandbox="danger-full-access",
+                                            approval_policy="never", permission_metadata="read-only")
+                try:
+                    with self.assertRaisesRegex(AppServerError, "configured sandbox permissions"):
+                        adapter.start_turn("must not be delivered")
+                    self.assertEqual(json.loads((Path(directory) / "thread.json").read_text())["thread_id"], "thread-test")
+                finally:
+                    adapter.close()
+            frames = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([frame["method"] for frame in frames if frame.get("method") in {"thread/start", "thread/resume"}],
+                             ["thread/start", "thread/resume"])
+            self.assertFalse(any(frame.get("method") == "turn/start" for frame in frames))
+
+    def test_explicit_network_and_external_policy_mismatches_are_rejected(self) -> None:
+        for mode, sandbox, approval, error in (
+            ("workspace-no-network", "workspace-write", "on-request", "workspace network access"),
+            ("external", "danger-full-access", "never", "sandbox permissions"),
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                adapter, log = self.fixture(directory, [], sandbox=sandbox, approval_policy=approval,
+                                            permission_metadata=mode)
+                try:
+                    with self.assertRaisesRegex(AppServerError, error):
+                        adapter.start_turn("must not be delivered")
+                    frames = [json.loads(line) for line in log.read_text().splitlines()]
+                    self.assertFalse(any(frame.get("method") == "turn/start" for frame in frames))
+                finally:
+                    adapter.close()
 
     def test_missing_empty_thread_is_recorded_and_recreated_only_before_a_turn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

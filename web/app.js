@@ -10,7 +10,10 @@ import { assignAnnotationNames } from './annotation-names.js';
 import { drawAnnotationName, hitsAnnotationName } from './annotation-labels.js';
 import { createFrameImageCache } from './frame-image-cache.js';
 import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
-import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, drawPoseSkeleton, POSE_COLORS } from './human-pose.js';
+import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, poseEvidenceLabel, drawPoseSkeleton, POSE_COLORS,
+  handJointIndices, handJointLabel, poseEditToken, validPoseEdit, collectPoseEdits, correctedPoseFrame } from './human-pose.js';
+import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
+import { createPromptMentions } from './prompt-mentions.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -32,6 +35,10 @@ const circled = ['','①','②','③','④','⑤','⑥','⑦','⑧','⑨'];
 const annotationFontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
 const ui = {
   sceneName:id('scene-name'), projectsButton:id('projects-dialog-button'), projectsDialog:id('projects-dialog'),
+  taskButton:id('task-dialog-button'), tasksDialog:id('tasks-dialog'),
+  directTaskHelp:id('direct-task-help'), eventTaskHelp:id('event-task-help'),
+  directDeliveryStatusHelp:id('direct-delivery-status-help'), eventDeliveryStatusHelp:id('event-delivery-status-help'),
+  directDeliveryHelp:id('direct-delivery-help'), eventDeliveryHelp:id('event-delivery-help'),
   projectsList:id('project-list'), projectsStatus:id('project-list-status'), refreshProjects:id('refresh-projects'),
   createProjectPanel:id('create-project-panel'), createProjectForm:id('create-project-form'),
   projectName:id('project-name'), projectModel:id('project-model'), projectEffort:id('project-effort'),
@@ -40,10 +47,13 @@ const ui = {
   viewport:id('viewport'), sceneStage:id('scene-stage'), sceneCanvas:id('scene-annotations'),
   referenceStage:id('reference-stage'), referenceMedia:id('reference-media'),
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
-  humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'), humanRuntime:id('human-pose-runtime'),
-  humanRun:id('human-pose-run'), humanProgressWrap:id('human-pose-progress-wrap'),
-  humanProgress:id('human-pose-progress'), humanProgressLabel:id('human-pose-progress-label'),
+  humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'),
   humanStatus:id('human-pose-status'), humanJobs:id('human-pose-jobs'),
+  humanLatest:id('human-pose-latest'), humanHideAll:id('human-pose-hide-all'),
+  poseEditPanel:id('pose-edit-panel'), poseEditSource:id('pose-edit-source'), poseEditHand:id('pose-edit-hand'),
+  poseEditJoint:id('pose-edit-joint'), poseEditVisibility:id('pose-edit-visibility'), poseEditHint:id('pose-edit-hint'),
+  poseEditReference:id('pose-edit-reference'), poseEditDownload:id('pose-edit-download'), poseEditFinish:id('pose-edit-finish'),
+  poseEditReset:id('pose-edit-reset-joint'),
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
@@ -72,10 +82,16 @@ const ui = {
   confirmClear:id('confirm-clear-annotations'), cancelClear:id('cancel-clear-annotations'),
   referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
+  mentionMenu:id('prompt-mentions'), mentionList:id('prompt-mention-list'), mentionStatus:id('prompt-mention-status'),
+  dragReference:id('drag-reference-image'), dragScene:id('drag-scene-image'),
+  imageRefs:id('prompt-image-refs'), imagePreview:id('prompt-image-preview-dialog'),
+  imagePreviewTitle:id('prompt-image-preview-title'), imagePreviewImage:id('prompt-image-preview-image'),
+  imagePreviewToggle:id('prompt-image-preview-toggle'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
+  frame:id('frame-button'), resetView:id('reset-button'),
   savedSnapshot:id('saved-snapshot-button'), captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'), browse:id('browse-button'), snapshotButton:id('snapshot-button'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
@@ -89,7 +105,7 @@ const state = {
   projectModelSignature:null, projectEffortSignature:null, creatingProject:false, navigatingProject:false,
   pendingProjectCreate:null, projectCreationResult:null, projectCreationError:null,
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
-  browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
+  browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server', feedbackTransport:null, eventDelivery:null,
   boundThreadId:null, desktopAvailable:false, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
@@ -100,9 +116,11 @@ const state = {
   references:[], activeReferenceId:null, selectedId:null, selectedSceneNode:null,
   lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
+  imageRefs:[], draftImageSignature:null, restoredImageRefIds:[], imageReferencesSupported:false,
   poseRefs:[], humanJobs:[], humanDetails:new Map(), humanDetailLoads:new Set(), humanDetailErrors:new Map(),
-  humanConfigured:null, humanMessage:'', humanLoading:false, humanCreating:false,
-  humanPendingRequest:null, humanError:null, humanJobsSignature:null,
+  humanLoading:false, humanOverlayChoice:'latest',
+  poseEdits:[], poseEditor:null, poseEditDrag:null, poseCorrectionsSupported:false,
+  humanError:null, humanJobsSignature:null,
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
   annotations:[], annotationNameCounters:{}, selectedAnnotationId:null, mode:'select', groupId:'', drag:null, textPending:null,
@@ -125,6 +143,8 @@ const frameImages = {
 };
 
 let minimalLayout = null;
+let promptMentions = null;
+let mentionSceneCache = null;
 let workspaceControls = null;
 let annotationReferenceDrag = null;
 const annotationDragGhost = document.createElement('div');
@@ -132,6 +152,10 @@ annotationDragGhost.className = 'annotation-drag-ghost hidden';
 annotationDragGhost.setAttribute('aria-hidden', 'true');
 document.body.append(annotationDragGhost);
 const annotationHistory = createAnnotationHistory();
+const promptImageStore = createPromptImageStore(momentDatabase);
+const PROMPT_DRAG_MIME = 'application/x-scene-feedback-reference';
+let promptDrag = null;
+let imagePreviewReference = null;
 const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#eae9e3');
 threeScene.fog = new THREE.Fog('#eae9e3', 14, 36);
@@ -233,7 +257,10 @@ function saveDraft() {
       lastPickedDetailNode:state.lastPickedDetailNode,
       selectionLevel:state.selectionLevel,
       referencedSceneNodes:state.referencedSceneNodes,
-      poseRefs:state.poseRefs, humanPendingRequest:state.humanPendingRequest,
+      poseRefs:state.poseRefs,
+      poseEdits:state.poseEdits, poseEditor:state.poseEditor,
+      imageRefIds:state.imageRefs.map((item) => item.id),
+      humanOverlayChoice:state.humanOverlayChoice,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
@@ -249,6 +276,7 @@ function saveDraft() {
     }));
   } catch { /* A full or disabled local store should not block feedback. */ }
   saveMomentDraft();
+  saveImageReferenceDraft();
 }
 function restoreDraft() {
   try {
@@ -275,11 +303,12 @@ function restoreDraft() {
       ? draft.referencedSceneNodes.filter((node) => node && typeof node.parent_object_id === 'string' && Array.isArray(node.node_path))
       : [];
     state.poseRefs = Array.isArray(draft.poseRefs) ? draft.poseRefs.filter((item) => poseToken(item?.job_id,item?.reference_id)).slice(0,64) : [];
-    const poseRequest = draft.humanPendingRequest;
-    if (poseRequest?.session_id === state.sessionId && /^[0-9a-f]{32}$/i.test(poseRequest.request_id || '') &&
-        poseRequest.all_views === true) {
-      state.humanPendingRequest = poseRequest;
-    }
+    state.poseEdits = Array.isArray(draft.poseEdits) ? draft.poseEdits.filter(validPoseEdit).slice(0,8) : [];
+    state.poseEditor = draft.poseEditor && /^[0-9a-f]{32}$/.test(draft.poseEditor.jobId || '') && /^[0-9a-f]{32}$/.test(draft.poseEditor.referenceId || '')
+      ? {...draft.poseEditor,hand:draft.poseEditor.hand === 'right' ? 'right' : 'left',visibility:['visible','occluded','missing'].includes(draft.poseEditor.visibility) ? draft.poseEditor.visibility : 'visible'} : null;
+    state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,8) : [];
+    state.humanOverlayChoice = ['latest','hidden'].includes(draft.humanOverlayChoice) || /^[0-9a-f]{32}$/.test(draft.humanOverlayChoice || '')
+      ? draft.humanOverlayChoice : 'latest';
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
     state.restoredModelUrl = typeof draft.selectedModelUrl === 'string' ? draft.selectedModelUrl : null;
     state.activeReferenceId = typeof draft.activeReferenceId === 'string' ? draft.activeReferenceId : null;
@@ -383,7 +412,12 @@ function removeAnnotation(annotationId) {
   renderAnnotations(); drawOverlays(); saveDraft();
 }
 function setSession(session) {
-  if (state.sessionId !== session.session_id) { annotationHistory.clear(); state.annotationNameCounters = {}; state.selectedAnnotationId = null; }
+  if (state.sessionId !== session.session_id) {
+    annotationHistory.clear(); promptDrag = null;
+    state.annotationNameCounters = {}; state.selectedAnnotationId = null;
+    promptMentions?.close();
+    state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
+  }
   state.sessionId = session.session_id;
   restoreComparePreferences();
   state.sessionStatus = session.status || 'open';
@@ -423,6 +457,7 @@ async function ensureSession() {
   setSession(session);
   restoreDraft();
   await restoreMomentDraft();
+  await restoreImageReferenceDraft();
   setReferenceClip(session.reference_clip || null, {restore:true});
   setReferences(session.reference_images || []);
   renderSceneView();
@@ -430,14 +465,14 @@ async function ensureSession() {
   renderTimeline(); updateMode();
   renderWorkspace(workspace);
   await fetchEvents(true);
-  if (state.deliveryMode === 'external' && state.desktopAvailable) loadTargets().catch((error) => {
+  if (state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable) loadTargets().catch((error) => {
     ui.targetHelp.textContent = '无法读取任务列表：' + error.message;
   });
-  if (state.deliveryMode === 'external' && state.desktopAvailable) loadModels().catch(() => {
+  if (state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable) loadModels().catch(() => {
     /* The new-task form shows the connection error. */
   });
   loadProjects().catch(() => { /* The scene picker shows catalog errors. */ });
-  loadHumanPoses().catch(() => { /* The human tracking panel shows connection errors. */ });
+  loadHumanPoses().catch(() => { /* The result panel shows connection errors. */ });
 }
 
 function outboxKey() { return 'visual-outbox:' + state.sessionId; }
@@ -504,6 +539,19 @@ function setSubmitLabel(label) {
 function updateSubmitLabel() {
   updateAnnotationHistory();
   const status = state.agent?.status || 'disconnected';
+  if (state.feedbackTransport === 'mcp_events') {
+    setSubmitLabel(state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送' : '发送反馈');
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
+    ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
+    ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
+    ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
+      ? '会话已结束，标记仍可查看。'
+      : state.pendingSubmission ? '保存结果尚未确认；使用同一消息编号重试。'
+      : (state.eventDelivery?.subscriber_count || 0) > 0
+        ? '发送后由订阅插件接收事件；事件送达不代表模型已执行。'
+      : '反馈会先保存在工作台；插件订阅后可接收后续事件。';
+    return;
+  }
   if (state.deliveryMode === 'external') {
     const bound = !!state.boundThreadId;
     const label = state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送'
@@ -569,7 +617,6 @@ function updateProjectTitle() {
 function projectBusyReason({allowCreation=false}={}) {
   if (state.submitting) return '正在保存反馈，请稍后切换场景。';
   if (state.uploading) return '正在导入文件，请稍后切换场景。';
-  if (state.humanCreating) return '正在建立人体追踪，请稍后切换场景。';
   if (state.creatingTarget || state.switchingTarget) return '正在连接 Codex 任务，请稍后切换场景。';
   if (state.creatingProject && !allowCreation) return '正在创建场景，请等待创建结果。';
   if (state.navigatingProject) return '正在切换场景…';
@@ -616,10 +663,11 @@ function rememberCreatedProject(project, error=null) {
 }
 function renderProjectPicker() {
   updateProjectTitle();
+  ui.createProjectPanel.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
   if (!ui.projectsDialog.open) return;
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const busy = projectBusyReason();
-  const signature = JSON.stringify([projects, state.projectId, busy, state.loadingProjects]);
+  const signature = JSON.stringify([projects, state.projectId, busy, state.loadingProjects, state.feedbackTransport]);
   if (signature !== state.projectListSignature) {
     state.projectListSignature = signature;
     ui.projectsList.replaceChildren();
@@ -634,7 +682,7 @@ function renderProjectPicker() {
       heading.append(name, label);
       const detail = document.createElement('div'); detail.className = 'project-detail';
       detail.textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
-        (project.thread_id ? ' · 已连接 Codex 任务' : ' · 尚未连接任务');
+        (state.feedbackTransport === 'mcp_events' ? '' : project.thread_id ? ' · 已连接 Codex 任务' : ' · 尚未连接任务');
       button.append(heading, detail);
       if (project.creation_error) {
         const error = document.createElement('div'); error.className = 'project-detail project-error';
@@ -754,6 +802,7 @@ async function navigateProject(project, {allowCreation=false}={}) {
   pauseTimeline(); hideTextEditor(); state.drag = null;
   saveDraft();
   await saveMomentDraft.pending;
+  await promptImageStore.pending.catch(() => {});
   try {
     location.assign(url);
     if (state.projectCreationResult?.project_id === project.project_id) clearProjectRequest();
@@ -764,7 +813,7 @@ async function navigateProject(project, {allowCreation=false}={}) {
   }
 }
 async function createSceneProject() {
-  if (!state.workspaceReady || !state.desktopAvailable || projectBusyReason() || state.projectCreationResult) return;
+  if (state.feedbackTransport === 'mcp_events' || !state.workspaceReady || !state.desktopAvailable || projectBusyReason() || state.projectCreationResult) return;
   let request = state.pendingProjectCreate;
   if (!request) {
     const name = ui.projectName.value.trim();
@@ -803,7 +852,7 @@ function openProjectsDialog() {
   if (!ui.projectsDialog.open) ui.projectsDialog.showModal();
   ui.projectsButton.setAttribute('aria-expanded', 'true'); renderProjectPicker();
   loadProjects().catch(() => {});
-  loadModels({forProjects:true}).catch(() => {});
+  if (state.feedbackTransport !== 'mcp_events') loadModels({forProjects:true}).catch(() => {});
 }
 function renderCreateTarget() {
   const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
@@ -865,8 +914,8 @@ function renderCreateTarget() {
 }
 function renderTargetPicker() {
   minimalLayout?.refresh();
-  ui.targetPicker.classList.toggle('hidden', state.deliveryMode !== 'external' || !state.desktopAvailable);
-  if (state.deliveryMode !== 'external' || !state.desktopAvailable) return;
+  ui.targetPicker.classList.toggle('hidden', state.feedbackTransport === 'mcp_events' || state.deliveryMode !== 'external' || !state.desktopAvailable);
+  if (state.feedbackTransport === 'mcp_events' || state.deliveryMode !== 'external' || !state.desktopAvailable) return;
   const bound = state.boundThreadId;
   const selected = state.targets?.find((item) => item.thread_id === bound);
   ui.currentTarget.textContent = bound
@@ -924,7 +973,7 @@ function renderTargetPicker() {
   renderCreateTarget();
 }
 async function loadTargets() {
-  if (state.deliveryMode !== 'external' || !state.desktopAvailable || state.loadingTargets) return;
+  if (state.feedbackTransport === 'mcp_events' || state.deliveryMode !== 'external' || !state.desktopAvailable || state.loadingTargets) return;
   state.loadingTargets = true;
   renderTargetPicker();
   try {
@@ -940,7 +989,7 @@ async function loadTargets() {
   }
 }
 async function loadModels({forProjects=false}={}) {
-  if (!state.desktopAvailable || (!forProjects && state.deliveryMode !== 'external') || state.loadingModels) return;
+  if (state.feedbackTransport === 'mcp_events' || !state.desktopAvailable || (!forProjects && state.deliveryMode !== 'external') || state.loadingModels) return;
   state.loadingModels = true;
   renderTargetPicker();
   renderCreateProject();
@@ -961,7 +1010,7 @@ async function loadModels({forProjects=false}={}) {
   }
 }
 async function createTask() {
-  if (!state.desktopAvailable || !state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
+  if (state.feedbackTransport === 'mcp_events' || !state.desktopAvailable || !state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
   const oldThreadId = state.boundThreadId;
   const body = {model:state.modelChoice, permission_mode:ui.createPermissions.value};
   const title = ui.createTitle.value.trim();
@@ -997,7 +1046,7 @@ async function createTask() {
   }
 }
 async function switchTask(threadId) {
-  if (!state.desktopAvailable || !threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
+  if (state.feedbackTransport === 'mcp_events' || !state.desktopAvailable || !threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
   const target = state.targets?.find((item) => item.thread_id === threadId);
   if (targetIsBusy(target)) return;
   state.switchingTarget = true;
@@ -1016,18 +1065,37 @@ async function switchTask(threadId) {
   }
 }
 function renderWorkspace(workspace) {
+  state.poseCorrectionsSupported = workspace.pose_corrections_supported === true;
+  state.imageReferencesSupported = workspace.image_references_supported === true;
+  renderPromptDragControls();
+  promptMentions?.refresh();
   state.networkError = null;
   state.projectId = workspace.project_id || state.projectId;
   if (typeof workspace.project_name === 'string' && workspace.project_name.trim()) state.projectName = workspace.project_name;
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
+  state.feedbackTransport = workspace.feedback_transport === 'mcp_events' ? 'mcp_events' : null;
+  state.eventDelivery = state.feedbackTransport === 'mcp_events' && workspace.event_delivery?.session_id === workspace.session_id
+    ? workspace.event_delivery : null;
   state.desktopAvailable = workspace.desktop_available ?? !!workspace.thread_id;
-  const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
+  const nextThreadId = state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
+  ui.taskButton.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  ui.directTaskHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  ui.eventTaskHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
+  ui.directDeliveryStatusHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  ui.eventDeliveryStatusHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
+  ui.directDeliveryHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  ui.eventDeliveryHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
+  if (state.feedbackTransport === 'mcp_events' && ui.tasksDialog.open) ui.tasksDialog.close();
   renderProjectPicker();
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
   state.approvals = Array.isArray(workspace.approvals) ? workspace.approvals : [];
+  if (state.feedbackTransport === 'mcp_events') {
+    renderEventWorkspace();
+    return;
+  }
   if (state.deliveryMode === 'external') {
     renderExternalWorkspace(workspace);
     return;
@@ -1053,6 +1121,77 @@ function renderWorkspace(workspace) {
   renderApprovals();
   updateSubmitLabel();
   minimalLayout?.refresh();
+}
+function renderEventWorkspace() {
+  const delivery=state.eventDelivery || {};
+  const subscribers=Number.isInteger(delivery.subscriber_count) ? delivery.subscriber_count : 0;
+  const pending=Number.isInteger(delivery.pending_count) ? delivery.pending_count : 0;
+  const waiting=Number.isInteger(delivery.waiting_count) ? delivery.waiting_count : 0;
+  const last=delivery.last_delivery || [...state.queue].reverse().find((item) => item.feedback_transport === 'mcp_events');
+  renderTargetPicker();
+  ui.feedbackIntro.textContent='图文反馈通过 MCP 事件投递给订阅插件；这里显示的是事件投递状态。';
+  if (last?.status === 'event_failed') {
+    ui.agentStatus.textContent=subscribers
+      ? '事件投递已失败；反馈仍保存在工作台，可通过 MCP 工具读取。'
+      : '事件投递已失败，当前没有活动订阅；反馈仍保存在工作台。';
+  } else if (!subscribers) {
+    ui.agentStatus.textContent=waiting
+      ? `等待插件订阅；${waiting} 条新反馈已保存，订阅后尝试投递。`
+      : pending ? `当前没有活动订阅；${pending} 条事件仍在待投递队列。`
+        : '当前没有活动订阅；反馈可先保存。';
+  } else if (last?.status === 'event_delivered') {
+    ui.agentStatus.textContent='事件已送达插件；模型是否继续处理由插件所在宿主决定。';
+  } else {
+    ui.agentStatus.textContent=pending
+      ? `插件已订阅；${pending} 条反馈正在等待事件投递。`
+      : '插件已订阅，可以接收视觉反馈。';
+  }
+  ui.agentStatus.className='agent-status' + (last?.status === 'event_failed' ? ' error' : '');
+  ui.pill.textContent=last?.status === 'event_failed' ? '投递失败'
+    : !subscribers ? waiting ? '等待插件订阅' : '未订阅'
+      : last?.status === 'event_delivered' ? '事件已送达' : '插件已订阅';
+  ui.pill.className='session-pill ' + (last?.status === 'event_failed' ? 'error' : !subscribers ? 'queued' : 'open');
+  ui.stop.classList.add('hidden');
+  ui.approvals.replaceChildren();
+  renderEventDelivery();
+  if (ui.conversation.firstElementChild?.classList.contains('muted')) {
+    ui.conversation.firstElementChild.textContent='视觉反馈由订阅插件接收；事件送达不表示 Codex 已开始或完成执行。';
+  }
+  updateSubmitLabel();
+  minimalLayout?.refresh();
+}
+function renderEventDelivery() {
+  ui.queue.replaceChildren();
+  const delivery=state.eventDelivery || {};
+  const last=delivery.last_delivery || [...state.queue].reverse().find((item) => item.feedback_transport === 'mcp_events');
+  if (!last) return;
+  const subscribers=Number.isInteger(delivery.subscriber_count) ? delivery.subscriber_count : 0;
+  const card=document.createElement('div'); card.className='queue-card';
+  const title=document.createElement('strong');
+  title.textContent=last.status === 'event_unsubscribed' && last.awaiting_subscription
+    ? '等待插件订阅'
+    : ({event_pending:subscribers ? '等待事件投递' : '事件待投递',
+      event_delivered:'事件已送达插件',event_failed:'事件投递失败',
+      event_unsubscribed:'当前无活动订阅'})[last.status] || '事件投递状态';
+  const body=document.createElement('div');
+  body.textContent=last.status === 'event_delivered'
+    ? '插件的接收端已确认收到事件；这不表示 Codex 已开始或完成处理。'
+    : last.status === 'event_failed'
+      ? '自动投递已经停止。反馈和图像仍保存在工作台；请检查插件连接，必要时让插件调用 workspace_get_feedback 读取这条反馈。'
+      : last.status === 'event_unsubscribed'
+        ? last.awaiting_subscription
+          ? '反馈已保存，尚未分配订阅。插件订阅后将尝试投递；也可通过 workspace_get_feedback 读取。'
+          : '此前订阅已结束或取消，事件不会自动重新投递。反馈仍保存在工作台，可通过 workspace_get_feedback 读取。'
+        : subscribers ? '反馈已保存，等待订阅插件接收事件。'
+          : '反馈已保存，当前没有活动订阅。';
+  card.append(title,body);
+  if (last.error) {
+    const error=document.createElement('div'); error.className='queue-warning';
+    error.textContent='最近一次原因：' + String(last.error).slice(0,240); card.append(error);
+  }
+  const counts=document.createElement('div'); counts.className='queue-target';
+  counts.textContent=`已送达 ${delivery.delivered_count || 0} · 待订阅 ${delivery.waiting_count || 0} · 待投递 ${delivery.pending_count || 0} · 失败 ${delivery.failed_count || 0}`;
+  card.append(counts); ui.queue.append(card);
 }
 function renderExternalWorkspace(workspace) {
   const bound = !!state.boundThreadId;
@@ -1665,6 +1804,20 @@ async function fetchEvents(initial=false) {
     state.seenEventIds.add(event.id);
     const payload = event.payload || {};
     const message = payload.text || payload.message || payload.summary || payload.prompt;
+    if (state.feedbackTransport === 'mcp_events') {
+      if (['feedback_queued','feedback_submitted','external_feedback_submitted','feedback_event_submitted'].includes(event.type)) {
+        appendConversation('user',feedbackEventText(payload),event.at);
+      } else if (['feedback_event_delivered','event_feedback_delivered'].includes(event.type)) {
+        appendConversation('status','视觉反馈事件已送达订阅插件；模型处理状态请在插件所在宿主查看。',event.at);
+      } else if (['feedback_event_failed','event_feedback_failed'].includes(event.type)) {
+        appendConversation('error','视觉反馈事件投递失败；反馈仍保存在工作台。',event.at);
+      } else if (event.type === 'scene_published') {
+        appendConversation('status',message || '新场景已发布。',event.at);
+      } else if (event.type === 'feedback_requested' || event.type === 'external_feedback_requested') {
+        appendConversation('status',message || '订阅插件请求视觉反馈。',event.at);
+      }
+      continue;
+    }
     if (state.deliveryMode === 'external' && !state.boundThreadId) {
       if (event.type === 'feedback_queued' || event.type === 'external_feedback_submitted' || event.type === 'feedback_submitted') {
         appendConversation('user', feedbackEventText(payload), event.at);
@@ -1788,7 +1941,7 @@ function nodeReference(objectId, hitObject, level='part') {
     if (chosen?.parent !== modelRoot) return null;
   } else {
     // Use the named hit node for a detailed part, skipping unnamed loader meshes.
-    while (chosen !== modelRoot && !chosen.name?.trim()) chosen = chosen.parent;
+    while (chosen !== modelRoot && !chosen.name?.trim() && !chosen.userData?.semantic_id && !chosen.userData?.stable_id) chosen = chosen.parent;
     if (chosen === modelRoot) chosen = hitObject;
   }
   const path = [];
@@ -1958,6 +2111,8 @@ function renderSelection() {
       ? (state.selectedSceneNode.node_name || '子节点 ' + state.selectedSceneNode.node_path.join('/'))
       : '';
     name.textContent = (item.name || item.id) + (nodeLabel ? ' / ' + nodeLabel : '');
+    name.title = '拖到提示中引用选中的物品或部件';
+    bindPromptDrag(name,selectedPromptReference,'selection');
     const objectId = document.createElement('div');
     objectId.className = 'selected-id';
     objectId.textContent = item.id + (state.selectedSceneNode ? ' · 节点 ' + (state.selectedSceneNode.node_path.join('/') || '根') : '');
@@ -1985,6 +2140,7 @@ function renderSelection() {
     ui.clearSelection.classList.add('hidden');
   }
   renderObjectList();
+  ui.frame.disabled = !editable() || !state.selectedId;
 }
 function renderObjectList() {
   ui.objectList.replaceChildren();
@@ -2003,6 +2159,8 @@ function renderObjectList() {
     button.type = 'button';
     button.className = 'object-item' + (state.selectedId === item.id ? ' active' : '');
     button.dataset.objectId = item.id;
+    button.title = '点选物体，或拖到提示中引用';
+    bindPromptDrag(button,() => ({kind:'object',objectId:item.id,label:item.name || item.id}),'object');
     const swatch = document.createElement('span');
     swatch.className = 'object-color';
     swatch.style.backgroundColor = item.color || '#94b5bf';
@@ -2186,6 +2344,7 @@ function renderSceneSnapshots() {
   workspaceControls?.refresh();
 }
 function updateSnapshotGeometry() {
+  renderPromptDragControls();
   if (!state.snapshot) return;
   // Size a new screenshot immediately. Its image can still be decoding when
   // the user's first drag starts, or the previous image can have another aspect.
@@ -2496,9 +2655,33 @@ function installTimelineImages(image, overlay) {
   ui.compareImage.replaceWith(overlay); ui.compareImage = overlay;
   renderCompareControls();
 }
-function humanJobName(job) {
+function humanJobNumber(job) {
   const ordered = [...state.humanJobs].sort((a,b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || a.job_id.localeCompare(b.job_id));
-  return '人体' + (Math.max(0, ordered.findIndex((item) => item.job_id === job.job_id)) + 1);
+  return Math.max(0, ordered.findIndex((item) => item.job_id === job.job_id)) + 1;
+}
+function humanJobName(job) { return '人体结果' + humanJobNumber(job); }
+function humanOverlayJob() {
+  if (state.humanOverlayChoice === 'hidden') return null;
+  const jobs=state.humanJobs.filter((job) => job.status === 'completed' && humanJobContainsCurrentReference(job));
+  if (state.humanOverlayChoice !== 'latest') return jobs.find((job) => job.job_id === state.humanOverlayChoice) || null;
+  const observations=jobs.filter((job) => job.evidence_kind !== 'projected_3d');
+  return [...(observations.length ? observations : jobs)].sort((a,b) =>
+    String(b.finished_at || b.created_at || '').localeCompare(String(a.finished_at || a.created_at || '')) ||
+    String(b.created_at || '').localeCompare(String(a.created_at || '')) || b.job_id.localeCompare(a.job_id))[0] || null;
+}
+function setHumanOverlayChoice(choice) {
+  if (!['latest','hidden'].includes(choice) && !/^[0-9a-f]{32}$/.test(choice || '')) return;
+  state.humanOverlayChoice=choice;
+  renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
+  if (state.playing && state.sessionId) {
+    // Playback keeps its visual draft fixed; this display preference can still
+    // be saved without replacing the stored frame, camera or annotations.
+    try {
+      const draft=JSON.parse(localStorage.getItem(storageKey()) || '{}');
+      draft.humanOverlayChoice=choice;
+      localStorage.setItem(storageKey(),JSON.stringify(draft));
+    } catch { /* A display preference should not block playback. */ }
+  }
 }
 function humanAutomaticJob(job) { return job.automatic === true || job.all_views === true; }
 function humanPosePageOffset(job, referenceId) {
@@ -2528,33 +2711,14 @@ function humanCurrentFrame(job) {
   return poseFrameForReference(detail, ref?.id, clipReference() ? referenceView()?.clip_id : null, state.time);
 }
 function renderHumanPosePanel() {
-  const hasDynamicSources=!!state.referenceClip && referenceViews().some((view) => view.frames?.length);
-  const hasStaticSources=!state.referenceClip && state.references.length > 0;
-  const active=state.humanJobs.find((job) => ['queued','running'].includes(job.status));
-  const ready=hasDynamicSources || hasStaticSources;
-  ui.humanRun.disabled=!state.workspaceReady || state.humanConfigured !== true || !editable() ||
-    state.humanCreating || !!active || (!state.humanPendingRequest && !ready);
-  ui.humanRun.textContent=state.humanCreating ? '正在启动…' : active ? '追踪中…'
-    : state.humanPendingRequest ? '重试追踪' : '人体追踪';
-  ui.humanRun.title=hasDynamicSources ? '一键追踪全部机位与全部已导入帧'
-    : '一键追踪全部静态参考图';
-  ui.humanRuntime.textContent=state.humanConfigured === false ? state.humanMessage || '人体追踪服务不可用。'
-    : state.humanConfigured === true ? '' : '正在连接人体追踪…';
-  ui.humanRuntime.classList.toggle('hidden',state.humanConfigured === true);
-  ui.humanProgressWrap.classList.toggle('hidden',!active);
-  ui.humanPanel.querySelector('summary').textContent=active && active.total_frames
-    ? '进度 ' + Math.floor((active.completed_frames || 0)/active.total_frames*100) + '%'
-    : '结果';
-  if (active) {
-    const done=Math.max(0,active.completed_frames || 0), total=Math.max(1,active.total_frames || 1);
-    ui.humanProgress.max=total; ui.humanProgress.value=Math.min(done,total);
-    ui.humanProgressLabel.textContent=active.status === 'queued'
-      ? `等待运行 · ${active.total_frames || 0} 帧`
-      : `已处理 ${done} / ${active.total_frames || 0} 帧 · ${Math.floor(done/total*100)}%`;
-  }
-  ui.humanStatus.textContent=state.humanError || (state.humanPendingRequest
-    ? '上次启动结果未确认；再次点击会沿用同一次请求。'
-    : !ready ? '请先导入参考图片或机位视频。' : '');
+  renderPoseEditor();
+  const jobs=state.humanJobs.filter((job) => job.status === 'completed');
+  ui.humanPanel.classList.toggle('hidden',!jobs.length);
+  ui.humanLatest.setAttribute('aria-pressed',String(state.humanOverlayChoice === 'latest'));
+  ui.humanHideAll.setAttribute('aria-pressed',String(state.humanOverlayChoice === 'hidden'));
+  const overlayJob=humanOverlayJob();
+  ui.humanStatus.textContent=state.humanError || '';
+  ui.humanStatus.classList.toggle('hidden',!state.humanError);
   for (const job of state.humanJobs) {
     if (job.status === 'completed' && humanJobContainsCurrentReference(job) && !humanCurrentFrame(job)) {
       const referenceId=humanAutomaticJob(job) ? activeReference()?.id : null;
@@ -2565,29 +2729,27 @@ function renderHumanPosePanel() {
       }
     }
   }
-  if (!ui.humanPanel.open) return;
-  const jobs=state.humanJobs.filter((job) => !['queued','running'].includes(job.status));
-  const jobsSignature=JSON.stringify([jobs,state.poseRefs,editable(),
+  const jobsSignature=JSON.stringify([jobs,state.poseRefs,state.poseEdits,state.poseCorrectionsSupported,editable(),state.humanOverlayChoice,overlayJob?.job_id,
     jobs.map((job) => [job.job_id,humanCurrentFrame(job)?.reference_id,
       state.humanDetailLoads.has(job.job_id),state.humanDetailErrors.get(job.job_id),
       state.humanDetailLoads.has(humanPoseLoadKey(job,activeReference()?.id)),
       state.humanDetailErrors.get(humanPoseLoadKey(job,activeReference()?.id))])]);
   if (jobsSignature === state.humanJobsSignature) return;
   state.humanJobsSignature=jobsSignature; ui.humanJobs.replaceChildren();
-  if (!jobs.length) {
-    const empty=document.createElement('p'); empty.className='muted';
-    empty.textContent=active ? '追踪完成后可在这里引用或下载结果。' : '完成后可查看、引用或下载结果。';
-    ui.humanJobs.append(empty);
-  }
   for (const job of [...jobs].reverse()) {
     const row=document.createElement('div'); row.className='human-pose-job';
     const heading=document.createElement('div'); heading.className='human-pose-job-heading';
     const name=document.createElement('strong'); name.textContent=humanJobName(job);
-    const status=document.createElement('span'); status.textContent=({completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'})[job.status] || job.status;
+    const status=document.createElement('span'); status.textContent=({awaiting_import:'等待外部结果',completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'})[job.status] || job.status;
     heading.append(name,status); row.append(heading);
     const source=document.createElement('small'); source.textContent=job.multi_view
       ? `${job.source_kind === 'static_references' ? '参考图' : '多机位'} · ${(Array.isArray(job.views) ? job.views : []).map((item) => item.view_name || referenceView(item.view_id)?.name || item.view_id).join('、')}`
       : job.view_name || job.reference_name || (humanAutomaticJob(job) ? '全部参考图' : '参考图'); row.append(source);
+    if (job.status === 'completed') {
+      const origin=document.createElement('small'); origin.textContent=poseEvidenceLabel(job) + (job.keypoint_profile ? ' · ' + job.keypoint_profile : '');
+      if (job.evidence_kind === 'projected_3d') origin.title='从三维人体投影得到，用来检查重建；不表示图像里独立追踪到的关键点。';
+      row.append(origin);
+    }
     const frame=humanCurrentFrame(job), ref=activeReference();
     if (frame) {
       const detail=document.createElement('small'); detail.textContent=(frame.reference_id !== ref?.id ? '近邻采样：' : '来源：') +
@@ -2597,9 +2759,20 @@ function renderHumanPosePanel() {
     if (error) { const detail=document.createElement('small'); detail.className='human-pose-error'; detail.textContent=String(error); row.append(detail); }
     if (job.status === 'completed') {
       const actions=document.createElement('div'); actions.className='human-pose-job-actions';
+      const selected=state.humanOverlayChoice === job.job_id || state.humanOverlayChoice === 'latest' && overlayJob?.job_id === job.job_id;
+      const display=document.createElement('button'); display.type='button'; display.className='compact-button human-pose-display';
+      display.textContent=selected ? '隐藏' : '显示'; display.setAttribute('aria-pressed',String(selected));
+      display.title=selected ? '隐藏参考图上的人体结果' : '在参考图上只显示这份人体结果';
+      display.addEventListener('click',() => setHumanOverlayChoice(selected ? 'hidden' : job.job_id)); actions.append(display);
       const cite=document.createElement('button'); cite.type='button'; cite.className='compact-button emphasis-button'; cite.textContent='引用人体';
-      cite.disabled=!editable() || !frame; cite.title=frame ? '引用当前来源帧的关键点和骨架图' : '切到追踪过的机位和帧后引用';
+      cite.disabled=!editable() || !frame; cite.title=frame ? '引用当前来源帧的' + poseEvidenceLabel(job) + '和骨架图' : '切到有结果的机位和帧后引用';
       cite.addEventListener('mousedown',event => event.preventDefault()); cite.addEventListener('click',() => insertHumanPoseReference(job,frame)); actions.append(cite);
+      const names=state.humanDetails.get(job.job_id)?.keypoint_names || job.keypoint_names;
+      if (state.poseCorrectionsSupported && handJointIndices(names,'left').length === 21 && handJointIndices(names,'right').length === 21) {
+        const edit=document.createElement('button'); edit.type='button'; edit.className='compact-button human-pose-edit-action';
+        edit.textContent='修正关键点'; edit.disabled=!editable() || frame?.reference_id !== activeReference()?.id || !frame?.image_sha256;
+        edit.addEventListener('click',() => beginPoseEdit(job,frame)); actions.append(edit);
+      }
       if (!frame) {
         const viewButton=document.createElement('button'); viewButton.type='button'; viewButton.className='compact-button'; viewButton.textContent='查看结果';
         viewButton.disabled=!editable() || state.humanDetailLoads.has(job.job_id);
@@ -2608,6 +2781,15 @@ function renderHumanPosePanel() {
       const download=document.createElement('button'); download.type='button'; download.className='compact-button'; download.textContent='下载 JSON';
       download.addEventListener('click',() => downloadHumanPose(job)); actions.append(download);
       row.append(actions);
+      for (const sample of state.poseEdits.filter((item) => item.job_id === job.job_id)) {
+        const draft=document.createElement('div'); draft.className='human-pose-edit-draft';
+        draft.append(document.createTextNode((sample.label || '手部修正') + ' · ' + sample.edits.length + ' 点 '));
+        const open=document.createElement('button'); open.type='button'; open.className='text-button'; open.textContent='回看';
+        open.disabled=!editable(); open.addEventListener('click',() => revisitPoseEdit(sample));
+        const cite=document.createElement('button'); cite.type='button'; cite.className='text-button'; cite.textContent='引用修正';
+        cite.disabled=!editable() || !state.poseCorrectionsSupported; cite.addEventListener('click',() => referencePoseEdit(sample));
+        draft.append(open,cite); row.append(draft);
+      }
     }
     ui.humanJobs.append(row);
   }
@@ -2625,15 +2807,221 @@ function drawHumanPoseOverlay() {
   const surface=prepareCanvas(ui.humanCanvas);
   if (!surface) return;
   const ref=activeReference();
-  if (referencePixelsReady()) {
-    for (const job of state.humanJobs) {
-      const frame=humanCurrentFrame(job), detail=state.humanDetails.get(job.job_id);
-      if (!frame) continue;
-      const color=POSE_COLORS[(Number(humanJobName(job).slice(2))-1)%POSE_COLORS.length];
-      drawPoseSkeleton(surface.context,frame,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
-        edges:detail.skeleton_edges, label:humanJobName(job) + (frame.reference_id !== ref?.id ? ' · 近邻 ' : ' · ') + poseFrameLabel(frame,job.reference_name)});
+  const job=humanOverlayJob();
+  if (!referencePixelsReady() || !job) return;
+  const frame=humanCurrentFrame(job), detail=state.humanDetails.get(job.job_id);
+  // Historical runs can cover the same source image. Paint only the chosen
+  // result, and keep the layer empty until that exact image's frame is loaded.
+  if (!frame || frame.reference_id !== ref?.id) return;
+  const color=POSE_COLORS[(humanJobNumber(job)-1)%POSE_COLORS.length];
+  const sample=state.poseEdits.find((item) => item.job_id === job.job_id && item.reference_id === frame.reference_id);
+  const corrected=correctedPoseFrame(frame,sample);
+  drawPoseSkeleton(surface.context,corrected,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
+    edges:detail.skeleton_edges, label:humanJobName(job) + ' · ' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name)});
+  drawPoseEditHandles(surface.context,corrected,surface.width,surface.height);
+}
+function poseEditorContext() {
+  const editor=state.poseEditor;
+  if (!editor) return null;
+  const job=state.humanJobs.find((item) => item.job_id === editor.jobId);
+  const detail=state.humanDetails.get(editor.jobId);
+  const frame=detail?.frames?.find((item) => item.reference_id === editor.referenceId);
+  const sample=state.poseEdits.find((item) => item.job_id === editor.jobId && item.reference_id === editor.referenceId);
+  return {editor,job,detail,frame,sample,names:detail?.keypoint_names || job?.keypoint_names || []};
+}
+function renderPoseEditor() {
+  const context=poseEditorContext();
+  ui.poseEditPanel.classList.toggle('hidden',!context || !state.poseCorrectionsSupported);
+  const active=!!context?.frame && context.editor.referenceId === activeReference()?.id && referencePixelsReady() &&
+    editable() && state.poseCorrectionsSupported && !state.seeking;
+  ui.humanCanvas.classList.toggle('pose-editing',active);
+  if (!context) return;
+  const {editor,frame,sample,names}=context;
+  const indices=handJointIndices(names,editor.hand);
+  const optionSignature=editor.hand + ':' + indices.map((index) => names[index]).join(',');
+  if (ui.poseEditJoint.dataset.options !== optionSignature) {
+    ui.poseEditJoint.replaceChildren();
+    for (const index of indices) {
+      const option=document.createElement('option'); option.value=names[index]; option.textContent=handJointLabel(names[index]);
+      ui.poseEditJoint.append(option);
+    }
+    ui.poseEditJoint.dataset.options=optionSignature;
+  }
+  if (!indices.some((index) => names[index] === editor.jointName)) editor.jointName=names[indices[0]];
+  ui.poseEditHand.value=editor.hand; ui.poseEditJoint.value=editor.jointName || '';
+  ui.poseEditVisibility.value=editor.visibility;
+  ui.poseEditSource.textContent=frame ? poseFrameLabel(frame) : sample?.label || '加载原结果…';
+  const original=frame?.keypoints?.find((point) => point.name === editor.jointName);
+  const edit=sample?.edits.find((point) => point.name === editor.jointName);
+  const confidence=Number.isFinite(original?.score) ? ' · 原评分 ' + original.score.toFixed(2) +
+    (original.score < (context.job?.confidence_threshold ?? .3) ? '（低置信）' : '') : '';
+  ui.poseEditHint.textContent=!active ? '这份修正固定在原参考帧；切回该机位和帧后继续编辑。'
+    : handJointLabel(editor.jointName) + confidence + (edit ? ' · 已人工修正' : ' · 原结果未修改') +
+      '。点击定位或拖动关节；可缩放，空格拖动平移。遮挡/缺失不作为可见点。';
+  for (const control of [ui.poseEditHand,ui.poseEditJoint,ui.poseEditVisibility]) control.disabled=!active;
+  ui.poseEditReset.disabled=!active || !edit;
+  ui.poseEditReference.disabled=!editable() || !sample?.edits.length || !state.poseCorrectionsSupported;
+  ui.poseEditDownload.disabled=!sample?.edits.length || !state.poseCorrectionsSupported;
+}
+function drawPoseEditHandles(context,frame,width,height) {
+  const current=poseEditorContext();
+  if (!current || current.editor.referenceId !== activeReference()?.id || frame.reference_id !== current.editor.referenceId ||
+      humanOverlayJob()?.job_id !== current.editor.jobId || !state.poseCorrectionsSupported) return;
+  context.save();
+  for (const index of handJointIndices(current.names,current.editor.hand)) {
+    const point=frame.keypoints[index];
+    if (!point || point.in_frame === false && !(point.manual_visibility === 'occluded' && point.manual_position) || point.manual_visibility === 'missing' ||
+        point.manual_visibility === 'occluded' && !point.manual_position) continue;
+    const x=point.x*width,y=point.y*height, selected=point.name === current.editor.jointName;
+    context.strokeStyle=point.manual_source ? '#b65320' : point.score < (current.job.confidence_threshold ?? .3) ? '#77776f' :
+      current.editor.hand === 'left' ? '#b65320' : '#6856aa';
+    context.fillStyle=point.manual_visibility === 'visible' ? '#b65320' : '#f5f4ef';
+    context.lineWidth=selected ? 2.5 : 1.5;
+    context.beginPath(); context.arc(x,y,selected ? 7 : 4.5,0,Math.PI*2); context.fill(); context.stroke();
+    if (selected) {
+      context.font='12px ' + annotationFontFamily; context.fillStyle='#292925';
+      const label=handJointLabel(point.name),left=clamp(x+10,4,Math.max(4,width-context.measureText(label).width-4));
+      context.fillText(label,left,Math.max(15,y-10));
     }
   }
+  context.restore();
+}
+function beginPoseEdit(job,frame) {
+  if (!editable() || !state.poseCorrectionsSupported || frame?.reference_id !== activeReference()?.id || !frame?.image_sha256) return;
+  pauseTimeline(); setMode('select');
+  state.poseEditor={jobId:job.job_id,referenceId:frame.reference_id,hand:'left',jointName:null,visibility:'visible'};
+  setHumanOverlayChoice(job.job_id);
+  minimalLayout?.closeReferences(); drawOverlays(); saveDraft();
+  announce('在左图点选或拖动手部关节；只修改这张来源帧。');
+}
+function poseEditSample(context,{create=false}={}) {
+  if (context.sample) return context.sample;
+  if (!create) return null;
+  if (state.poseEdits.length >= 8) throw new Error('一条提示最多保留 8 帧关键点修正，请先发送或移除一份。');
+  const {frame,job}=context;
+  const sample={id:newId().replace(/-/g,''),job_id:job.job_id,reference_id:frame.reference_id,
+    image_sha256:frame.image_sha256,image_orientation:frame.image_orientation,keypoint_profile:job.keypoint_profile,
+    label:poseFrameLabel(frame),edits:[]};
+  state.poseEdits.push(sample); return sample;
+}
+function updatePoseJoint(visibility,position=null) {
+  const context=poseEditorContext();
+  if (!context?.frame || context.editor.referenceId !== activeReference()?.id || !editable() || !state.poseCorrectionsSupported) return null;
+  try {
+    const sample=poseEditSample(context,{create:true});
+    const edit={name:context.editor.jointName,visibility,...(visibility !== 'missing' && position ?
+      {x:Math.min(visibility === 'visible' ? 1-1e-7 : 1,position.x),y:Math.min(visibility === 'visible' ? 1-1e-7 : 1,position.y)} : {})};
+    const index=sample.edits.findIndex((item) => item.name === edit.name);
+    if (index < 0) sample.edits.push(edit); else sample.edits[index]=edit;
+    drawOverlays(); saveDraft(); return sample;
+  } catch (error) { announce(error.message,true); return null; }
+}
+function referencePoseEdit(sample,{focus=true}={}) {
+  if (!editable() || !sample?.edits.length || !state.poseCorrectionsSupported) return;
+  const token=poseEditToken(sample.id);
+  if (ui.note.value.includes(token)) { if (focus) { minimalLayout?.openChat(); ui.note.focus(); } return; }
+  insertNoteText('手部修正（' + sample.label + '） ' + token,{replaceSelection:false,focus});
+}
+async function downloadPoseEdit(sample) {
+  if (!sample?.edits.length || !state.poseCorrectionsSupported) return;
+  try {
+    const edits=collectPoseEdits(poseEditToken(sample.id),[sample]);
+    const result=await api('/api/workspace/pose/corrections/export',{method:'POST',body:{session_id:state.sessionId,pose_edits:edits}});
+    const correction=result.documents?.[0];
+    if (!correction || correction.correction_id !== sample.id) throw new Error('修正导出与当前来源不匹配。');
+    const url=URL.createObjectURL(new Blob([JSON.stringify(correction,null,2)],{type:'application/json'}));
+    const link=document.createElement('a'); link.href=url; link.download='pose-correction-' + sample.id + '.json'; document.body.append(link);
+    link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url),1000);
+  } catch (error) { announce('修正导出失败：' + error.message,true); }
+}
+async function revisitPoseEdit(sample) {
+  const job=state.humanJobs.find((item) => item.job_id === sample.job_id);
+  if (!job || !editable()) return;
+  const detail=await ensureHumanPoseDetail(job,{referenceId:sample.reference_id,retry:true});
+  const frame=detail?.frames.find((item) => item.reference_id === sample.reference_id);
+  if (!frame) return;
+  const view=referenceViews().find((item) => item.frames.some((ref) => ref.id === frame.reference_id));
+  if (view) await seekTimeline(frame.time_sec,{viewId:view.clip_id,preserveTime:true});
+  else if (state.references.some((ref) => ref.id === frame.reference_id)) {
+    pauseTimeline(); state.clipEnabled=false; state.activeReferenceId=frame.reference_id;
+    showActiveReference(); renderReferenceStrip();
+    if (referenceCamera(activeReference())) alignActiveReference(); else leaveReferenceCamera();
+  } else { announce('原参考帧已从当前场景移除，修正仍保留且可下载。',true); return; }
+  beginPoseEdit(job,frame);
+}
+function bindPoseEditEvents() {
+  ui.poseEditHand.addEventListener('change',() => {
+    if (!state.poseEditor) return;
+    state.poseEditor.hand=ui.poseEditHand.value; state.poseEditor.jointName=null; state.poseEditor.visibility='visible';
+    renderPoseEditor(); drawHumanPoseOverlay(); saveDraft();
+  });
+  ui.poseEditJoint.addEventListener('change',() => {
+    const context=poseEditorContext(); if (!context) return;
+    context.editor.jointName=ui.poseEditJoint.value;
+    context.editor.placeSelected=true;
+    context.editor.visibility=context.sample?.edits.find((point) => point.name === context.editor.jointName)?.visibility || 'visible';
+    renderPoseEditor(); drawHumanPoseOverlay(); saveDraft();
+  });
+  ui.poseEditVisibility.addEventListener('change',() => {
+    if (!state.poseEditor) return;
+    state.poseEditor.visibility=ui.poseEditVisibility.value;
+    if (state.poseEditor.visibility !== 'visible') {
+      const sample=updatePoseJoint(state.poseEditor.visibility);
+      if (sample) referencePoseEdit(sample,{focus:false});
+    }
+    renderPoseEditor(); saveDraft();
+  });
+  ui.poseEditReference.addEventListener('click',() => referencePoseEdit(poseEditorContext()?.sample));
+  ui.poseEditDownload.addEventListener('click',() => downloadPoseEdit(poseEditorContext()?.sample));
+  ui.poseEditFinish.addEventListener('click',() => { state.poseEditor=null; state.poseEditDrag=null; drawOverlays(); saveDraft(); });
+  ui.poseEditReset.addEventListener('click',() => {
+    const context=poseEditorContext(); if (!context?.sample || !editable()) return;
+    const sample=context.sample; sample.edits=sample.edits.filter((point) => point.name !== context.editor.jointName);
+    if (!sample.edits.length) {
+      state.poseEdits=state.poseEdits.filter((item) => item.id !== sample.id);
+      ui.note.value=ui.note.value.split(poseEditToken(sample.id)).join('');
+    }
+    context.editor.visibility='visible'; drawOverlays(); saveDraft();
+  });
+  ui.humanCanvas.addEventListener('pointerdown',(event) => {
+    const context=poseEditorContext();
+    if (!context?.frame || context.editor.referenceId !== activeReference()?.id || !editable() || !state.poseCorrectionsSupported ||
+        state.spacePan || state.seeking || event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    const point=pointFromPointer(event,ui.humanCanvas),rect=ui.humanCanvas.getBoundingClientRect();
+    const effective=correctedPoseFrame(context.frame,context.sample);
+    let closest=null,distance=12;
+    for (const index of handJointIndices(context.names,context.editor.hand)) {
+      const joint=effective.keypoints[index];
+      if (joint?.in_frame === false && !(joint.manual_visibility === 'occluded' && joint.manual_position) || joint?.manual_visibility === 'missing') continue;
+      const value=Math.hypot((joint.x-point.x)*rect.width,(joint.y-point.y)*rect.height);
+      if (value < distance) { distance=value; closest=joint; }
+    }
+    if (closest && !context.editor.placeSelected) {
+      context.editor.jointName=closest.name;
+      context.editor.visibility=closest.manual_visibility || 'visible';
+    }
+    context.editor.placeSelected=false;
+    if (context.editor.visibility === 'missing') { renderPoseEditor(); return; }
+    ui.humanCanvas.setPointerCapture(event.pointerId);
+    state.poseEditDrag={pointerId:event.pointerId,jobId:context.editor.jobId,referenceId:context.editor.referenceId};
+    updatePoseJoint(context.editor.visibility,point);
+  });
+  ui.humanCanvas.addEventListener('pointermove',(event) => {
+    const drag=state.poseEditDrag,context=poseEditorContext();
+    if (!drag || drag.pointerId !== event.pointerId || drag.referenceId !== activeReference()?.id || context?.editor.jobId !== drag.jobId) return;
+    event.preventDefault(); event.stopPropagation();
+    updatePoseJoint(context.editor.visibility,pointFromPointer(event,ui.humanCanvas));
+  });
+  const finish=(event) => {
+    if (state.poseEditDrag?.pointerId !== event.pointerId) return;
+    event.stopPropagation(); state.poseEditDrag=null;
+    const sample=poseEditorContext()?.sample;
+    if (sample) referencePoseEdit(sample,{focus:false});
+    saveDraft();
+  };
+  ui.humanCanvas.addEventListener('pointerup',finish);
+  ui.humanCanvas.addEventListener('pointercancel',finish);
 }
 async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=false}={}) {
   const cached=state.humanDetails.get(job.job_id);
@@ -2650,13 +3038,13 @@ async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=fa
       : '?frame_offset=' + pageOffset + '&max_frames=32'
       : '?frame_offset=0&max_frames=1' : '';
     let detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + query);
-    if (detail.session_id !== state.sessionId || detail.status !== 'completed' || !Array.isArray(detail.frames)) throw new Error('追踪结果与当前场景会话不匹配，请刷新重试。');
+    if (detail.session_id !== state.sessionId || detail.status !== 'completed' || !Array.isArray(detail.frames)) throw new Error('人体结果与当前场景会话不匹配，请刷新重试。');
     if (referenceId && !detail.frames.some((frame) => frame.reference_id === referenceId)) {
       // The reference set may have changed since this job was created. Ask the
       // archive for the immutable source ID before deciding the frame is gone.
       detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + '?reference_id=' + encodeURIComponent(referenceId));
     }
-    if (referenceId && !detail.frames.some((frame) => frame.reference_id === referenceId)) throw new Error('该帧没有人体追踪结果。');
+    if (referenceId && !detail.frames.some((frame) => frame.reference_id === referenceId)) throw new Error('该帧没有人体结果。');
     if (humanAutomaticJob(job)) {
       const latest=state.humanDetails.get(job.job_id);
       const retained=(latest?.frames || []).filter((frame) => !detail.frames.some((item) => item.reference_id === frame.reference_id));
@@ -2665,100 +3053,89 @@ async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=fa
     }
     state.humanDetails.set(job.job_id,detail); state.humanDetailErrors.delete(key); return detail;
   } catch (error) { state.humanDetailErrors.set(key,error.message); return null; }
-  finally { state.humanDetailLoads.delete(key); renderHumanPosePanel(); drawHumanPoseOverlay(); }
+  finally { state.humanDetailLoads.delete(key); renderHumanPosePanel(); drawHumanPoseOverlay(); promptMentions?.refresh(); }
 }
 async function loadHumanPoses() {
   if (!state.sessionId || state.humanLoading || state.navigatingProject) return;
   state.humanLoading=true;
   try {
     const result=await api('/api/workspace/pose?session_id=' + encodeURIComponent(state.sessionId));
-    state.humanConfigured=result.automatic_detection_configured === true;
-    state.humanMessage=result.automatic_detection_message || result.message || '';
     state.humanJobs=(Array.isArray(result.jobs) ? result.jobs : []).filter(job => job.session_id === state.sessionId && /^[0-9a-f]{32}$/.test(job.job_id || ''));
-    if (state.humanError?.startsWith('人体追踪连接失败：')) state.humanError=null;
-    if (state.humanPendingRequest && state.humanJobs.some(job => job.request_id === state.humanPendingRequest.request_id)) {
-      state.humanPendingRequest=null; state.humanError=null; saveDraft();
-    }
-  } catch (error) { state.humanError='人体追踪连接失败：' + error.message; throw error; }
+    if (state.humanError?.startsWith('人体结果连接失败：')) state.humanError=null;
+  } catch (error) { state.humanError='人体结果连接失败：' + error.message; throw error; }
   finally { state.humanLoading=false; renderHumanPosePanel(); drawHumanPoseOverlay(); }
 }
-async function startHumanPose() {
-  if (!editable() || state.humanCreating || state.humanConfigured !== true) return;
-  let body=state.humanPendingRequest;
-  if (!body) {
-    body={session_id:state.sessionId,request_id:newId().replace(/-/g,''),all_views:true};
-    state.humanPendingRequest=body; saveDraft();
-  }
-  state.humanCreating=true; state.humanError=null; ui.humanPanel.open=true; renderHumanPosePanel();
-  try {
-    const job=await api('/api/workspace/pose',{method:'POST',body});
-    if (!job.job_id || job.session_id !== state.sessionId) throw new Error('服务未返回当前场景的追踪任务');
-    state.humanJobs=[...state.humanJobs.filter(item => item.job_id !== job.job_id),job];
-    state.humanPendingRequest=null; saveDraft(); await loadHumanPoses().catch(() => {});
-  } catch (error) {
-    state.humanError='人体追踪未能建立：' + error.message;
-    if ([400,403,404,409,422,503].includes(error.status)) state.humanPendingRequest=null;
-    saveDraft();
-  } finally { state.humanCreating=false; renderHumanPosePanel(); drawHumanPoseOverlay(); }
-}
 function insertHumanPoseReference(job, frame) {
-  if (!editable() || !frame || job.session_id !== state.sessionId) return;
+  if (!editable() || !frame || job.session_id !== state.sessionId) return false;
   const ref={job_id:job.job_id,reference_id:frame.reference_id}, token=poseToken(ref.job_id,ref.reference_id);
-  if (!token) return;
+  if (!token) return false;
   const existing=state.poseRefs.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id);
   try {
     const cited=collectPoseReferences(ui.note.value,state.poseRefs);
     if (!cited.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id) && cited.length >= 8) {
-      announce('每轮最多引用 8 个人体结果。',true); return;
+      announce('每轮最多引用 8 个人体结果。',true); return false;
     }
-  } catch (error) { announce(error.message,true); return; }
-  if (insertNoteReference('@' + humanJobName(job) + '（' + poseFrameLabel(frame,job.reference_name) + '）',token)) {
+  } catch (error) { announce(error.message,true); return false; }
+  if (insertNoteReference('@' + humanJobName(job) + '（' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name) + '）',token)) {
     if (!existing) state.poseRefs.push(ref);
-    ui.humanPanel.open=false; saveDraft(); renderHumanPosePanel();
+    saveDraft(); renderHumanPosePanel();
+    return true;
   }
+  return false;
 }
 async function viewHumanPose(job) {
   const detail=await ensureHumanPoseDetail(job,{retry:true,first:true});
   const selectedView=job.multi_view && job.view_ids?.includes(referenceView()?.clip_id) ? referenceView()?.clip_id : job.view_ids?.[0];
   const frame=detail?.frames?.find((item) => item.view_id === selectedView) || detail?.frames?.[0];
   if (!frame || !editable()) return;
+  setHumanOverlayChoice(job.job_id);
+  setMode('select');
   if (job.source_kind === 'static_references' || !job.view_id && !job.multi_view) {
-    if (!state.references.some(ref => ref.id === frame.reference_id)) { announce('该人体追踪的原参考图已被移除。',true); return; }
+    if (!state.references.some(ref => ref.id === frame.reference_id)) { announce('该人体结果的原参考图已被移除。',true); return; }
     pauseTimeline(); state.clipEnabled=false; state.activeReferenceId=frame.reference_id;
     renderReferenceStrip(); showActiveReference();
     if (referenceCamera(activeReference())) alignActiveReference(); else leaveReferenceCamera();
   } else {
     const viewId=frame.view_id || job.view_id;
-    if (!referenceViews().some((view) => view.clip_id === viewId)) { announce('该人体追踪的原机位已不在当前片段。',true); return; }
+    if (!referenceViews().some((view) => view.clip_id === viewId)) { announce('该人体结果的原机位已不在当前片段。',true); return; }
     await seekTimeline(frame.time_sec,{viewId,preserveTime:true});
   }
-  ui.humanPanel.open=true; renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
+  minimalLayout?.closeReferences(); renderHumanPosePanel(); drawHumanPoseOverlay(); saveDraft();
 }
 async function downloadHumanPose(job) {
-  let detail;
+  let jsonText;
   try {
-    detail=await api('/api/workspace/pose/' + encodeURIComponent(job.job_id) + (humanAutomaticJob(job) ? '?download=1' : ''));
-    if (detail.session_id !== state.sessionId || detail.status !== 'completed' || !Array.isArray(detail.frames)) throw new Error('下载结果与当前场景会话不匹配');
+    const response=await fetch(resourceURL('/api/workspace/pose/' + encodeURIComponent(job.job_id) + (humanAutomaticJob(job) ? '?download=1' : '')));
+    jsonText=await response.text();
+    const detail=JSON.parse(jsonText);
+    if (!response.ok) throw new Error(detail.error || detail.detail || 'HTTP ' + response.status);
+    if (detail.job_id !== job.job_id || detail.session_id !== state.sessionId ||
+        (!job.imported_external && detail.status !== 'completed') || !Array.isArray(detail.frames)) {
+      throw new Error('下载结果与当前场景会话不匹配');
+    }
   } catch (error) { announce('人体结果未能下载：' + error.message,true); return; }
-  const blob=new Blob([JSON.stringify(detail,null,2)],{type:'application/json;charset=utf-8'});
+  // Preserve the server's numeric representation, including 0.0. Rewriting
+  // parsed JSON in JavaScript can change the immutable import digest.
+  const blob=new Blob([jsonText],{type:'application/json;charset=utf-8'});
   const url=URL.createObjectURL(blob), link=document.createElement('a');
   link.href=url; link.download=humanJobName(job) + '_' + job.job_id.slice(0,8) + '.json';
   document.body.append(link); link.click(); link.remove();
   setTimeout(() => URL.revokeObjectURL(url),1000);
 }
 function bindHumanPoseEvents() {
-  ui.humanPanel.addEventListener('toggle',() => {
-    if (ui.humanPanel.open) { renderHumanPosePanel(); loadHumanPoses().catch(() => {}); }
-    drawHumanPoseOverlay();
+  ui.humanLatest.addEventListener('click',() => setHumanOverlayChoice('latest'));
+  ui.humanHideAll.addEventListener('click',() => setHumanOverlayChoice('hidden'));
+  id('references-dialog-button').addEventListener('click',() => {
+    renderHumanPosePanel(); loadHumanPoses().catch(() => {});
   });
-  ui.humanRun.addEventListener('click',startHumanPose);
   setInterval(() => {
-    if (state.workspaceReady && !state.navigatingProject && (ui.humanPanel.open || state.humanJobs.some(job => ['queued','running'].includes(job.status)))) {
+    if (state.workspaceReady && !state.navigatingProject && !document.hidden) {
       loadHumanPoses().catch(() => {});
     }
-  },2000);
+  },5000);
 }
 function updateReferenceGeometry() {
+  renderPromptDragControls();
   const image = ui.referenceImage;
   const stage = ui.referenceStage;
   if (!image.naturalWidth || !image.naturalHeight || !stage.clientWidth || !stage.clientHeight) return;
@@ -3144,6 +3521,8 @@ function advanceTimeline(timestamp) {
   if (next >= timelineDuration() && !state.seeking) { pauseTimeline(); saveDraft(); }
 }
 function renderTimeline({moments=true}={}) {
+  renderPromptDragControls();
+  renderPoseEditor();
   const enabled = dynamicEnabled();
   ui.timeline.classList.toggle('hidden', !enabled);
   const duration = timelineDuration();
@@ -3339,6 +3718,26 @@ function momentDatabase() {
     request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
   });
 }
+function saveImageReferenceDraft() {
+  if (!state.sessionId) return;
+  const signature = state.imageRefs.map((entry) => entry.id).join(',');
+  if (signature === state.draftImageSignature) return;
+  state.draftImageSignature = signature;
+  const sessionId = state.sessionId;
+  promptImageStore.save(sessionId, state.imageRefs).catch(() => {
+    if (state.sessionId !== sessionId) return;
+    state.draftImageSignature = null;
+    if (state.imageRefs.length) announce('图片草稿无法保存到浏览器，刷新前请先发送或保留当前页面。', true);
+  });
+}
+async function restoreImageReferenceDraft() {
+  try {
+    const images = await promptImageStore.load(state.sessionId);
+    state.imageRefs = images.filter((item) => state.restoredImageRefIds.includes(item.id));
+    state.draftImageSignature = state.imageRefs.map((item) => item.id).join(',');
+  } catch { /* Missing image references are reported before sending, never silently omitted. */ }
+  renderPromptImageReferences();
+}
 function saveMomentDraft() {
   if (!state.sessionId) return;
   const signature = JSON.stringify([state.dynamicSnapshots, state.sceneSnapshots].map(entries => entries.map(entry =>
@@ -3455,6 +3854,9 @@ function updateSceneHint() {
 }
 function updateMode() {
   updateAnnotationHistory();
+  renderPromptDragControls();
+  ui.frame.disabled = !editable() || !state.selectedId;
+  ui.resetView.disabled = !editable();
   for (const button of [ui.savedSnapshot, ui.browse, ui.snapshotButton]) button.disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   renderSceneSnapshots();
@@ -3479,6 +3881,7 @@ function setMode(mode) {
   if (state.submitting || state.pendingSubmission) return;
   if (!['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode)) return;
   state.mode = mode;
+  if (mode !== 'select') { state.poseEditor=null; state.poseEditDrag=null; }
   if (mode !== 'select') pauseTimeline();
   hideTextEditor();
   finishAnnotationReferenceDrag();
@@ -3858,6 +4261,12 @@ function prepareCanvas(canvas) {
   // bounding box here would allocate enormous canvases when a photo is zoomed.
   const logicalWidth = canvas.clientWidth;
   const logicalHeight = canvas.clientHeight;
+  const context = canvas.getContext('2d');
+  // Image replacement/layout can temporarily give a layer no logical size.
+  // Clear the entire old bitmap even then, so hiding or pending frame loads
+  // cannot leave historical pixels to appear when the pane becomes visible.
+  context.setTransform(1,0,0,1,0,0);
+  context.clearRect(0,0,canvas.width,canvas.height);
   if (!logicalWidth || !logicalHeight) return null;
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
   const width = Math.round(logicalWidth * ratio);
@@ -3866,9 +4275,7 @@ function prepareCanvas(canvas) {
     canvas.width = width;
     canvas.height = height;
   }
-  const context = canvas.getContext('2d');
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
-  context.clearRect(0, 0, logicalWidth, logicalHeight);
   return {context, width:logicalWidth, height:logicalHeight};
 }
 function drawOverlays() {
@@ -3917,8 +4324,12 @@ function renderAnnotations() {
     glyph.textContent = glyphs[annotation.type] || '●';
     const copy = document.createElement('div');
     copy.className = 'annotation-copy';
+    copy.dataset.annotationId = annotation.id;
+    copy.title = '回看并选中标记，或拖到提示中引用';
+    bindPromptDrag(copy,() => ({kind:'annotation',annotationId:annotation.id,label:annotationReferenceLabel(annotation)}),'annotation');
     const title = document.createElement('button');
-    title.type = 'button'; title.className = 'annotation-select';
+    title.type = 'button'; title.className = 'annotation-select annotation-preview' + (annotation.pane === 'scene' ? ' annotation-open-scene' : '');
+    title.disabled = !editable();
     title.dataset.annotationId = annotation.id;
     title.setAttribute('aria-pressed', String(annotation.id === state.selectedAnnotationId));
     const ref = [...state.references, ...referenceViews().flatMap((view) => view.frames)].find((item) => item.id === annotation.reference_image_id);
@@ -3950,6 +4361,27 @@ function renderAnnotations() {
     row.append(glyph, copy, cite, remove);
     ui.annotationList.append(row);
   }
+}
+
+async function openAnnotationPreview(annotation) {
+  if (!editable()) return;
+  hideTextEditor(); pauseTimeline(); setMode('select');
+  if (annotation.frame_id) {
+    await openMoment(annotation.frame_id);
+    if (state.snapshot?.id !== annotation.frame_id || state.sceneView !== 'snapshot') return;
+  } else if (annotation.pane === 'scene') {
+    if (!state.snapshot || state.snapshot.id !== annotation.snapshot_id) {
+      announce('这条标记的原截图已无法恢复，请重新圈画。',true); return;
+    }
+    state.sceneView='snapshot'; renderSceneView(); drawOverlays();
+  } else {
+    const reference=state.references.find((item) => item.id === annotation.reference_image_id);
+    if (!reference) { announce('这条标记的原参考图已被移除。',true); return; }
+    state.clipEnabled=false; state.activeReferenceId=reference.id;
+    renderReferenceStrip(); showActiveReference();
+    if (referenceCamera(reference)) alignActiveReference(); else leaveReferenceCamera();
+  }
+  minimalLayout?.closeReferences(); saveDraft();
 }
 
 async function loadImage(url) {
@@ -4060,7 +4492,376 @@ async function captureScene(snapshot) {
   return {scene_original_data_url:dataUrl,
     scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84), ...extra};
 }
-function insertNoteText(text, {replaceSelection=true}={}) {
+function promptImageLabel(text) {
+  return String(text || '图片').replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0,180) || '图片';
+}
+function promptImageUnavailable(pane) {
+  if (!state.imageReferencesSupported) return '服务尚不支持图片引用，请更新服务并刷新页面。';
+  if (!editable()) return '当前暂时无法加入图片引用。';
+  if (state.seeking || state.pendingViewId) return '当前帧正在加载，请稍后再引用图片。';
+  if (pane === 'reference' && (!activeReference() || !referencePixelsReady())) return '参考图正在加载，请稍后再引用。';
+  if (pane === 'scene' && state.sceneView === 'snapshot' &&
+      (!state.snapshot || !imageReadyAtUrl(ui.snapshotImage,state.snapshot.data_url))) return '标注截图正在加载，请稍后再引用。';
+  const comparison=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot?.comparison : null;
+  if (comparison?.enabled && comparison.opacity > 0 && !imageReadyAtUrl(ui.snapshotCompareImage,comparison.data_url)) return '截图的叠图参考正在加载，请稍后再引用。';
+  return null;
+}
+function renderPromptDragControls() {
+  for (const [pane,button] of [['reference',ui.dragReference],['scene',ui.dragScene]]) {
+    if (!button) continue;
+    const reason = promptImageUnavailable(pane);
+    button.disabled = !!reason;
+    button.title = reason || '拖到提示，也可点击引用当前' + (pane === 'reference' ? '参考图' : '渲染图');
+  }
+  promptMentions?.refresh();
+}
+function capturePromptImage(pane) {
+  const reason = promptImageUnavailable(pane);
+  if (reason) throw new Error(reason);
+  // Capture synchronously at dragstart. The pixels and metadata in this object
+  // never follow later camera movements, source seeks, or scene publications.
+  pauseTimeline();
+  const entry = {id:newId().replace(/-/g,''), pane};
+  let source, marks, comparison=null;
+  if (pane === 'reference') {
+    const ref = activeReference();
+    source = ui.referenceImage;
+    entry.reference_id = ref.id;
+    entry.label = promptImageLabel('参考图 · ' + (ref.name || '图片'));
+    const view = referenceViews().find((candidate) => candidate.frames.some((frame) => frame.id === ref.id));
+    if (view && state.referenceClip) {
+      entry.clip_id = state.referenceClip.clip_id;
+      entry.view_id = view.clip_id;
+      entry.time_sec = ref.time_sec;
+      const index = view.frames.findIndex((frame) => frame.id === ref.id);
+      entry.label = promptImageLabel('参考图 · ' + frameTimeLabel(ref.time_sec,index,view.name || ''));
+    }
+    marks = state.annotations.filter((mark) => mark.pane === 'reference' && mark.reference_image_id === ref.id &&
+      (!mark.frame_id || mark.frame_id === state.snapshot?.id && Math.abs(mark.time_sec-state.time) <= 1e-6));
+  } else {
+    const snapshot = state.sceneView === 'snapshot' ? state.snapshot : null;
+    entry.scene_revision = snapshot?.scene_revision ?? state.sceneRevision;
+    entry.selected_object_ids = [...(snapshot?.selected_object_ids || (state.selectedId ? [state.selectedId] : []))];
+    entry.selected_scene_nodes = structuredClone(snapshot?.selected_scene_nodes || (state.selectedSceneNode ? [state.selectedSceneNode] : []));
+    entry.label = '场景 · 版本 ' + entry.scene_revision;
+    if (snapshot) {
+      source = ui.snapshotImage;
+      entry.original_data_url = snapshot.data_url;
+      entry.camera = structuredClone(snapshot.camera);
+      if (snapshot.comparison?.enabled && snapshot.comparison.opacity > 0) comparison=snapshot.comparison;
+      marks = state.annotations.filter((mark) => mark.pane === 'scene' && mark.snapshot_id === snapshot.id);
+      if (Number.isFinite(snapshot.time_sec)) {
+        entry.time_sec = snapshot.time_sec;
+        if (snapshot.clip_id) entry.clip_id = snapshot.clip_id;
+        const viewId = snapshot.view_id || referenceViewForMoment(snapshot)?.clip_id;
+        if (viewId) entry.view_id = viewId;
+        const referenceId = snapshot.reference_frame_id || snapshot.reference_id;
+        if (referenceId) entry.reference_id = referenceId;
+        entry.label += ' · ' + snapshot.time_sec.toFixed(3) + ' s';
+      }
+    } else {
+      settleOrbit();
+      const visible = feedbackLayer.visible;
+      feedbackLayer.visible = false;
+      try {
+        renderer.render(threeScene,camera);
+        source = document.createElement('canvas');
+        source.width = renderer.domElement.width; source.height = renderer.domElement.height;
+        source.getContext('2d').drawImage(renderer.domElement,0,0);
+        entry.camera = structuredClone(cameraData());
+      } finally { feedbackLayer.visible = visible; renderer.render(threeScene,camera); }
+      marks = [];
+      if (dynamicEnabled()) {
+        entry.time_sec = state.time;
+        if (state.referenceClip && clipReference()) {
+          entry.clip_id = state.referenceClip.clip_id;
+          entry.view_id = referenceView().clip_id;
+          entry.reference_id = clipReference().id;
+        }
+        entry.label += ' · ' + state.time.toFixed(3) + ' s';
+      }
+    }
+  }
+  const canvas = scaledCanvas(source.naturalWidth || source.width,source.naturalHeight || source.height);
+  const context = canvas.getContext('2d');
+  context.drawImage(source,0,0,canvas.width,canvas.height);
+  entry.image_width = canvas.width; entry.image_height = canvas.height;
+  entry.original_data_url ||= canvas.toDataURL('image/jpeg',.88);
+  if (comparison) {
+    const rect=comparison.rect;
+    context.globalAlpha=comparison.opacity/100;
+    context.drawImage(ui.snapshotCompareImage,rect.x*canvas.width,rect.y*canvas.height,rect.width*canvas.width,rect.height*canvas.height);
+    context.globalAlpha=1;
+  }
+  if (marks.length || comparison) {
+    for (const mark of marks) drawAnnotation(context,mark,canvas.width,canvas.height);
+    entry.annotated_data_url = canvas.toDataURL('image/jpeg',.88);
+  }
+  return entry;
+}
+function addPromptImageReference(entry) {
+  if (!editable()) return false;
+  if (!state.imageReferencesSupported) { announce('服务尚不支持图片引用，请更新服务并刷新页面。',true); return false; }
+  let cited;
+  try { cited = collectImageReferences(ui.note.value,state.imageRefs); }
+  catch (error) { announce(error.message,true); return false; }
+  if (cited.length >= 8 && !cited.some((item) => item.id === entry.id)) {
+    announce('一条提示最多引用 8 张图片，请先移除不需要的图片。',true); return false;
+  }
+  const previous = state.imageRefs;
+  state.imageRefs = [...cited.filter((item) => item.id !== entry.id),entry];
+  if (!insertNoteReference(entry.label,imageToken(entry.id))) { state.imageRefs = previous; return false; }
+  renderPromptImageReferences();
+  return true;
+}
+function previewPromptImage(entry) {
+  imagePreviewReference = entry;
+  ui.imagePreviewTitle.textContent = entry.label;
+  ui.imagePreviewImage.src = entry.annotated_data_url || entry.original_data_url;
+  ui.imagePreviewToggle.classList.toggle('hidden',!entry.annotated_data_url);
+  ui.imagePreviewToggle.textContent = '查看原图';
+  ui.imagePreviewToggle.dataset.original = 'false';
+  ui.imagePreview.showModal();
+}
+function renderPromptImageReferences() {
+  ui.imageRefs.replaceChildren();
+  const ids = new Set([...ui.note.value.matchAll(/\[\[image:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
+  const entries = state.imageRefs.filter((item) => ids.has(item.id));
+  ui.imageRefs.classList.toggle('hidden',!entries.length);
+  for (const entry of entries) {
+    const chip = document.createElement('div'); chip.className = 'prompt-image-chip'; chip.dataset.imageRefId = entry.id;
+    const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'prompt-image-preview';
+    preview.title = '预览引用时固定的图片'; preview.dataset.imageRefId = entry.id;
+    const image = document.createElement('img'); image.src = entry.annotated_data_url || entry.original_data_url; image.alt = '';
+    const label = document.createElement('span'); label.textContent = entry.label;
+    preview.append(image,label); preview.addEventListener('click',() => previewPromptImage(entry));
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'prompt-image-remove';
+    remove.dataset.imageRefId = entry.id; remove.textContent = '×'; remove.title = '移除图片引用';
+    remove.setAttribute('aria-label','移除 ' + entry.label); remove.disabled = !editable();
+    remove.addEventListener('click',() => {
+      if (!editable()) return;
+      const token = imageToken(entry.id);
+      ui.note.value = ui.note.value.split(token).join('');
+      state.imageRefs = state.imageRefs.filter((item) => item.id !== entry.id);
+      renderPromptImageReferences(); saveDraft(); ui.note.focus();
+    });
+    chip.append(preview,remove); ui.imageRefs.append(chip);
+  }
+}
+function selectedPromptReference() {
+  const item = sceneObject(state.selectedId);
+  if (!item) return null;
+  const node = state.selectedSceneNode;
+  return node?.node_path?.length
+    ? {kind:'node',node:structuredClone(node),label:node.node_name || item.name || item.id,
+      model_url:item.url || null,scene_revision:state.sceneRevision}
+    : {kind:'object',objectId:item.id,label:item.name || item.id};
+}
+function promptMentionImageSource(pane) {
+  const snapshot=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot : null;
+  return JSON.stringify(pane === 'reference'
+    ? [state.sessionId,activeReference()?.id,activeReference()?.url,referenceView()?.clip_id]
+    : [state.sessionId,state.sceneRevision,state.sceneView,snapshot?.id,snapshot?.scene_revision,
+      dynamicEnabled() ? state.time : null,clipReference()?.id,referenceView()?.clip_id]);
+}
+function mentionSceneNodes() {
+  const roots=state.sceneObjects.map((item) => state.objectNodes.get(item.id)?.userData.gltfRoot || null);
+  if (mentionSceneCache?.revision === state.sceneRevision && mentionSceneCache.roots.length === roots.length &&
+      roots.every((root,index) => root === mentionSceneCache.roots[index])) return mentionSceneCache.nodes;
+  const nodes=[];
+  // Traverse only when models change, never for each query character. Bound
+  // pathological imported trees while retaining named, addressable nodes.
+  let visited=0;
+  state.sceneObjects.forEach((item,index) => {
+    const root=roots[index];
+    if (!root) return;
+    const pending=[...root.children];
+    while (pending.length && visited < 20000 && nodes.length < 6000) {
+      const node=pending.pop(); visited++;
+      pending.push(...node.children);
+      if (!node.name?.trim() && !node.userData?.semantic_id && !node.userData?.stable_id) continue;
+      const reference=nodeReference(item.id,node,'part');
+      if (!reference?.node_path.length) continue;
+      nodes.push({reference,label:reference.node_name || reference.semantic_id || reference.stable_id || '节点 ' + reference.node_path.join('/'),
+        category:reference.node_path.length === 1 ? '物品' : '部件',modelName:item.name || item.id,
+        model_url:item.url || null,scene_revision:state.sceneRevision});
+    }
+  });
+  mentionSceneCache={revision:state.sceneRevision,roots,nodes};
+  return nodes;
+}
+function getPromptMentionCandidates() {
+  if (!editable()) return [];
+  const sessionId=state.sessionId, candidates=[], keys=new Set();
+  const add=(item) => {
+    if (keys.has(item.key)) return;
+    keys.add(item.key); candidates.push({...item,sessionId});
+  };
+  const addNode=(node,label,source={},context='') => {
+    const item=sceneObject(node?.parent_object_id);
+    if (!item || !node.node_path?.length || !resolveSceneNode(node)) return;
+    const modelURL=source.model_url ?? item.url ?? null;
+    if (modelURL !== (item.url || null)) return;
+    const key=node.parent_object_id+':'+node.node_path.join('/');
+    add({key:'node:'+key,kind:'node',label:label || node.node_name || node.semantic_id || node.stable_id || key,
+      detail:(context || (node.node_path.length === 1 ? '物品' : '部件'))+' · '+(item.name || item.id)+' · '+node.node_path.join('/'),
+      search:['物品 对象 部件 节点 node part item',key,node.node_name,node.semantic_id,node.stable_id].join(' '),
+      descriptor:{kind:'node',node:structuredClone(node),label:label || node.node_name || key,
+        model_url:modelURL,scene_revision:source.scene_revision ?? state.sceneRevision}});
+  };
+  const selection=selectedPromptReference();
+  if (selection?.kind === 'node') addNode(selection.node,selection.label,selection,'当前选中部件');
+  for (const node of state.referencedSceneNodes) addNode(node,node.node_name || node.semantic_id || node.stable_id,node,'已引用部件');
+  for (const item of state.sceneObjects) add({key:'object:'+item.id,kind:'object',label:item.name || item.id,
+    detail:'对象 · '+item.id,search:'物体 物品 对象 object item '+item.id,
+    descriptor:{kind:'object',objectId:item.id,label:item.name || item.id}});
+  for (const node of mentionSceneNodes()) addNode(node.reference,node.label,node,node.category);
+  state.annotations.forEach((mark,index) => {
+    const number=circled[Number(mark.group_id)] || String(index+1), time=annotationTimeLabel(mark);
+    const label=mark.name || '标记'+number+' · '+(labels[mark.type] || '标记');
+    add({key:'annotation:'+mark.id,kind:'annotation',label,
+      detail:(mark.pane === 'reference' ? '参考图' : '场景')+(time ? ' · '+time : '')+(mark.text ? ' · '+mark.text : ''),
+      search:['标注 标记 提示 annotation mark',labels[mark.type],mark.name,index+1,mark.group_id,mark.id,mark.text,mark.object_id,mark.reference_image_id].join(' '),
+      descriptor:{kind:'annotation',annotationId:mark.id,label:annotationReferenceLabel(mark)}});
+  });
+  if (state.imageReferencesSupported) {
+    for (const pane of ['reference','scene']) {
+      const reason=promptImageUnavailable(pane), ref=activeReference();
+      const snapshot=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot : null;
+      const time=pane === 'reference' ? ref?.time_sec : snapshot?.time_sec ?? (dynamicEnabled() ? state.time : null);
+      add({key:'current-image:'+pane,kind:'current-image',label:pane === 'reference' ? '左侧参考图' : '右侧渲染图',
+        detail:reason || (pane === 'reference' ? ref?.name || ref?.id || '当前参考图' : '版本 '+(snapshot?.scene_revision ?? state.sceneRevision))+
+          (Number.isFinite(time) ? ' · '+time.toFixed(3)+' s' : '')+' · 选中时固定截图',
+        search:'图片 图像 截图 image photo screenshot '+(pane === 'reference' ? '左图 参考 reference '+(ref?.name || '')+' '+(ref?.id || '') : '右图 场景 scene 渲染'),
+        disabled:reason,descriptor:{kind:'capture-image',pane,source:promptMentionImageSource(pane)}});
+    }
+    state.imageRefs.forEach((entry,index) => add({key:'saved-image:'+entry.id,kind:'saved-image',label:entry.label,
+      detail:'已保存图片 '+(index+1)+' · 固定截图',search:'图片 图像 已保存 image photo screenshot '+entry.id+' '+(index+1),
+      descriptor:{kind:'saved-image',imageId:entry.id}}));
+  }
+  for (const job of state.humanJobs) {
+    const frame=humanCurrentFrame(job);
+    if (job.status !== 'completed' || job.session_id !== state.sessionId || !frame || frame.reference_id !== activeReference()?.id) continue;
+    add({key:'pose:'+job.job_id+':'+frame.reference_id,kind:'pose',label:humanJobName(job),
+      detail:poseEvidenceLabel(job)+' · '+poseFrameLabel(frame,job.reference_name),
+      search:'人体 骨架 关键点 人体证据 pose human skeleton '+humanJobNumber(job)+' '+job.job_id+' '+frame.reference_id,
+      descriptor:{kind:'pose',jobId:job.job_id,referenceId:frame.reference_id}});
+  }
+  if (state.poseCorrectionsSupported) for (const sample of state.poseEdits.filter(validPoseEdit)) {
+    add({key:'pose-edit:'+sample.id,kind:'pose-edit',label:'手部修正 · '+(sample.label || sample.reference_id),
+      detail:'人工二维修正 · '+sample.edits.length+' 点',
+      search:'手部 修正 关键点 草稿 pose_edit correction manual '+sample.id+' '+sample.job_id+' '+sample.reference_id+' '+sample.edits.map((edit) => edit.name).join(' '),
+      descriptor:{kind:'pose-edit',editId:sample.id,jobId:sample.job_id,referenceId:sample.reference_id,imageSha256:sample.image_sha256}});
+  }
+  return candidates;
+}
+function insertPromptMention(candidate) {
+  if (!editable() || candidate.sessionId !== state.sessionId || candidate.disabled) return false;
+  const descriptor=candidate.descriptor;
+  if (descriptor.kind === 'capture-image') {
+    if (descriptor.source !== promptMentionImageSource(descriptor.pane)) throw new Error('画面已切换，请重新选择当前图片。');
+    return addPromptImageReference(capturePromptImage(descriptor.pane));
+  }
+  if (descriptor.kind === 'saved-image') {
+    const entry=state.imageRefs.find((item) => item.id === descriptor.imageId);
+    if (!entry) throw new Error('这张保存图片已移除，请重新引用图片。');
+    return addPromptImageReference(entry);
+  }
+  if (descriptor.kind === 'pose') {
+    const job=state.humanJobs.find((item) => item.job_id === descriptor.jobId && item.status === 'completed' && item.session_id === state.sessionId);
+    const frame=job && humanCurrentFrame(job);
+    if (frame?.reference_id !== descriptor.referenceId || activeReference()?.id !== descriptor.referenceId) throw new Error('人体来源帧已切换，请重新选择当前帧结果。');
+    return insertHumanPoseReference(job,frame);
+  }
+  if (descriptor.kind === 'pose-edit') {
+    if (!state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面。');
+    const sample=state.poseEdits.find((item) => item.id === descriptor.editId);
+    if (!validPoseEdit(sample) || sample.job_id !== descriptor.jobId || sample.reference_id !== descriptor.referenceId || sample.image_sha256 !== descriptor.imageSha256) throw new Error('这份修正草稿已失效，请重新选择。');
+    collectPoseEdits(ui.note.value,state.poseEdits);
+    return insertNoteReference('手部修正（'+sample.label+'）',poseEditToken(sample.id));
+  }
+  if (descriptor.kind === 'node' && !resolveSceneNode(descriptor.node)) throw new Error('这处部件已失效，请重新选择。');
+  return insertPromptDragReference(descriptor);
+}
+function insertPromptDragReference(descriptor) {
+  if (!editable() || !descriptor) return false;
+  if (descriptor.kind === 'image') return addPromptImageReference(descriptor.image);
+  else if (descriptor.kind === 'object' && sceneObject(descriptor.objectId)) return insertNoteReference(descriptor.label,`[[object:${descriptor.objectId}]]`);
+  else if (descriptor.kind === 'node' && sceneObject(descriptor.node.parent_object_id)?.url === descriptor.model_url) {
+    return insertSceneNodeReference(descriptor.node,descriptor.label,
+      {model_url:descriptor.model_url,scene_revision:descriptor.scene_revision});
+  }
+  else if (descriptor.kind === 'annotation') {
+    const marks=state.annotations.filter((mark) => mark.id === descriptor.annotationId);
+    if (marks.length === 1) return insertAnnotationReference(marks[0]);
+    announce('这处标记已失效，请重新选择。',true);
+  }
+  else announce('这处引用已失效，请重新选择后拖入。',true);
+  return false;
+}
+function bindPromptDrag(element,getDescriptor,kind) {
+  element.draggable = true; element.dataset.promptDrag = kind;
+  let dragged = false;
+  element.addEventListener('click',(event) => { if (dragged) { event.preventDefault(); event.stopImmediatePropagation(); } },true);
+  element.addEventListener('dragstart',(event) => {
+    if (!editable() || !event.dataTransfer) { event.preventDefault(); return; }
+    try {
+      const descriptor = getDescriptor();
+      if (!descriptor) { event.preventDefault(); return; }
+      dragged = true;
+      promptDrag = {nonce:newId(),sessionId:state.sessionId,descriptor};
+      event.dataTransfer.effectAllowed = 'copy';
+      event.dataTransfer.setData(PROMPT_DRAG_MIME,promptDrag.nonce);
+      // Defer closing the modal until the browser has captured its drag image.
+      requestAnimationFrame(() => { if (promptDrag) { minimalLayout?.closeReferences(); minimalLayout?.openChat(); } });
+    } catch (error) { event.preventDefault(); announce(error.message,true); }
+  });
+  element.addEventListener('dragend',() => {
+    promptDrag = null; ui.note.closest('.prompt-input').classList.remove('prompt-drop-active');
+    setTimeout(() => { dragged = false; },0);
+  });
+}
+function bindPromptReferenceEvents() {
+  for (const [pane,button] of [['reference',ui.dragReference],['scene',ui.dragScene]]) {
+    const descriptor = () => ({kind:'image',image:capturePromptImage(pane)});
+    bindPromptDrag(button,descriptor,pane);
+    button.addEventListener('click',() => { try { insertPromptDragReference(descriptor()); } catch (error) { announce(error.message,true); } });
+  }
+  bindPromptDrag(ui.selectedChip,selectedPromptReference,'selection');
+  ui.selectedChip.tabIndex = 0; ui.selectedChip.setAttribute('role','button');
+  ui.selectedChip.title = '拖到提示引用选中的物品或部件，也可点击引用';
+  ui.selectedChip.addEventListener('click',() => insertPromptDragReference(selectedPromptReference()));
+  ui.selectedChip.addEventListener('keydown',(event) => {
+    if (!['Enter',' '].includes(event.key)) return;
+    event.preventDefault(); insertPromptDragReference(selectedPromptReference());
+  });
+  const target = ui.note.closest('.prompt-input');
+  const canDrop = (event) => editable() && promptDrag?.sessionId === state.sessionId &&
+    Array.from(event.dataTransfer?.types || []).includes(PROMPT_DRAG_MIME);
+  for (const name of ['dragenter','dragover']) target.addEventListener(name,(event) => {
+    if (!canDrop(event)) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; target.classList.add('prompt-drop-active');
+  });
+  target.addEventListener('dragleave',(event) => { if (!target.contains(event.relatedTarget)) target.classList.remove('prompt-drop-active'); });
+  target.addEventListener('drop',(event) => {
+    target.classList.remove('prompt-drop-active');
+    // Never insert URLs, files, or a forged custom payload from another page.
+    event.preventDefault();
+    if (!canDrop(event) || event.dataTransfer.getData(PROMPT_DRAG_MIME) !== promptDrag.nonce) return;
+    const descriptor = promptDrag.descriptor; promptDrag = null;
+    insertPromptDragReference(descriptor);
+  });
+  id('prompt-image-preview-close').addEventListener('click',() => ui.imagePreview.close());
+  ui.imagePreview.addEventListener('close',() => { imagePreviewReference = null; ui.imagePreviewImage.removeAttribute('src'); });
+  ui.imagePreviewToggle.addEventListener('click',() => {
+    if (!imagePreviewReference?.annotated_data_url) return;
+    const original = ui.imagePreviewToggle.dataset.original !== 'true';
+    ui.imagePreviewToggle.dataset.original = String(original);
+    ui.imagePreviewToggle.textContent = original ? '查看标注图' : '查看原图';
+    ui.imagePreviewImage.src = original ? imagePreviewReference.original_data_url : imagePreviewReference.annotated_data_url;
+  });
+}
+function insertNoteText(text, {replaceSelection=true,focus=true}={}) {
   if (!editable()) return false;
   const start = replaceSelection ? ui.note.selectionStart : ui.note.selectionEnd;
   const end = ui.note.selectionEnd;
@@ -4076,7 +4877,8 @@ function insertNoteText(text, {replaceSelection=true}={}) {
   ui.note.setRangeText(insertion, start, end, 'end');
   // Selecting or quoting a mark preserves the current screenshot.
   setMode('select');
-  ui.note.focus();
+  if (focus) ui.note.focus();
+  renderPromptImageReferences();
   saveDraft();
   return true;
 }
@@ -4099,19 +4901,25 @@ function insertAllAnnotationReferences() {
     announce('已引用 ' + references.length + ' 条标记，可继续补充提示。');
   }
 }
-function insertSceneNodeReference(node, label) {
-  if (!editable() || !node?.node_path?.length) return;
+function insertSceneNodeReference(node, label, source=null) {
+  if (!editable() || !node?.node_path?.length) return false;
   const key = node.parent_object_id + ':' + node.node_path.join('/');
   const index = state.referencedSceneNodes.findIndex((entry) => entry.parent_object_id + ':' + entry.node_path.join('/') === key);
-  const captured = {...node, model_url:sceneObject(node.parent_object_id)?.url || null,
-    scene_revision:state.sceneRevision};
+  const captured = {...node, model_url:source?.model_url ?? sceneObject(node.parent_object_id)?.url ?? null,
+    scene_revision:source?.scene_revision ?? state.sceneRevision};
+  if (!insertNoteReference(label || '场景节点', `[[node:${key}]]`)) return false;
   if (index < 0) state.referencedSceneNodes.push(captured);
   else state.referencedSceneNodes[index] = captured;
-  insertNoteReference(label || '场景节点', `[[node:${key}]]`);
+  saveDraft();
+  return true;
 }
 function promptReferences(note=ui.note.value) {
   if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
+  if (/\[\[image:/.test(note) && !state.imageReferencesSupported) throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
+  collectImageReferences(note,state.imageRefs);
   collectPoseReferences(note,state.poseRefs);
+  if (/\[\[pose_edit:/.test(note) && !state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面后发送。');
+  collectPoseEdits(note,state.poseEdits);
   const tokenPattern = /\[\[(object|annotation|node):([A-Za-z0-9_-]{1,64})(?::(\d+(?:\/\d+)*))?\]\]/g;
   const tokens = [...note.matchAll(tokenPattern)];
   const starts = new Set(tokens.map((match) => match.index));
@@ -4160,6 +4968,9 @@ function clearSubmittedPrompt(submission) {
   ui.note.value = '';
   state.referencedSceneNodes = [];
   state.poseRefs = [];
+  state.poseEdits = []; state.poseEditor=null; state.poseEditDrag=null;
+  state.imageRefs = [];
+  renderPromptImageReferences();
   return true;
 }
 async function clearSubmittedDraft(submission) {
@@ -4189,9 +5000,14 @@ async function clearSubmittedDraft(submission) {
   // Drain the serialized moment writes before unlocking the next round, so an
   // immediate reload cannot recover the old dynamic screenshots.
   await saveMomentDraft.pending;
+  await promptImageStore.pending.catch(() => {});
   return true;
 }
 async function feedbackPayload(referencedSceneNodes, promptText) {
+  const imageRefs = collectImageReferences(promptText,state.imageRefs);
+  if (imageRefs.length && !state.imageReferencesSupported) throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
+  const poseEdits=collectPoseEdits(promptText,state.poseEdits);
+  if (poseEdits.length && !state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面后发送。');
   const snapshot = snapshotForFeedback();
   const submittedCamera = snapshot?.camera || cameraData();
   const imageBundle = await captureScene(snapshot);
@@ -4214,6 +5030,8 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
       scope:feedbackScope(ui.scope.value, state.time, Number(ui.rangeStart.value), Number(ui.rangeEnd.value), timelineDuration())}, dynamic_frames:dynamicFrames} : {}),
     note:note || (state.references.length && !state.annotations.length ? '请参考这些图片开始或继续重建场景。' : ''),
     pose_refs:collectPoseReferences(promptText,state.poseRefs),
+    pose_edits:poseEdits,
+    image_refs:structuredClone(imageRefs),
     referenced_scene_nodes:referencedSceneNodes,
     annotations:state.annotations.map((annotation) => {
       const item = {...annotation};
@@ -4240,6 +5058,12 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject) return;
   const promptText = ui.note.value;
+  if (!state.poseCorrectionsSupported && (/\[\[pose_edit:/.test(promptText) || state.pendingSubmission?.payload?.pose_edits?.length)) {
+    announce('服务尚不支持关键点修正，请更新服务并刷新页面后发送。',true); return;
+  }
+  if (!state.imageReferencesSupported && (/\[\[image:/.test(promptText) || state.pendingSubmission?.payload?.image_refs?.length)) {
+    announce('服务尚不支持图片引用，请更新服务并刷新页面后发送。',true); return;
+  }
   let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
     try { referencedSceneNodes = promptReferences(promptText); }
@@ -4283,6 +5107,12 @@ async function submitFeedback() {
       catch (error) { state.pendingSubmission = null; throw error; }
     }
     setSubmitLabel('正在发送…');
+    if (state.pendingSubmission.payload.image_refs?.length && !state.imageReferencesSupported) {
+      throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
+    }
+    if (state.pendingSubmission.payload.pose_edits?.length && !state.poseCorrectionsSupported) {
+      throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面后发送。');
+    }
     const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/feedback', {
       method:'POST', body:state.pendingSubmission.payload
     });
@@ -4292,10 +5122,20 @@ async function submitFeedback() {
     const draftCleared = await clearSubmittedDraft(submitted);
     state.feedbackCount += 1;
     id('feedback-count-label').textContent = '已提交 ' + state.feedbackCount + ' 条';
-    const delivery = result.delivery?.status || (state.deliveryMode === 'external' ? 'submitted' : 'queued');
+    const delivery = result.delivery?.status || (state.feedbackTransport === 'mcp_events' ? 'event_pending'
+      : state.deliveryMode === 'external' ? 'submitted' : 'queued');
     ui.caption.textContent = draftCleared ? '' : '新草稿已保留，可以继续编辑。';
     saveDraft();
-    if (state.deliveryMode === 'external') {
+    if (state.feedbackTransport === 'mcp_events') {
+      const subscribers=Number.isInteger(result.delivery?.subscriber_count) ? result.delivery.subscriber_count
+        : state.eventDelivery?.subscriber_count || 0;
+      announce(delivery === 'event_delivered' ? '视觉反馈事件已送达订阅插件；请在插件所在宿主查看后续。'
+        : delivery === 'event_failed' ? '反馈已保存，但事件投递失败；请查看记录。'
+        : delivery === 'event_unsubscribed' && result.delivery?.awaiting_subscription
+          ? '反馈已保存，等待插件订阅后尝试投递。'
+        : delivery === 'event_unsubscribed' || !subscribers ? '反馈已保存，当前没有活动插件订阅；可在记录中查看。'
+          : '反馈已保存，正在通过 MCP 事件投递给插件。');
+    } else if (state.deliveryMode === 'external') {
       announce(delivery === 'running' ? '图文反馈已送入原 Codex 任务。'
         : delivery === 'dispatching' ? '工作台正在将图文反馈送入原 Codex 任务。'
         : delivery === 'queued' ? '反馈已保存，等待原 Codex 任务空闲后送入。'
@@ -4446,6 +5286,11 @@ async function poll() {
 function bindEvents() {
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   minimalLayout = setupMinimalLayout({getState:() => state});
+  bindPromptReferenceEvents();
+  bindPoseEditEvents();
+  promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
+    getCandidates:getPromptMentionCandidates,onSelect:insertPromptMention,isEnabled:editable,
+    onError:(message) => announce(message,true)});
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);
   id('close-projects').addEventListener('click', () => ui.projectsDialog.close());
@@ -4546,6 +5391,7 @@ function bindEvents() {
   });
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
+  ui.snapshotCompareImage.addEventListener('load', renderPromptDragControls);
   ui.savedSnapshot.addEventListener('click', openSavedSnapshot);
   ui.captureScene.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', browseScene);
@@ -4571,8 +5417,9 @@ function bindEvents() {
     canvas.tabIndex = 0;
     canvas.addEventListener('lostpointercapture', () => finishAnnotationReferenceDrag());
   }
-  ui.note.addEventListener('input', saveDraft);
+  ui.note.addEventListener('input',() => { renderPromptImageReferences(); saveDraft(); });
   ui.note.addEventListener('keydown', (event) => {
+    if (promptMentions.isComposing(event) || promptMentions.handleKeydown(event)) return;
     if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.altKey ||
         event.isComposing || event.keyCode === 229 || ui.submit.disabled) return;
     event.preventDefault();
@@ -4627,15 +5474,19 @@ function bindEvents() {
     renderSelection();
     saveDraft();
   });
-  id('frame-button').addEventListener('click', () => {
+  ui.frame.addEventListener('click', () => {
     if (!editable()) return;
     browseScene();
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
     if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
     else if (state.selectedId) frameBox(objectBox(state.selectedId));
     else frameAll();
+    minimalLayout?.closeReferences();
   });
-  id('reset-button').addEventListener('click', () => { if (editable()) { browseScene(); frameAll(); } });
+  ui.resetView.addEventListener('click', () => {
+    if (!editable()) return;
+    browseScene(); frameAll(); minimalLayout?.closeReferences();
+  });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
   ui.annotationText.addEventListener('keydown', (event) => {
@@ -4734,7 +5585,7 @@ try {
 }
 setInterval(poll, 1500);
 setInterval(() => {
-  if (state.workspaceReady && state.deliveryMode === 'external' && state.desktopAvailable && !state.loadingTargets && !state.switchingTarget) {
+  if (state.workspaceReady && state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable && !state.loadingTargets && !state.switchingTarget) {
     loadTargets().catch(() => { /* The picker shows the connection error. */ });
   }
 }, 20000);

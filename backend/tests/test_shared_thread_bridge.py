@@ -19,6 +19,7 @@ from shared_thread_bridge import (  # noqa: E402
     SharedThreadNotIdle,
     SharedThreadRPCRejected,
     SharedThreadTimeout,
+    SharedThreadPermissionMismatch,
     UncertainTurnDelivery,
     _private_socket_candidates,
     _connect,
@@ -38,6 +39,19 @@ class FakeWebSocket:
         self.sent: list[dict] = []
         self.responses: deque[dict] = deque()
         self.closed = False
+        self.subscribed = False
+        self.effective_settings = {
+            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            "sandbox": {"type": "readOnly"}, "activePermissionProfile": {"id": ":read-only"},
+        }
+
+    def permission_settings(self, params: dict) -> dict:
+        profile = params.get("permissions")
+        policy = params.get("sandboxPolicy") or {"type": {
+            ":danger-full-access": "dangerFullAccess", ":workspace": "workspaceWrite", ":read-only": "readOnly",
+        }[profile]}
+        return {"sandbox": policy, "approvalPolicy": params["approvalPolicy"],
+                "approvalsReviewer": "user", "activePermissionProfile": {"id": profile} if profile else None}
 
     def send(self, data: str) -> None:
         message = json.loads(data)
@@ -53,7 +67,29 @@ class FakeWebSocket:
                 thread["turns"] = list(self.turns)
             self.responses.append({"id": request_id, "result": {"thread": thread}})
         elif method == "thread/resume":
-            self.responses.append({"id": request_id, "result": {"thread": {"id": THREAD_ID, "status": {"type": self.status}}}})
+            self.subscribed = True
+            if self.status == "notLoaded" and "permissions" in message["params"]:
+                self.effective_settings = self.permission_settings(message["params"])
+            self.responses.append({"id": request_id, "result": {
+                "thread": {"id": THREAD_ID, "status": {"type": self.status}}, **self.effective_settings,
+            }})
+        elif method == "permissionProfile/list":
+            self.responses.append({"id": request_id, "result": {"data": [
+                {"id": profile, "allowed": True} for profile in (":read-only", ":workspace", ":danger-full-access")
+            ], "nextCursor": None}})
+        elif method == "thread/settings/update":
+            params = message["params"]
+            settings = self.permission_settings(params)
+            changed = settings != self.effective_settings
+            self.effective_settings = settings
+            self.responses.append({"id": request_id, "result": {}})
+            if self.subscribed and changed:
+                self.responses.append({"method": "thread/settings/updated", "params": {
+                    "threadId": THREAD_ID, "threadSettings": {
+                        "sandboxPolicy": settings["sandbox"],
+                        **{key: value for key, value in settings.items() if key != "sandbox"},
+                    },
+                }})
         elif method == "thread/loaded/list":
             self.responses.append({"id": request_id, "result": {"data": [THREAD_ID], "nextCursor": None}})
         elif method == "turn/start" and self.reject_turn:
@@ -75,6 +111,280 @@ class FakeWebSocket:
 
 
 class SharedThreadBridgeTests(unittest.TestCase):
+    def test_saved_owned_permissions_survive_loaded_and_unloaded_resume_and_turns(self) -> None:
+        class ResumableWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                super().send(data)
+                if json.loads(data).get("method") == "thread/resume":
+                    self.status = "idle"
+
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/scoped-scene"}}}}
+        for mode, approval, profile in (
+            ("full_access", "never", ":danger-full-access"),
+            ("workspace_write", "on-request", ":workspace"),
+            ("read_only", "on-request", ":read-only"),
+        ):
+            for status in ("idle", "notLoaded"):
+                with self.subTest(mode=mode, status=status), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    root.chmod(0o700)
+                    path = root / ("a" * 64)
+                    with socket.socket(socket.AF_UNIX) as listener:
+                        listener.bind(str(path))
+                        path.chmod(0o600)
+                        ws = ResumableWebSocket(status)
+                        bridge = SharedThreadBridge.connect_for_thread(
+                            THREAD_ID, socket_dir=root, connector=lambda _path, _timeout: ws,
+                            subscribe=True, allow_owned_resume=True, thread_config=config, permission_mode=mode,
+                        )
+                        try:
+                            resumes = [item["params"] for item in ws.sent if item.get("method") == "thread/resume"]
+                            self.assertEqual(resumes[0], {"threadId": THREAD_ID, "config": config,
+                                                        "approvalPolicy": approval, "permissions": profile, "approvalsReviewer": "user"})
+                            updates = [item["params"] for item in ws.sent if item.get("method") == "thread/settings/update"]
+                            self.assertEqual(updates, [{"threadId": THREAD_ID, "approvalPolicy": approval, "permissions": profile, "approvalsReviewer": "user"}] if status == "idle" and mode != "read_only" else [])
+                            self.assertEqual(resumes[1:], [{"threadId": THREAD_ID}] if updates else [])
+                            for number in (1, 2):
+                                bridge.start_turn("feedback", client_user_message_id=f"feedback-{number}", permission_mode=mode)
+                                while bridge.active_turn_id is not None:
+                                    bridge.receive_message()
+                            turns = [item["params"] for item in ws.sent if item.get("method") == "turn/start"]
+                            self.assertEqual(len(turns), 2)
+                            for params in turns:
+                                self.assertEqual(params["permissions"], profile)
+                                self.assertEqual(params["approvalPolicy"], approval)
+                                self.assertEqual(params["approvalsReviewer"], "user")
+                                self.assertNotIn("sandboxPolicy", params)
+                                self.assertNotIn("sandbox", params)
+                            self.assertEqual(sum(item.get("method") == "permissionProfile/list" for item in ws.sent), 1)
+                            initialize = next(item for item in ws.sent if item.get("method") == "initialize")
+                            self.assertIs(initialize["params"]["capabilities"]["experimentalApi"], True)
+                        finally:
+                            bridge.close()
+
+    def test_unowned_task_cannot_receive_permission_override(self) -> None:
+        with patch("shared_thread_bridge._private_socket_candidates") as candidates:
+            with self.assertRaisesRegex(ValueError, "workbench-owned"):
+                SharedThreadBridge.connect_for_thread(THREAD_ID, permission_mode="full_access")
+            with self.assertRaisesRegex(ValueError, "permission_mode"):
+                SharedThreadBridge.connect_for_thread(THREAD_ID, allow_owned_resume=True, permission_mode="invalid")
+            candidates.assert_not_called()
+
+    def test_named_profiles_override_persisted_read_only_on_next_loaded_turn(self) -> None:
+        class PersistedReadOnlyWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                message = json.loads(data)
+                if message.get("method") == "thread/resume":
+                    self.sent.append(message)
+                    self.subscribed = True
+                    # Native loaded resume returns current settings even with
+                    # a requested override. Never substitute legacy sandbox.
+                    self.responses.append({"id": message["id"], "result": {
+                        "thread": {"id": THREAD_ID, "status": {"type": "idle"}},
+                        **self.effective_settings,
+                    }})
+                    return
+                super().send(data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = root / ("a" * 64)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                path.chmod(0o600)
+                ws = PersistedReadOnlyWebSocket()
+                bridge = SharedThreadBridge.connect_for_thread(
+                    THREAD_ID, socket_dir=root, connector=lambda _path, _timeout: ws,
+                    subscribe=True, allow_owned_resume=True, permission_mode="full_access",
+                )
+                try:
+                    bridge.start_turn("feedback", client_user_message_id="feedback-1", permission_mode="full_access")
+                    params = next(item["params"] for item in ws.sent if item.get("method") == "turn/start")
+                    self.assertEqual(params["permissions"], ":danger-full-access")
+                    self.assertEqual(params["approvalPolicy"], "never")
+                    self.assertNotIn("sandboxPolicy", params)
+                finally:
+                    bridge.close()
+
+    def test_profile_denial_or_catalog_errors_never_fall_back_to_legacy(self) -> None:
+        class CatalogWebSocket(FakeWebSocket):
+            def __init__(self, code=None, allowed=True):
+                super().__init__()
+                self.code = code
+                self.allowed = allowed
+
+            def send(self, data: str) -> None:
+                message = json.loads(data)
+                if message.get("method") == "permissionProfile/list":
+                    self.sent.append(message)
+                    if self.code is not None:
+                        self.responses.append({"id": message["id"], "error": {"code": self.code, "message": "catalog failed"}})
+                    else:
+                        self.responses.append({"id": message["id"], "result": {"data": [{"id": ":danger-full-access", "allowed": self.allowed}]}})
+                    return
+                super().send(data)
+
+        for code, allowed in ((None, False), (-32602, True), (-32600, True)):
+            with self.subTest(code=code, allowed=allowed):
+                ws = CatalogWebSocket(code, allowed)
+                bridge = SharedThreadBridge(ws, THREAD_ID)
+                with self.assertRaises(SharedThreadBridgeError):
+                    bridge.start_turn("feedback", client_user_message_id="feedback-1", permission_mode="full_access")
+                self.assertFalse(any(item.get("method") == "turn/start" for item in ws.sent))
+
+        ws = CatalogWebSocket(-32601)
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        bridge.start_turn("feedback", client_user_message_id="feedback-1", permission_mode="full_access")
+        params = next(item["params"] for item in ws.sent if item.get("method") == "turn/start")
+        self.assertEqual(params["sandboxPolicy"], {"type": "dangerFullAccess"})
+        self.assertNotIn("permissions", params)
+
+    def test_creation_effective_permission_mismatch_retains_created_id(self) -> None:
+        created = "01a0de73-9763-7432-8ca4-5892c0904234"
+
+        class WrongCreationWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                super().send(data)
+                message = json.loads(data)
+                if message.get("method") == "thread/start":
+                    self.responses.append({"id": message["id"], "result": {
+                        "thread": {"id": created, "ephemeral": False},
+                        "approvalPolicy": "never", "sandbox": {"type": "readOnly"},
+                        "activePermissionProfile": {"id": ":read-only"},
+                    }})
+
+        bridge = SharedThreadBridge(WrongCreationWebSocket(), THREAD_ID)
+        with self.assertRaises(SharedThreadPermissionMismatch) as raised:
+            bridge.create_thread("gpt-6-astra", Path("/tmp/project"), permission_mode="full_access")
+        self.assertEqual(raised.exception.created_thread_id, created)
+        self.assertEqual(bridge.thread_id, created)
+
+    def test_unloaded_resume_effective_permission_mismatch_blocks_delivery(self) -> None:
+        class WrongResumeWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                message = json.loads(data)
+                if message.get("method") == "thread/resume":
+                    self.sent.append(message)
+                    self.responses.append({"id": message["id"], "result": {
+                        "thread": {"id": THREAD_ID, "status": {"type": "idle"}},
+                        "sandbox": {"type": "readOnly"}, "activePermissionProfile": {"id": ":read-only"},
+                    }})
+                    return
+                super().send(data)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            root.chmod(0o700)
+            path = root / ("a" * 64)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(path))
+                path.chmod(0o600)
+                ws = WrongResumeWebSocket("notLoaded")
+                with self.assertRaises(SharedThreadPermissionMismatch):
+                    SharedThreadBridge.connect_for_thread(THREAD_ID, socket_dir=root, connector=lambda _path, _timeout: ws,
+                                                          allow_owned_resume=True, permission_mode="full_access")
+                self.assertTrue(ws.closed)
+                self.assertFalse(any(item.get("method") == "turn/start" for item in ws.sent))
+
+    def test_idle_sync_is_requested_only_for_owned_startup_and_feedback_connections(self) -> None:
+        for status, mode, sync, expected in (
+            ("idle", "full_access", False, False),  # monitor
+            ("active", "full_access", True, False),
+            ("idle", None, True, False),  # external/unknown mode
+            ("idle", "full_access", True, True),
+        ):
+            with self.subTest(status=status, mode=mode, sync=sync), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                root.chmod(0o700)
+                path = root / ("a" * 64)
+                with socket.socket(socket.AF_UNIX) as listener:
+                    listener.bind(str(path))
+                    path.chmod(0o600)
+                    ws = FakeWebSocket(status)
+                    bridge = SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, socket_dir=root, connector=lambda _path, _timeout: ws,
+                        require_idle=False, allow_owned_resume=mode is not None,
+                        permission_mode=mode, sync_owned_permissions=sync,
+                    )
+                    bridge.close()
+                    self.assertEqual(any(item.get("method") == "thread/settings/update" for item in ws.sent), expected)
+                    self.assertFalse(any(item.get("method") == "turn/start" for item in ws.sent))
+
+    def test_settings_update_requires_verified_metadata_or_explicit_unsupported_method(self) -> None:
+        class SettingsWebSocket(FakeWebSocket):
+            def __init__(self, code=None, bad_policy=False):
+                super().__init__()
+                self.code = code
+                self.bad_policy = bad_policy
+
+            def send(self, data: str) -> None:
+                message = json.loads(data)
+                if message.get("method") == "thread/settings/update":
+                    self.sent.append(message)
+                    if self.code is not None:
+                        self.responses.append({"id": message["id"], "error": {"code": self.code, "message": "settings failed"}})
+                    else:
+                        self.effective_settings = {
+                            "sandbox": {"type": "externalSandbox" if self.bad_policy else "dangerFullAccess"},
+                            "activePermissionProfile": {"id": ":danger-full-access"}, "approvalPolicy": "never", "approvalsReviewer": "user",
+                        }
+                        self.responses.append({"method": "thread/settings/updated", "params": {
+                            "threadId": THREAD_ID, "threadSettings": {
+                                "sandboxPolicy": {"type": "externalSandbox" if self.bad_policy else "dangerFullAccess"},
+                                "activePermissionProfile": {"id": ":danger-full-access"}, "approvalPolicy": "never",
+                                "approvalsReviewer": "user",
+                            },
+                        }})
+                        self.responses.append({"id": message["id"], "result": {}})
+                    return
+                super().send(data)
+
+        for code, bad_policy in ((-32602, False), (-32600, False), (None, True)):
+            with self.subTest(code=code, bad_policy=bad_policy):
+                bridge = SharedThreadBridge(SettingsWebSocket(code, bad_policy), THREAD_ID)
+                with self.assertRaises(SharedThreadBridgeError):
+                    bridge.sync_saved_permissions("full_access")
+        bridge = SharedThreadBridge(SettingsWebSocket(-32601), THREAD_ID)
+        self.assertIsNone(bridge.sync_saved_permissions("full_access"))
+        bridge.start_turn("feedback", client_user_message_id="feedback-1", permission_mode="full_access")
+        params = next(item["params"] for item in bridge.ws.sent if item.get("method") == "turn/start")
+        self.assertEqual(params["permissions"], ":danger-full-access")
+
+        # A previous resume notification must not be mistaken for the update.
+        bridge = SharedThreadBridge(SettingsWebSocket(), THREAD_ID)
+        bridge._pending.append({"method": "thread/settings/updated", "params": {
+            "threadId": THREAD_ID, "threadSettings": {"sandboxPolicy": {"type": "readOnly"}},
+        }})
+        self.assertEqual(bridge.sync_saved_permissions("full_access")["sandbox"], {"type": "dangerFullAccess"})
+
+    def test_changed_and_unchanged_settings_do_not_require_notifications(self) -> None:
+        class NoNotificationWebSocket(FakeWebSocket):
+            def send(self, data: str) -> None:
+                super().send(data)
+                if json.loads(data).get("method") == "thread/settings/update":
+                    self.responses = deque(item for item in self.responses if item.get("method") != "thread/settings/updated")
+
+        ws = NoNotificationWebSocket()
+        bridge = SharedThreadBridge(ws, THREAD_ID)
+        first = bridge.sync_saved_permissions("full_access")
+        self.assertEqual(first["activePermissionProfile"]["id"], ":danger-full-access")
+        second = bridge.sync_saved_permissions("full_access")
+        self.assertEqual(second["sandbox"], {"type": "dangerFullAccess"})
+        self.assertEqual(sum(item.get("method") == "thread/settings/update" for item in ws.sent), 1)
+        self.assertFalse(any(item.get("method") == "turn/start" for item in ws.sent))
+
+    def test_cached_permission_settings_must_belong_to_the_bound_task(self) -> None:
+        for thread in (None, {"id": "01a0de73-9763-7432-8ca4-5892c0904234"}):
+            with self.subTest(thread=thread):
+                ws = FakeWebSocket()
+                bridge = SharedThreadBridge(ws, THREAD_ID)
+                settings = {"thread": thread, "approvalPolicy": "never", "approvalsReviewer": "user",
+                            "sandbox": {"type": "dangerFullAccess"}, "activePermissionProfile": {"id": ":danger-full-access"}}
+                with self.assertRaisesRegex(SharedThreadBridgeError, "wrong task"):
+                    bridge.sync_saved_permissions("full_access", current_settings=settings)
+                self.assertFalse(any(item.get("method") in {"thread/settings/update", "turn/start"} for item in ws.sent))
+
     def test_discovers_loaded_tasks_without_requiring_old_task_to_remain_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -165,7 +475,7 @@ class SharedThreadBridgeTests(unittest.TestCase):
         self.assertEqual(start["params"], {
             "model": "gpt-6-astra", "cwd": "/tmp/project", "ephemeral": False,
             "serviceName": "scene_feedback_workspace", "config": {**config, "model_reasoning_effort": "ultra"},
-            "approvalPolicy": "on-request", "sandbox": "workspace-write", "approvalsReviewer": "user",
+            "approvalPolicy": "on-request", "permissions": ":workspace", "approvalsReviewer": "user",
         })
         self.assertNotIn("model_reasoning_effort", config)
         self.assertTrue(any(item.get("method") == "thread/name/set" for item in ws.sent))
@@ -180,17 +490,18 @@ class SharedThreadBridgeTests(unittest.TestCase):
                 if message.get("method") == "thread/start":
                     self.responses.append({"id": message["id"], "result": {"thread": {"id": created, "ephemeral": False}}})
 
-        for mode, policy, sandbox in (
-            ("full_access", "never", "danger-full-access"),
-            ("workspace_write", "on-request", "workspace-write"),
-            ("read_only", "on-request", "read-only"),
+        for mode, policy, profile in (
+            ("full_access", "never", ":danger-full-access"),
+            ("workspace_write", "on-request", ":workspace"),
+            ("read_only", "on-request", ":read-only"),
         ):
             with self.subTest(mode=mode):
                 ws = CreationWebSocket()
                 bridge = SharedThreadBridge(ws, THREAD_ID)
                 self.assertEqual(bridge.create_thread("gpt-6-astra", Path("/tmp/project"), permission_mode=mode), created)
                 params = next(item["params"] for item in ws.sent if item.get("method") == "thread/start")
-                self.assertEqual((params["approvalPolicy"], params["sandbox"], params["approvalsReviewer"]), (policy, sandbox, "user"))
+                self.assertEqual((params["approvalPolicy"], params["permissions"], params["approvalsReviewer"]), (policy, profile, "user"))
+                self.assertNotIn("sandbox", params)
 
         ws = CreationWebSocket()
         bridge = SharedThreadBridge(ws, THREAD_ID)
@@ -275,6 +586,8 @@ class SharedThreadBridgeTests(unittest.TestCase):
                     self.assertEqual(len(loaded_subscriptions), 1)
                     self.assertEqual(loaded_subscriptions[0]["params"]["threadId"], THREAD_ID)
                     self.assertEqual(loaded_subscriptions[0]["params"]["config"]["mcp_servers"]["scene_feedback"]["env"]["SCENE_FEEDBACK_DATA_DIR"], "/tmp/selected-data")
+                    self.assertNotIn("approvalPolicy", loaded_subscriptions[0]["params"])
+                    self.assertNotIn("sandbox", loaded_subscriptions[0]["params"])
                     self.assertEqual(other_subscriptions, [])
                 finally:
                     bridge.close()

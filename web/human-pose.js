@@ -1,34 +1,67 @@
 export const COCO_EDGES = [[0,1],[0,2],[1,3],[2,4],[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16]];
 export const POSE_COLORS = ['#087f8c','#b65320','#6856aa','#287a46','#be4066'];
 
-export function rectangleBBox(coordinates) {
-  const values = [coordinates?.x, coordinates?.y, coordinates?.x2, coordinates?.y2];
-  if (!values.every(Number.isFinite)) return null;
-  const [x,y,x2,y2] = values.map((value) => Math.max(0, Math.min(1, value)));
-  const bbox = [Math.min(x,x2), Math.min(y,y2), Math.abs(x2-x), Math.abs(y2-y)];
-  return validBBox(bbox) ? bbox : null;
+export function poseEvidenceLabel(result) {
+  if (result?.evidence_kind === 'manual_2d') return '人工二维修正';
+  if (result?.evidence_kind === 'projected_3d') return '三维投影参考';
+  const kind=result?.provenance?.kind;
+  const inferred=kind === 'image_inference' || (!kind && /vitpose/i.test(result?.model?.name || ''));
+  return inferred ? '二维估计' : '二维观测';
 }
+
+export function handJointIndices(names, side) {
+  if (!Array.isArray(names) || !['left','right'].includes(side)) return [];
+  return names.flatMap((name,index) => typeof name === 'string' &&
+    new RegExp('^' + side + '_(?:hand_root|thumb[1-4]|forefinger[1-4]|middle_finger[1-4]|ring_finger[1-4]|pinky_finger[1-4])$').test(name) ? [index] : []);
+}
+export function handJointLabel(name) {
+  const side = name?.startsWith('left_') ? '左手' : '右手';
+  const suffix = String(name || '').replace(/^(left|right)_/,'');
+  if (suffix === 'hand_root') return side + ' · 手腕';
+  const match = /^(thumb|forefinger|middle_finger|ring_finger|pinky_finger)([1-4])$/.exec(suffix);
+  return match ? side + ' · ' + ({thumb:'拇指',forefinger:'食指',middle_finger:'中指',ring_finger:'无名指',pinky_finger:'小指'})[match[1]] +
+    (match[2] === '4' ? '指尖' : '关节 ' + match[2]) : name;
+}
+export function poseEditToken(editId) { return /^[0-9a-f]{32}$/.test(editId || '') ? `[[pose_edit:${editId}]]` : null; }
+export function validPoseEdit(sample) {
+  return sample && poseEditToken(sample.id) && /^[0-9a-f]{32}$/.test(sample.job_id || '') &&
+    /^[0-9a-f]{32}$/.test(sample.reference_id || '') && /^[0-9a-f]{64}$/.test(sample.image_sha256 || '') &&
+    sample.image_orientation === 'exif_oriented_display' && typeof sample.keypoint_profile === 'string' &&
+    Array.isArray(sample.edits) && sample.edits.length > 0 && sample.edits.length <= 256 &&
+    new Set(sample.edits.map((point) => point?.name)).size === sample.edits.length && sample.edits.every((point) =>
+      typeof point?.name === 'string' && ['visible','occluded','missing'].includes(point.visibility) &&
+      (point.visibility === 'missing' ? point.x === undefined && point.y === undefined :
+        point.x === undefined && point.y === undefined ? point.visibility === 'occluded' :
+          Number.isFinite(point.x) && Number.isFinite(point.y) && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1 &&
+            (point.visibility !== 'visible' || point.x < 1 && point.y < 1)));
+}
+export function collectPoseEdits(note,candidates) {
+  const tokens=[...note.matchAll(/\[\[pose_edit:([0-9a-f]{32})\]\]/g)], starts=new Set(tokens.map((match) => match.index));
+  for (const match of note.matchAll(/\[\[pose_edit:/g)) if (!starts.has(match.index)) throw new Error('手部修正引用不完整，请重新点击「引用修正」。');
+  const ids=[...new Set(tokens.map((match) => match[1]))];
+  if (ids.length > 8) throw new Error('一条提示最多引用 8 帧关键点修正。');
+  return ids.map((id) => {
+    const found=candidates.filter((sample) => sample.id === id);
+    if (found.length !== 1 || !validPoseEdit(found[0])) throw new Error('关键点修正引用已失效，请重新修正或引用。');
+    const sample=found[0];
+    return {id:sample.id,job_id:sample.job_id,reference_id:sample.reference_id,image_sha256:sample.image_sha256,
+      image_orientation:sample.image_orientation,keypoint_profile:sample.keypoint_profile,edits:structuredClone(sample.edits)};
+  });
+}
+export function correctedPoseFrame(frame,sample) {
+  if (!sample) return frame;
+  const keypoints=(frame.keypoints || []).map((point) => {
+    const edit=sample.edits.find((item) => item.name === point.name);
+    return !edit ? point : {...point,...(edit.x !== undefined ? {x:edit.x,y:edit.y} : {}),
+      manual_visibility:edit.visibility,manual_source:'manual_2d',manual_position:edit.x !== undefined,in_frame:edit.visibility === 'visible'};
+  });
+  return {...frame,keypoints};
+}
+
 export function validBBox(bbox) {
   return Array.isArray(bbox) && bbox.length === 4 && bbox.every(Number.isFinite) &&
     bbox[0] >= 0 && bbox[1] >= 0 && bbox[2] > 0.01 && bbox[3] > 0.01 &&
     bbox[0]+bbox[2] <= 1.000001 && bbox[1]+bbox[3] <= 1.000001;
-}
-export function sampledPoseFrameCount(frames, start, end, fps) {
-  if (![start,end,fps].every(Number.isFinite) || end < start || fps <= 0) return 0;
-  let count=0, nextTime=-Infinity;
-  for (const frame of Array.isArray(frames) ? frames : []) {
-    if (!Number.isFinite(frame?.time_sec) || frame.time_sec < start-1e-6 || frame.time_sec > end+1e-6) continue;
-    if (frame.time_sec+1e-6 >= nextTime) { count++; nextTime=frame.time_sec+1/fps; }
-  }
-  return count;
-}
-export function firstPoseFrame(view, start) {
-  return Array.isArray(view?.frames) && Number.isFinite(start)
-    ? view.frames.find((frame) => Number.isFinite(frame?.time_sec) && frame.time_sec >= start-1e-6) || null
-    : null;
-}
-export function sampledPoseViewCount(views, start, end, fps) {
-  return Array.isArray(views) ? views.reduce((sum, view) => sum + sampledPoseFrameCount(view?.frames, start, end, fps), 0) : 0;
 }
 export function poseToken(jobId, referenceId) {
   if (![jobId, referenceId].every((value) => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value))) return null;
@@ -87,15 +120,16 @@ export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLO
   context.save();
   context.strokeStyle=color; context.fillStyle=color; context.lineWidth=2;
   const bbox = validBBox(frame.bbox) ? frame.bbox : null;
-  const lost = frame.tracking_status === 'lost';
+  const lost = frame.tracking_status === 'lost' && !frame.keypoints?.some((point) => point.manual_visibility === 'visible');
   if (bbox) {
     context.setLineDash(lost ? [5,4] : [3,3]);
     context.strokeRect(bbox[0]*width,bbox[1]*height,bbox[2]*width,bbox[3]*height);
     context.setLineDash([]);
   }
   const points = Array.isArray(frame.keypoints) ? frame.keypoints : [];
-  const usable = (point) => !lost && point?.in_frame !== false && Number.isFinite(point?.x) && Number.isFinite(point?.y) &&
-    Number.isFinite(point?.score) && point.score >= threshold && point.score <= 1 && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1;
+  const usable = (point) => point?.in_frame !== false && Number.isFinite(point?.x) && Number.isFinite(point?.y) &&
+    point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1 && (point.manual_visibility !== undefined
+      ? point.manual_visibility === 'visible' : !lost && Number.isFinite(point.score) && point.score >= threshold && point.score <= 1);
   for (const edge of Array.isArray(edges) ? edges : COCO_EDGES) {
     if (!Array.isArray(edge) || edge.length !== 2 || !edge.every(Number.isInteger)) continue;
     const [a,b]=edge.map((index) => points[index]);

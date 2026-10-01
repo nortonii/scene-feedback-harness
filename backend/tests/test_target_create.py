@@ -18,6 +18,7 @@ from gateway import WorkspaceGateway  # noqa: E402
 from server import make_server  # noqa: E402
 from shared_thread_bridge import OwnedEmptyThreadMissing  # noqa: E402
 from shared_thread_bridge import SharedThreadRPCRejected  # noqa: E402
+from shared_thread_bridge import SharedThreadPermissionMismatch  # noqa: E402
 
 
 OLD = "01a0d906-146e-7762-a1f9-49baeda8e270"
@@ -53,11 +54,13 @@ class FakeBridge:
 
 
 class FakeAdapter:
-    def __init__(self, thread_id, on_event=None, *, allow_owned_resume=False, initial_bridge=None, thread_config=None):
+    def __init__(self, thread_id, on_event=None, *, allow_owned_resume=False, initial_bridge=None, thread_config=None, permission_mode=None):
         self.thread_id = thread_id
         self.on_event = on_event
         self.allow_owned_resume = allow_owned_resume
         self.initial_bridge = initial_bridge
+        self.thread_config = thread_config
+        self.permission_mode = permission_mode
         self.closed = False
         self.fail_start = False
 
@@ -107,6 +110,7 @@ class CreateTargetTests(unittest.TestCase):
         self.assertEqual(created["workspace"]["queue"][0]["target_thread_id"], OLD)
         self.assertEqual(self.store.scene(), scene)
         self.assertTrue(self.gateway.adapter.allow_owned_resume)
+        self.assertEqual(self.gateway.adapter.permission_mode, "full_access")
         self.assertTrue(self.original.closed)
         self.assertEqual(self.bridge.created, [("gpt-6-astra", self.project, "ultra", "New Astra", "full_access")])
         self.assertEqual(created["workspace"]["created_thread_specs"][NEW]["permission_mode"], "full_access")
@@ -144,6 +148,22 @@ class CreateTargetTests(unittest.TestCase):
         self.assertEqual(self.gateway.state()["created_thread_specs"][NEW]["permission_mode"], "workspace_write")
         self.assertEqual(self.gateway.state()["thread_id"], OLD)
 
+    def test_permission_mismatch_keeps_created_task_recoverable_without_binding(self):
+        class WrongPermissionBridge(FakeBridge):
+            def create_thread(self, *args, **kwargs):
+                super().create_thread(*args, **kwargs)
+                raise SharedThreadPermissionMismatch("saved full_access was not applied", created_thread_id=NEW)
+
+        bridge = WrongPermissionBridge()
+        with patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=bridge), patch("gateway.SharedDesktopAdapter") as replacement:
+            with self.assertRaises(APIError) as raised:
+                self.gateway.create_target("gpt-6-astra", permission_mode="full_access")
+        self.assertEqual(raised.exception.detail, {"thread_id": NEW})
+        self.assertEqual(self.gateway.state()["created_thread_specs"][NEW]["permission_mode"], "full_access")
+        self.assertEqual(self.gateway.state()["thread_id"], OLD)
+        self.assertTrue(bridge.closed)
+        replacement.assert_not_called()
+
     def test_model_catalog_only_offers_visible_image_models(self):
         with patch("gateway.SharedThreadBridge.connect_to_desktop", return_value=self.bridge):
             catalog = self.gateway.list_models()
@@ -160,8 +180,7 @@ class CreateTargetTests(unittest.TestCase):
 
         class ScopedAdapter(FakeAdapter):
             def __init__(self, *args, thread_config=None, **kwargs):
-                self.thread_config = thread_config
-                super().__init__(*args, **kwargs)
+                super().__init__(*args, thread_config=thread_config, **kwargs)
 
         project = self.root / "new-scene"
         project.mkdir()
@@ -218,6 +237,7 @@ class CreateTargetTests(unittest.TestCase):
         self.assertEqual(state["created_thread_specs"][NEW]["permission_mode"], "full_access")
         self.assertEqual(self.bridge.created[0][-1], "full_access")
         self.assertTrue(self.gateway.adapter.allow_owned_resume)
+        self.assertEqual(self.gateway.adapter.permission_mode, "full_access")
 
     def test_uncertain_delivery_disables_empty_task_recreation(self):
         with self.store.lock:
@@ -258,6 +278,7 @@ class CreateTargetTests(unittest.TestCase):
         self.assertIn(NEW, state["created_thread_ids"])
         self.assertEqual(self.bridge.created[0][-1], "read_only")
         self.assertEqual(state["created_thread_specs"][NEW]["permission_mode"], "read_only")
+        self.assertEqual(self.gateway.adapter.permission_mode, "read_only")
 
     def test_http_create_requires_browser_capability(self):
         self.gateway.close()
@@ -301,9 +322,54 @@ class CreateTargetTests(unittest.TestCase):
             server = make_server(port=0, data_dir=self.root / "data", project_dir=self.project, external_review=True, shared_thread_id=OLD)
         try:
             self.assertTrue(server.workspace_gateway.adapter.allow_owned_resume)
+            self.assertIsNone(server.workspace_gateway.adapter.permission_mode)
         finally:
             server.workspace_gateway.close()
             server.server_close()
+
+    def test_fresh_shared_task_startup_has_no_saved_permission_override(self):
+        self.gateway.close()
+        with patch("shared_thread_adapter.SharedDesktopAdapter", FakeAdapter):
+            server = make_server(port=0, data_dir=self.root / "fresh-data", project_dir=self.project, external_review=True, shared_thread_id=OLD)
+        try:
+            adapter = server.workspace_gateway.adapter
+            self.assertEqual(adapter.thread_id, OLD)
+            self.assertFalse(adapter.allow_owned_resume)
+            self.assertIsNone(adapter.permission_mode)
+        finally:
+            server.workspace_gateway.close()
+            server.server_close()
+
+    def test_restart_preserves_each_explicit_owned_mode_with_scoped_mcp(self):
+        self.gateway.close()
+        for mode in ("full_access", "workspace_write", "read_only"):
+            with self.subTest(mode=mode):
+                with self.store.lock:
+                    workspace = self.store.state["workspace"]
+                    workspace["created_thread_ids"] = [OLD]
+                    workspace["created_thread_specs"] = {OLD: {"permission_mode": mode}}
+                    self.store._save()
+                with patch("shared_thread_adapter.SharedDesktopAdapter", FakeAdapter):
+                    server = make_server(port=0, data_dir=self.root / "data", project_dir=self.project, external_review=True, shared_thread_id=OLD)
+                try:
+                    adapter = server.workspace_gateway.adapter
+                    self.assertTrue(adapter.allow_owned_resume)
+                    self.assertEqual(adapter.permission_mode, mode)
+                    self.assertEqual(adapter.thread_config["mcp_servers"]["scene_feedback"]["env"]["SCENE_FEEDBACK_PROJECT_DIR"], str(self.project))
+                finally:
+                    server.workspace_gateway.close()
+                    server.server_close()
+
+    def test_unowned_or_unknown_saved_modes_do_not_override_permissions(self):
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/scoped"}}}}
+        self.gateway.thread_config = config
+        for owned, spec in ((False, {"permission_mode": "full_access"}), (True, {}), (True, {"permission_mode": "invalid"})):
+            with self.subTest(owned=owned, spec=spec):
+                with self.store.lock:
+                    self.store.state["workspace"]["created_thread_ids"] = [NEW] if owned else []
+                    self.store.state["workspace"]["created_thread_specs"] = {NEW: spec}
+                self.assertEqual(self.gateway._owned_adapter_config(NEW), {"thread_config": config})
+        self.assertEqual(config["mcp_servers"]["scene_feedback"]["env"]["SCENE_FEEDBACK_DATA_DIR"], "/tmp/scoped")
 
     def test_http_creation_error_returns_created_task_id_for_manual_recovery(self):
         class FailNewAdapter(FakeAdapter):

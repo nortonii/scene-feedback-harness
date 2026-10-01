@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import errno
 import hmac
+import hashlib
 from http.cookies import CookieError, SimpleCookie
 import ipaddress
 import json
@@ -28,7 +29,7 @@ except ImportError:  # pragma: no cover - this server requires Unix file locking
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
 from projects import ProjectContext, ProjectRegistry
-from human_pose import HumanPoseJobs
+from human_pose import HumanPoseJobs, prepare_pose_edit_feedback
 
 
 HERE = Path(__file__).resolve().parent
@@ -41,7 +42,7 @@ WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confir
 WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 PROJECT_ROUTE = re.compile(r"^/p/([0-9a-f]{32})(/.*)?$")
-POSE_ROUTE = re.compile(r"^/api/workspace/pose/([0-9a-f]{32})(/cancel)?$")
+POSE_ROUTE = re.compile(r"^/api/workspace/pose/([0-9a-f]{32})$")
 
 
 class _DataDirLock:
@@ -78,11 +79,16 @@ def _make_server_unlocked(
     model: str | None = None,
     enable_codex: bool = False,
     external_review: bool = False,
+    feedback_transport: str = "legacy",
     shared_thread_id: str | None = None,
     adapter: object | None = None,
     listen_host: str = "127.0.0.1",
     public_base_url: str | None = None,
 ) -> ThreadingHTTPServer:
+    if feedback_transport == "mcp_events":
+        if enable_codex or shared_thread_id or adapter is not None:
+            raise ValueError("MCP events cannot use a Codex App Server or shared desktop adapter")
+        external_review = True
     if external_review and enable_codex:
         raise ValueError("external review cannot start a separate Codex App Server thread")
     if shared_thread_id and (not external_review or adapter is not None):
@@ -106,7 +112,7 @@ def _make_server_unlocked(
     store = SceneStore(data_dir)
     web_root = Path(web_dir).expanduser().resolve()
     project_root = Path(project_dir or os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)).expanduser().resolve()
-    gateway = WorkspaceGateway(store, project_root, adapter=adapter, external_review=external_review)
+    gateway = WorkspaceGateway(store, project_root, adapter=adapter, external_review=external_review, feedback_transport=feedback_transport)
     if shared_thread_id:
         from shared_thread_adapter import SharedDesktopAdapter
         # The CLI ID bootstraps the first binding. A later user-selected task
@@ -115,6 +121,7 @@ def _make_server_unlocked(
         target_id = persisted_id or shared_thread_id
         owned_ids = (store.state.get("workspace") or {}).get("created_thread_ids", [])
         kwargs = {"allow_owned_resume": True} if target_id in owned_ids else {}
+        kwargs.update(gateway._owned_adapter_config(target_id))
         gateway.adapter = SharedDesktopAdapter(target_id, on_event=gateway.scoped_adapter_callback(), **kwargs)
     if enable_codex and adapter is None:
         from appserver_adapter import CodexAppServerAdapter
@@ -291,6 +298,26 @@ def _make_server_unlocked(
             parsed = urlsplit(self.path)
             path = self._select_context(unquote(parsed.path))
             query = parse_qs(parsed.query)
+            if path == "/mcp":
+                supplied = self.headers.get("Authorization", "")
+                if not hmac.compare_digest(supplied, "Bearer " + self.context.store.control_token):
+                    raise APIError(401, "MCP endpoint requires this project's bearer credential")
+                if self.command != "POST":
+                    raise APIError(405, "this stateless MCP endpoint accepts POST")
+                try:
+                    rpc_length = int(self.headers.get("Content-Length", "0"))
+                except ValueError as exc:
+                    raise APIError(411, "valid Content-Length is required") from exc
+                if rpc_length > 1024 * 1024:
+                    raise APIError(413, "MCP request exceeds 1 MiB")
+                from plugin_rpc import PluginRPC
+                result = PluginRPC(self.context).handle(self._read_json())
+                if result is None:
+                    self.send_response(202)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                return self._send_json(200, result)
             if self._bootstrap_lan_access(path, query):
                 return
             if self._needs_lan_access() and not self._has_lan_access():
@@ -302,11 +329,13 @@ def _make_server_unlocked(
             if self.command == "GET" and path == "/api/projects":
                 return self._send_json(200, registry.list(self.context.project_id))
             if self.command == "POST" and path == "/api/projects":
+                if self.context.gateway.feedback_transport == "mcp_events":
+                    raise APIError(409, "create a separate event workspace instead of a Codex-bound project")
                 self._require_browser_capability()
                 return self._send_json(201, registry.create(self._read_json()))
 
             if self.command == "GET" and path == "/api/health":
-                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "scene_snapshots_supported": True, "snapshot_comparison_supported": True, "projects_supported": True, "project_id": self.context.project_id, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if gateway.external_review else "appserver"})
+                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "scene_snapshots_supported": True, "snapshot_comparison_supported": True, "projects_supported": True, "project_id": self.context.project_id, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if gateway.external_review else "appserver", "feedback_transport": gateway.feedback_transport})
             if self.command == "GET" and path == "/api/workspace/state":
                 state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
                 state["browser_url"] = self._browser_url(state["session_id"])
@@ -324,13 +353,36 @@ def _make_server_unlocked(
             if self.command == "GET" and path == "/api/workspace/pose":
                 session_id = query.get("session_id", [None])[0] or gateway.state()["session_id"]
                 return self._send_json(200, gateway.pose_jobs.list(session_id))
-            if self.command == "POST" and path == "/api/workspace/pose":
+            if self.command == "POST" and path == "/api/workspace/pose/sources":
+                self._require_control_key()
+                return self._send_json(201, gateway.pose_jobs.export_sources(self._read_json()))
+            if self.command == "POST" and path == "/api/workspace/pose/import":
                 self._require_pose_access()
-                return self._send_json(202, gateway.pose_jobs.start(self._read_json()))
+                payload = self._read_json()
+                if "result_path" in payload:
+                    self._require_control_key()
+                return self._send_json(200, gateway.pose_jobs.import_result(payload))
+            if self.command == "POST" and path == "/api/workspace/pose/corrections/export":
+                self._require_pose_access()
+                payload = self._read_json()
+                if set(payload) - {"session_id", "pose_edits"}:
+                    raise APIError(400, "correction export accepts only session_id and pose_edits")
+                session_id = payload.get("session_id") or gateway.state()["session_id"]
+                prepared = prepare_pose_edit_feedback(store, session_id, payload, gateway.pose_jobs)
+                return self._send_json(200, {"documents": [item["document"] for item in prepared]})
+            correction_match = re.fullmatch(r"/api/workspace/pose/corrections/([0-9a-f]{32})/([0-9a-f]{32})", path)
+            if self.command == "GET" and correction_match:
+                self._require_pose_access()
+                feedback_id, edit_id = correction_match.groups()
+                feedback = next((item for item in store.state["feedback"] if item["feedback_id"] == feedback_id), None)
+                if feedback is None or not any(item["id"] == edit_id for item in feedback.get("human_pose_edits", [])):
+                    raise APIError(404, "pose correction not found in this project")
+                correction_path = store.data_dir / "human_pose" / "corrections" / feedback_id / (edit_id + ".json")
+                return self._send_file(correction_path)
             pose_match = POSE_ROUTE.fullmatch(path)
             if pose_match:
-                job_id, cancel = pose_match.groups()
-                if self.command == "GET" and not cancel:
+                job_id = pose_match.group(1)
+                if self.command == "GET":
                     offset_text = query.get("frame_offset", ["0"])
                     limit_text = query.get("max_frames", [None])
                     reference_ids = query.get("reference_id", [None])
@@ -355,13 +407,9 @@ def _make_server_unlocked(
                     if download[0] == "1":
                         if limit is not None or offset or reference_id is not None or view_id is not None:
                             raise APIError(400, "pose download cannot be combined with frame filters")
-                        limit = "all"
+                        return self._send_json(200, gateway.pose_jobs.download(job_id))
                     return self._send_json(200, gateway.pose_jobs.get(job_id, frame_offset=offset, max_frames=limit,
                                                                        reference_id=reference_id, view_id=view_id))
-                if self.command == "POST" and cancel:
-                    self._require_pose_access()
-                    self._read_json()
-                    return self._send_json(200, gateway.pose_jobs.cancel(job_id))
             if self.command == "POST" and path == "/api/workspace/targets":
                 self._require_browser_capability()
                 payload = self._read_json()
@@ -557,6 +605,14 @@ def _make_server_unlocked(
         if context.gateway.pose_jobs is None:
             context.gateway.pose_jobs = HumanPoseJobs(context.store)
         context.gateway.registry_project_id = context.project_id
+        if feedback_transport == "mcp_events" and context.gateway.mcp_events is None:
+            from mcp_events import MCPEvents
+            context.gateway.ensure()
+            context.gateway.mcp_events = MCPEvents(
+                context.store, context.project_id,
+                principal_validator=lambda principal: hmac.compare_digest(
+                    principal, hashlib.sha256(context.store.control_token.encode()).hexdigest()),
+            )
         context.gateway.project_name = context.name
         context.gateway.desktop_seed_thread_id = (
             (store.state.get("workspace") or {}).get("thread_id") or getattr(gateway.adapter, "thread_id", None)
@@ -567,7 +623,7 @@ def _make_server_unlocked(
                     "SCENE_FEEDBACK_DATA_DIR": str(context.store.data_dir),
                     "SCENE_FEEDBACK_PROJECT_DIR": str(context.project_dir),
                     "SCENE_FEEDBACK_WEB_DIR": str(web_root),
-                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-vitpose-one-click"},
+                    "SCENE_FEEDBACK_TOOLS_VERSION": "2026-09-30-external-pose-results"},
             "tool_timeout_sec": 120, "required": True,
         }}}
         context.gateway.browser_url = lambda session_id: browser_url(session_id, server.server_port, context, prefixed=True)
@@ -598,16 +654,17 @@ def _make_server_unlocked(
                 with child_store.lock:
                     child_store.state["scene"]["name"] = record["name"]
                     child_store._save()
-            child_gateway = WorkspaceGateway(child_store, child_project, external_review=external_review)
+            child_gateway = WorkspaceGateway(child_store, child_project, external_review=external_review, feedback_transport=feedback_transport)
             context = ProjectContext(record["project_id"], record["name"], child_store, child_gateway, child_lock)
             configure_context(context)
             child_workspace = child_gateway.ensure()
             if child_workspace["project_id"] != context.project_id:
                 raise RuntimeError("managed project ID does not match its stored workspace")
             target_id = child_workspace.get("thread_id")
-            if external_review and target_id:
+            if external_review and target_id and feedback_transport == "legacy":
                 from shared_thread_adapter import SharedDesktopAdapter
-                kwargs = {"allow_owned_resume": True, "thread_config": child_gateway.thread_config} if target_id in child_workspace.get("created_thread_ids", []) else {}
+                kwargs = {"allow_owned_resume": True} if target_id in child_workspace.get("created_thread_ids", []) else {}
+                kwargs.update(child_gateway._owned_adapter_config(target_id))
                 child_gateway.adapter = SharedDesktopAdapter(target_id, on_event=child_gateway.scoped_adapter_callback(), **kwargs)
             return context
         except BaseException:
@@ -643,6 +700,7 @@ def make_server(
     model: str | None = None,
     enable_codex: bool = False,
     external_review: bool = False,
+    feedback_transport: str = "legacy",
     shared_thread_id: str | None = None,
     adapter: object | None = None,
     listen_host: str = "127.0.0.1",
@@ -659,6 +717,7 @@ def make_server(
             model=model,
             enable_codex=enable_codex,
             external_review=external_review,
+            feedback_transport=feedback_transport,
             shared_thread_id=shared_thread_id,
             adapter=adapter,
             listen_host=listen_host,
@@ -694,6 +753,7 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("SCENE_FEEDBACK_MODEL"), help="Codex model ID for this project thread")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--no-codex", action="store_true", help="serve the workbench without starting Codex App Server")
+    mode.add_argument("--mcp-events", action="store_true", help="opt in to MCP 2026-07-28 webhook feedback; no Codex adapter")
     mode.add_argument("--external-review", action="store_true", help="review in an existing Codex task")
     parser.add_argument("--shared-thread-id", help="deliver submitted feedback into this already-open Codex Desktop task")
     args = parser.parse_args()
@@ -704,8 +764,9 @@ def main() -> None:
         web_dir=args.web_dir,
         project_dir=args.project_dir,
         model=args.model,
-        enable_codex=not args.no_codex and not args.external_review,
-        external_review=args.external_review,
+        enable_codex=not args.no_codex and not args.external_review and not args.mcp_events,
+        external_review=args.external_review or args.mcp_events,
+        feedback_transport="mcp_events" if args.mcp_events else "legacy",
         shared_thread_id=args.shared_thread_id,
         listen_host=args.listen_host,
         public_base_url=args.public_base_url,

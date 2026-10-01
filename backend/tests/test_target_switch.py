@@ -23,10 +23,12 @@ NEW = "01a0de73-9763-7432-8ca4-5892c0904234"
 
 
 class TargetAdapter:
-    def __init__(self, thread_id: str, on_event=None, *, thread_config=None):
+    def __init__(self, thread_id: str, on_event=None, *, thread_config=None, allow_owned_resume=False, permission_mode=None):
         self.thread_id = thread_id
         self.on_event = on_event
         self.thread_config = thread_config
+        self.allow_owned_resume = allow_owned_resume
+        self.permission_mode = permission_mode
         self.connected = False
         self.sent: list[str] = []
         self.lookups: list[str] = []
@@ -83,10 +85,32 @@ class TargetSwitchTests(unittest.TestCase):
         old = {"id": OLD, "cwd": str(self.root), "status": {"type": "idle"}, "name": "Previous Astra", "model": "gpt-6-sol"}
         return [(old_socket, old), (new_socket, target)]
 
-    def replacement(self, thread_id: str, on_event, *, thread_config=None) -> TargetAdapter:
-        adapter = TargetAdapter(thread_id, on_event, thread_config=thread_config)
+    def replacement(self, thread_id: str, on_event, **kwargs) -> TargetAdapter:
+        adapter = TargetAdapter(thread_id, on_event, **kwargs)
         self.created.append(adapter)
         return adapter
+
+    def test_switch_restores_saved_owned_modes_and_leaves_external_task_unchanged(self) -> None:
+        self.gateway.ensure()
+        self.store.workspace_thread(OLD)
+        config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": str(self.store.data_dir)}}}}
+        self.gateway.thread_config = config
+        with patch("gateway.SharedThreadBridge.discover_loaded_threads", return_value=self.catalog()), patch("gateway.SharedDesktopAdapter", side_effect=self.replacement), patch.object(self.gateway, "wake"):
+            for mode in ("full_access", "workspace_write", "read_only"):
+                with self.subTest(mode=mode):
+                    with self.store.lock:
+                        workspace = self.store.state["workspace"]
+                        workspace["created_thread_ids"] = [NEW]
+                        # An external task's stray spec must not grant permission.
+                        workspace["created_thread_specs"] = {NEW: {"permission_mode": mode}, OLD: {"permission_mode": "full_access"}}
+                    self.gateway.switch_target(NEW)
+                    self.assertTrue(self.gateway.adapter.allow_owned_resume)
+                    self.assertEqual(self.gateway.adapter.permission_mode, mode)
+                    self.assertEqual(self.gateway.adapter.thread_config, config)
+                    self.gateway.switch_target(OLD)
+                    self.assertFalse(self.gateway.adapter.allow_owned_resume)
+                    self.assertIsNone(self.gateway.adapter.permission_mode)
+                    self.assertEqual(self.gateway.adapter.thread_config, config)
 
     def test_switch_keeps_older_queue_on_original_task_and_new_feedback_on_new_task(self) -> None:
         with patch("gateway.SharedThreadBridge.discover_loaded_threads", return_value=self.catalog()), patch("gateway.SharedDesktopAdapter", side_effect=self.replacement), patch.object(self.gateway, "wake"):

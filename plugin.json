@@ -1,0 +1,41 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "scene-feedback-harness",
+  "version": "0.1.10",
+  "description": "Review reference images and reconstructed scenes, annotate visual errors, and deliver image feedback through MCP tools and events.",
+  "author": {
+    "name": "nortonii"
+  },
+  "homepage": "https://github.com/nortonii/scene-feedback-harness",
+  "repository": "https://github.com/nortonii/scene-feedback-harness",
+  "license": "MIT",
+  "keywords": [
+    "3d",
+    "visual-feedback",
+    "reconstruction",
+    "mcp-events"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Scene Feedback",
+        "shortDescription": "Visual reconstruction feedback",
+        "developerName": "nortonii",
+        "category": "Productivity",
+        "capabilities": [
+          "Read",
+          "Write",
+          "Interactive"
+        ],
+        "websiteURL": "https://github.com/nortonii/scene-feedback-harness",
+        "defaultPrompt": [
+          "进入人工调试模式，让我在参考图和当前场景上指出问题。",
+          "Review this reconstruction with annotated visual feedback."
+        ],
+        "longDescription": "Compare reference images with reconstructed 3D scenes, mark visual errors, and share original and annotated evidence through a project-specific MCP service. Type @ in one prompt to reference objects, parts, annotations, frozen images and source-bound human evidence. The workbench supports multiple camera views, dynamic frames, imported WholeBody133 evidence and manual hand keypoint corrections. Human reconstruction and tracking run in a separate capsule skill. Experimental MCP Events delivery requires a supporting host and a verified subscription.",
+        "logo": "./assets/icon.svg",
+        "composerIcon": "./assets/icon.svg"
+      }
+    }
+  }
+}

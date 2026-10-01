@@ -17,13 +17,19 @@ from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
 from shared_thread_adapter import DeliveryNotReadyError, DeliveryRejectedError
 from shared_thread_adapter import SharedDesktopAdapter
 from shared_thread_bridge import OwnedEmptyThreadMissing, SharedThreadBridge, SharedThreadNotIdle
-from shared_thread_bridge import SharedThreadBridgeError, SharedThreadRPCRejected
+from shared_thread_bridge import SharedThreadBridgeError, SharedThreadRPCRejected, SharedThreadPermissionMismatch
 
 
 class WorkspaceGateway:
     def __init__(self, store: SceneStore, project_dir: str | Path, *, adapter: Any = None, external_review: bool = False,
                  desktop_seed_thread_id: str | None = None, thread_config: dict[str, Any] | None = None,
-                 target_validator: Any = None):
+                 target_validator: Any = None, feedback_transport: str = "legacy"):
+        if feedback_transport not in {"legacy", "mcp_events"}:
+            raise ValueError("unknown feedback transport")
+        if feedback_transport == "mcp_events" and (adapter is not None or not external_review):
+            raise ValueError("MCP events require external review without a Codex adapter")
+        self.feedback_transport = feedback_transport
+        self.mcp_events: Any = None
         self.store = store
         self.project_dir = Path(project_dir).expanduser().resolve()
         self.adapter = adapter
@@ -54,25 +60,42 @@ class WorkspaceGateway:
         mode = "external" if self.external_review else "appserver"
         with self.store.lock:
             stored = self.store.state["workspace"]
+            transport = stored.get("feedback_transport", "legacy")
             existing = stored.get("delivery_mode")
             if existing is not None and existing != mode:
                 raise APIError(409, f"workspace is already bound to {existing} delivery")
-            if existing is None:
-                if self.external_review and (stored.get("thread_id") or stored.get("queue")):
-                    raise APIError(409, "workspace already contains Codex App Server activity")
+            if transport != self.feedback_transport:
+                if stored.get("thread_id") or stored.get("queue") or "feedback_transport" in stored:
+                    raise APIError(409, "workspace feedback transport differs; use a separate data directory")
+            if existing is None and self.external_review and (stored.get("thread_id") or stored.get("queue")):
+                raise APIError(409, "workspace already contains Codex App Server activity")
+            changed = existing is None
+            if changed:
                 stored["delivery_mode"] = mode
+            if self.feedback_transport == "mcp_events" and "feedback_transport" not in stored:
+                stored["feedback_transport"] = self.feedback_transport
+                changed = True
+            if changed:
                 self.store._save()
             return copy.deepcopy(stored)
 
     def state(self, *, include_capability: bool = False, preferred_session_id: str | None = None) -> dict[str, Any]:
         self.ensure(preferred_session_id)
         result = self.store.workspace()
+        result["feedback_transport"] = self.feedback_transport
+        if self.mcp_events is not None:
+            result["event_delivery"] = self.mcp_events.status(result["session_id"])
+            self._sync_event_queue(result)
         result.pop("events", None)
         result["events_cursor"] = result.pop("event_seq")
         result["object_prompts_supported"] = True
         result["inline_references_supported"] = True
+        result["image_references_supported"] = True
         result["dynamic_scenes_supported"] = True
         result["human_pose_supported"] = self.pose_jobs is not None
+        result["human_pose_inference_supported"] = False
+        result["human_pose_mode"] = "external_results"
+        result["pose_corrections_supported"] = True
         result["desktop_available"] = self.external_review and bool(
             result.get("thread_id") or getattr(self.adapter, "thread_id", None) or self.desktop_seed_thread_id
         )
@@ -85,8 +108,27 @@ class WorkspaceGateway:
             result["browser_capability"] = self.store.browser_token
         return result
 
+    def _sync_event_queue(self, result: dict[str, Any]) -> None:
+        """Project event receipts are separate from Codex turn completion."""
+        for item in result["queue"]:
+            if item.get("feedback_transport") == "mcp_events":
+                item.update(self.mcp_events.feedback_status(item["feedback_id"]))
+
     def start(self) -> None:
         self.ensure()
+        if self.feedback_transport == "mcp_events":
+            if self.mcp_events is None:
+                raise RuntimeError("MCP events service is not configured")
+            self._started = True
+            with self.store.lock:
+                pending = [self.store.feedback_by_id(item["feedback_id"]) for item in self.store.state["workspace"]["queue"]
+                           if item.get("feedback_transport") == "mcp_events"]
+            if self.store.get_session(self.ensure()["session_id"])["status"] == "open":
+                for packet in pending:
+                    self.mcp_events.emit_feedback(packet)
+            self.mcp_events.start()
+            self.store.workspace_agent(status="external_idle")
+            return
         self._restore_blocked_visual_feedback()
         self._started = True
         if self.external_review and self.adapter is None:
@@ -191,6 +233,8 @@ class WorkspaceGateway:
                 self.store.workspace_event("saved_visual_feedback_resumed", {"feedback_ids": restored})
 
     def close(self) -> None:
+        if self.mcp_events is not None:
+            self.mcp_events.close()
         if self.pose_jobs is not None:
             self.pose_jobs.close()
         with self._worker_lock:
@@ -236,8 +280,16 @@ class WorkspaceGateway:
     def _creation_config(self) -> dict[str, Any]:
         return {"config": copy.deepcopy(self.thread_config)} if self.thread_config is not None else {}
 
-    def _owned_adapter_config(self) -> dict[str, Any]:
-        return {"thread_config": copy.deepcopy(self.thread_config)} if self.thread_config is not None else {}
+    def _owned_adapter_config(self, thread_id: str | None = None) -> dict[str, Any]:
+        config = {"thread_config": copy.deepcopy(self.thread_config)} if self.thread_config is not None else {}
+        with self.store.lock:
+            workspace = self.store.state.get("workspace") or {}
+            if thread_id in workspace.get("created_thread_ids", []):
+                spec = workspace.get("created_thread_specs", {}).get(thread_id)
+                mode = spec.get("permission_mode") if isinstance(spec, dict) else None
+                if isinstance(mode, str) and mode in {"full_access", "workspace_write", "read_only"}:
+                    config["permission_mode"] = mode
+        return config
 
     def scoped_adapter_callback(self, token: object | None = None):
         """Ignore events from a Desktop adapter after it has been replaced.
@@ -290,6 +342,8 @@ class WorkspaceGateway:
 
     def list_targets(self) -> dict[str, Any]:
         """Show compatible user tasks and the current task's saved title."""
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         current_id, seed_id = self._desktop_entry()
         try:
             discovered = SharedThreadBridge.discover_loaded_threads()
@@ -371,6 +425,8 @@ class WorkspaceGateway:
         return {"models": models, "default_model": default_model or (models[0]["model"] if models else None)}
 
     def list_models(self) -> dict[str, Any]:
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         _, current_id = self._desktop_entry()
         try:
             bridge = SharedThreadBridge.connect_to_desktop(current_id)
@@ -459,14 +515,21 @@ class WorkspaceGateway:
                 # narrower behavior when recreating them instead of silently
                 # granting workspace writes.
                 spec.setdefault("permission_mode", "read_only")
-                new_id = bridge.create_thread(
-                    spec["model"],
-                    self.project_dir,
-                    reasoning_effort=spec["reasoning_effort"],
-                    title=spec.get("title"),
-                    permission_mode=spec["permission_mode"],
-                    **self._creation_config(),
-                )
+                permission_error = None
+                try:
+                    new_id = bridge.create_thread(
+                        spec["model"],
+                        self.project_dir,
+                        reasoning_effort=spec["reasoning_effort"],
+                        title=spec.get("title"),
+                        permission_mode=spec["permission_mode"],
+                        **self._creation_config(),
+                    )
+                except SharedThreadPermissionMismatch as exc:
+                    if exc.created_thread_id is None:
+                        raise
+                    new_id = exc.created_thread_id
+                    permission_error = exc
                 self._validate_target(new_id)
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
@@ -480,10 +543,12 @@ class WorkspaceGateway:
                         owned.remove(new_id)
                         specs.pop(new_id, None)
                         raise
+                if permission_error is not None:
+                    raise permission_error
                 if bridge.read_thread().get("status", {}).get("type") != "idle":
                     raise SharedThreadBridgeError("replacement empty task is not idle")
                 token = object()
-                replacement = SharedDesktopAdapter(new_id, on_event=self.scoped_adapter_callback(token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config())
+                replacement = SharedDesktopAdapter(new_id, on_event=self.scoped_adapter_callback(token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config(new_id))
                 replacement.start()
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
@@ -549,6 +614,8 @@ class WorkspaceGateway:
         permission_mode: Any = "workspace_write",
     ) -> dict[str, Any]:
         """Create a fresh Desktop task, then route future feedback to it."""
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         current_id, seed_id = self._desktop_entry()
         if not isinstance(model, str) or not model:
             raise APIError(400, "select a Codex model")
@@ -580,6 +647,7 @@ class WorkspaceGateway:
                 effort = reasoning_effort if reasoning_effort is not None else selection["default_reasoning_effort"]
                 if effort is not None and effort not in efforts:
                     raise APIError(400, "reasoning_effort is not supported by the selected model")
+                permission_error = None
                 try:
                     created_id = bridge.create_thread(
                         model,
@@ -589,6 +657,11 @@ class WorkspaceGateway:
                         permission_mode=permission_mode,
                         **self._creation_config(),
                     )
+                except SharedThreadPermissionMismatch as exc:
+                    if exc.created_thread_id is None:
+                        raise
+                    created_id = exc.created_thread_id
+                    permission_error = exc
                 except SharedThreadRPCRejected as exc:
                     raise APIError(409, f"Codex Desktop rejected task creation: {exc}") from exc
                 except SharedThreadBridgeError as exc:
@@ -613,8 +686,10 @@ class WorkspaceGateway:
                             owned.remove(created_id)
                             workspace["created_thread_specs"].pop(created_id, None)
                             raise
+                if permission_error is not None:
+                    raise APIError(503, str(permission_error)) from permission_error
                 replacement_token = object()
-                replacement = SharedDesktopAdapter(created_id, on_event=self.scoped_adapter_callback(replacement_token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config())
+                replacement = SharedDesktopAdapter(created_id, on_event=self.scoped_adapter_callback(replacement_token), allow_owned_resume=True, initial_bridge=bridge, **self._owned_adapter_config(created_id))
                 replacement.start()
                 if replacement.inspect_thread_status() != "idle":
                     raise APIError(409, "new Codex task is not idle")
@@ -644,6 +719,8 @@ class WorkspaceGateway:
 
     def switch_target(self, thread_id: Any) -> dict[str, Any]:
         """Route future feedback to another idle task without moving old packets."""
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "MCP events mode does not bind or create Codex Desktop tasks")
         current_id, seed_id = self._desktop_entry()
         if not isinstance(thread_id, str):
             raise APIError(400, "thread_id must be a Codex task UUID")
@@ -701,7 +778,7 @@ class WorkspaceGateway:
             owned = thread_id in self.store.state["workspace"].get("created_thread_ids", [])
         replacement_token = object()
         kwargs = {"allow_owned_resume": True} if owned else {}
-        kwargs.update(self._owned_adapter_config())
+        kwargs.update(self._owned_adapter_config(thread_id))
         replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token), **kwargs)
         try:
             try:
@@ -937,7 +1014,14 @@ class WorkspaceGateway:
             raise APIError(409, "feedback belongs to another session; use the workspace session")
         if not payload.get("idempotency_key"):
             raise APIError(400, "idempotency_key is required for direct Codex delivery")
+        if self.feedback_transport == "mcp_events" and self.mcp_events is None:
+            raise APIError(503, "MCP events service is not configured")
         feedback = self.store.submit_feedback(session_id, payload)
+        if self.feedback_transport == "mcp_events":
+            delivery = self.mcp_events.emit_feedback(feedback)
+            result = copy.deepcopy(feedback)
+            result["delivery"] = delivery
+            return result
         if self.external_review and self.adapter is not None:
             bound_id = workspace.get("thread_id") or getattr(self.adapter, "thread_id", None)
             if bound_id:
@@ -1262,6 +1346,8 @@ class WorkspaceGateway:
             return {"session_id": workspace["session_id"], "next_cursor": cursor, "scene_revision": self.store.state["scene"]["revision"], "delivery_mode": "external", "thread_id": current.get("thread_id")}
 
     def take_external_feedback(self, session_id: str, cursor: int) -> dict[str, Any]:
+        if self.feedback_transport == "mcp_events":
+            raise APIError(409, "event feedback is read by ID; this transport has no legacy wait/poll delivery")
         if not self.external_review:
             raise APIError(409, "this workspace uses direct Codex delivery")
         if self.adapter is not None:
@@ -1480,7 +1566,7 @@ class WorkspaceGateway:
         if feedback.get("inline_references"):
             lines.append("用户原话中的引用（对应本次提交时的场景对象、查看器节点或标记；原话仍以用户表述为准）：")
             for item in feedback["inline_references"]:
-                target_key = {"object": "object", "annotation": "annotation", "node": "scene_node"}.get(item.get("kind"), "")
+                target_key = {"object": "object", "annotation": "annotation", "node": "scene_node", "image": "image"}.get(item.get("kind"), "")
                 target = item.get(target_key)
                 lines.append(f"{item['token']} → " + json.dumps(target, ensure_ascii=False))
                 if item.get("from_stale_snapshot"):
@@ -1510,9 +1596,13 @@ class WorkspaceGateway:
         if feedback.get("annotations"):
             lines.append("标记数据：" + json.dumps(feedback["annotations"], ensure_ascii=False))
         if feedback.get("human_pose"):
-            lines.append("用户引用的人体关键点（ViTPose 二维推理估计，每个机位独立追踪；自动任务按机位选主要人物，手动任务按用户框选；跨机位身份未验证；不是人工标记或三维动作约束）：")
+            lines.append("用户引用的人体关节证据：按 evidence_kind 区分二维观测和三维投影；按声明的 keypoint_profile 解读关节，不把投影当成实测，不自行猜测跨机位身份。")
             for pose in feedback["human_pose"]:
                 lines.append(json.dumps({key: value for key, value in pose.items() if not key.endswith("_url")}, ensure_ascii=False))
+        if feedback.get("human_pose_edits"):
+            lines.append("用户手动修正的二维关键点：使用 $capsule-human-tracking 的 apply-corrections 合并到原观测，再重建身体与手部。model score 保留原值；manual_visibility=visible 才是人工可见观测，occluded/missing 不可当成可见测量。未修改点保留 parent_evidence_kind，不把三维投影当成二维实测。")
+            for pose in feedback["human_pose_edits"]:
+                lines.append(f"[[pose_edit:{pose['id']}]] → " + json.dumps({key: value for key, value in pose.items() if not key.endswith("_url") and key not in {"frame", "effective_keypoints"}}, ensure_ascii=False))
         lines += ["", "附件顺序："]
         image_paths: list[str] = []
 
@@ -1538,6 +1628,16 @@ class WorkspaceGateway:
                 add(label, feedback[key])
         for crop in feedback.get("crops", []):
             add(f"{crop['source']} 局部放大图", crop["url"])
+        for image in feedback.get("image_refs", []):
+            lines.append("提示中引用的独立图像证据：" + json.dumps({key: value for key, value in image.items() if not key.endswith("_url")}, ensure_ascii=False))
+            label = f"[[image:{image['id']}]] · {image['label']}"
+            add("引用图像原图：" + label, image["original_url"])
+            if image.get("display_original_url"):
+                add("用户拖入时的干净显示图：" + label, image["display_original_url"])
+            if image.get("annotated_url"):
+                add("引用图像上的用户标记：" + label, image["annotated_url"])
+            if image.get("from_stale_snapshot"):
+                lines.append(f"该图片固定于场景版本 {image['scene_revision']}，独立于本轮反馈版本 {feedback['scene_revision']}；请按图片自己的相机解读。")
         for pose in feedback.get("human_pose", []):
             frame = pose["frame"]
             label = pose["track_id"]
@@ -1546,7 +1646,14 @@ class WorkspaceGateway:
             else:
                 label += " · " + frame["reference_name"]
             add("人体关键点来源原帧：" + label, pose["reference_original_url"])
-            add("ViTPose 估计骨架（青色，区别于人工提示）：" + label, pose["pose_overlay_url"])
+            add(("三维关节投影参考（青色）：" if pose.get("evidence_kind") == "projected_3d" else "二维关节证据（青色）：") + label, pose["pose_overlay_url"])
+        for pose in feedback.get("human_pose_edits", []):
+            frame = pose["frame"]
+            label = f"[[pose_edit:{pose['id']}]] · {pose['track_id']} · {frame['reference_name']}"
+            if "frame_index" in frame:
+                label += f" · {frame['view_name']} · 第 {frame['frame_index'] + 1} 帧 · {frame['time_sec']:.6f} 秒"
+            add("人工关键点修正来源原帧：" + label, pose["reference_original_url"])
+            add("人工修正关键点（橙色；遮挡/缺失有独立状态）：" + label, pose["pose_overlay_url"])
         for snapshot in feedback.get("scene_snapshots", []):
             lines.append("静态视角截图：" + json.dumps({key: value for key, value in snapshot.items() if not key.endswith("_url")}, ensure_ascii=False))
             for field, label in (("scene_original", "原始截图"), ("scene_annotated", "带用户标记的截图"), ("comparison_reference_original", "叠图参考原图"), ("comparison_reference", "实际叠加参考图"), ("scene_comparison", "带标记的叠图对比（辅助图）")):

@@ -39,11 +39,17 @@ class SharedDesktopAdapter:
     human approval requests.
     """
 
-    def __init__(self, thread_id: str, on_event: Callable[[dict[str, Any]], None], *, allow_owned_resume: bool = False, initial_bridge: SharedThreadBridge | None = None, thread_config: dict[str, Any] | None = None):
+    def __init__(self, thread_id: str, on_event: Callable[[dict[str, Any]], None], *, allow_owned_resume: bool = False, initial_bridge: SharedThreadBridge | None = None, thread_config: dict[str, Any] | None = None, permission_mode: str | None = None):
+        if permission_mode is not None:
+            if not isinstance(permission_mode, str) or permission_mode not in {"full_access", "workspace_write", "read_only"}:
+                raise ValueError("permission_mode must be full_access, workspace_write, or read_only")
+            if not allow_owned_resume:
+                raise ValueError("permission overrides require a workbench-owned task")
         self.thread_id = thread_id
         self.on_event = on_event
         self.allow_owned_resume = allow_owned_resume
         self.thread_config = thread_config
+        self.permission_mode = permission_mode
         self._initial_bridge = initial_bridge
         self._lock = threading.RLock()
         self._turn_lock = threading.Lock()
@@ -58,13 +64,18 @@ class SharedDesktopAdapter:
         self._active_turn_id: str | None = None
         self._uncertain_feedback_id: str | None = None
 
-    def _connect(self, *, require_idle: bool = True, subscribe: bool = False) -> SharedThreadBridge:
+    def _connect(self, *, require_idle: bool = True, subscribe: bool = False, sync_owned_permissions: bool = False) -> SharedThreadBridge:
         kwargs = {"thread_config": self.thread_config} if self.thread_config is not None else {}
+        restore_permissions = require_idle or subscribe or sync_owned_permissions
+        if self.permission_mode is not None and restore_permissions:
+            kwargs["permission_mode"] = self.permission_mode
+            if sync_owned_permissions:
+                kwargs["sync_owned_permissions"] = True
         return SharedThreadBridge.connect_for_thread(
             self.thread_id,
             require_idle=require_idle,
             subscribe=subscribe,
-            allow_owned_resume=self.allow_owned_resume,
+            allow_owned_resume=self.allow_owned_resume and (self.permission_mode is None or restore_permissions),
             **kwargs,
         )
 
@@ -85,7 +96,7 @@ class SharedDesktopAdapter:
                 bridge.close()
                 bridge = None
         if bridge is None:
-            bridge = self._connect(require_idle=False)
+            bridge = self._connect(require_idle=False, subscribe=self.permission_mode is not None, sync_owned_permissions=True)
             bridge.close()
         with self._lock:
             self._connected = True
@@ -111,7 +122,8 @@ class SharedDesktopAdapter:
                     # A second idle check in start_turn catches a competing
                     # desktop turn.  The dispatcher should schedule a later
                     # attempt instead of keeping its queue worker blocked.
-                    turn_id = bridge.start_turn(text, image_paths, client_user_message_id=message_id)
+                    turn_kwargs = {"permission_mode": self.permission_mode} if self.permission_mode is not None else {}
+                    turn_id = bridge.start_turn(text, image_paths, client_user_message_id=message_id, **turn_kwargs)
                 except SharedThreadNotIdle as exc:
                     raise DeliveryNotReadyError(str(exc)) from exc
                 except SharedThreadRPCRejected as exc:

@@ -98,7 +98,7 @@ def verify_annotation_label_visibility(page, screenshots):
     assert center_ink(scene, point_at) > 0, "Hiding names must preserve the point itself"
     assert marks() == original and draft(page)["snapshot"] == first_snapshot
     for mark in original:
-        expect(page.locator(f'[data-annotation-id="{mark["id"]}"]')).to_contain_text(mark["name"])
+        expect(page.locator(f'.annotation-select[data-annotation-id="{mark["id"]}"]')).to_contain_text(mark["name"])
 
     # An invisible name is not a selectable or erasable target. Its actual ink
     # remains selectable, and deletion/undo preserves the full named evidence.
