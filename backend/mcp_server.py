@@ -86,12 +86,12 @@ def _feedback_with_local_paths(result: dict[str, Any]) -> dict[str, Any]:
         for pose in item.get("human_pose", []):
             for name in ("reference_original", "pose_overlay"):
                 pose[name + "_path"] = str(_image_path(pose[name + "_url"]))
-        for name in ("scene_original", "scene_annotated", "screenshot"):
+        for name in ("scene_original", "scene_annotated", "screenshot", "comparison_reference_original", "comparison_reference", "scene_comparison"):
             url = item.get(f"{name}_url")
             if url:
                 item[f"{name}_path"] = str(_image_path(url))
         for frame in [*item.get("dynamic_frames", []), *item.get("scene_snapshots", [])]:
-            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
+            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
                 if frame.get(name + "_url"):
                     frame[name + "_path"] = str(_image_path(frame[name + "_url"]))
     return result
@@ -121,13 +121,15 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
     enriched = _feedback_with_local_paths(result)
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(enriched, ensure_ascii=False))]
     for item in enriched.get("items", []):
+        if item.get('comparison') or any(frame.get('comparison') for frame in [*item.get('scene_snapshots', []), *item.get('dynamic_frames', [])]):
+            content.append(TextContent(type='text', text='scene_comparison is an annotated reference/scene overlay, not new model geometry. Use comparison opacity, normalized_scene_image rect and camera metadata with the separate scene/reference originals; ghosting is not an extra object.'))
         for index, reference in enumerate(item.get("reference_images", []), 1):
             content.append(TextContent(type="text", text=f"Reference {index} original ({reference['id']}): {reference['path']}"))
             content.append(_preview_image(Path(reference["path"])))
         for reference in item.get("reference_annotated_images", []):
             content.append(TextContent(type="text", text=f"Annotated reference ({reference['reference_id']}): {reference['path']}"))
             content.append(_preview_image(Path(reference["path"])))
-        for label in ("scene_original", "scene_annotated"):
+        for label in ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
             path = item.get(f"{label}_path")
             if path:
                 content.append(TextContent(type="text", text=f"{label.replace('_', ' ').title()}: {path}"))
@@ -145,7 +147,7 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
                 content.append(_preview_image(Path(pose[name + "_path"])))
         for snapshot in item.get("scene_snapshots", []):
             content.append(TextContent(type="text", text=f"Saved camera view {snapshot['name']}, evidence {snapshot['id']}, scene revision {snapshot['scene_revision']}; each annotation belongs to its snapshot_id."))
-            for name in ("scene_original", "scene_annotated"):
+            for name in ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
                 if snapshot.get(name + "_path"):
                     content.append(TextContent(type="text", text=f"{snapshot['name']} {name}: {snapshot[name + '_path']}"))
                     content.append(_preview_image(Path(snapshot[name + "_path"])))
@@ -154,7 +156,7 @@ def _visual_tool_result(result: dict[str, Any]) -> CallToolResult:
             view_label = f"view {frame['view_name']} (ID {frame['view_id']}), " if frame.get("view_id") else ""
             reference_time = f", reference sample time {frame['reference_time_sec']:.6f}s" if "reference_time_sec" in frame else ""
             content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, {view_label}{frame_label}time {frame['time_sec']:.6f}s{reference_time}, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
-            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated"):
+            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
                 if frame.get(name + "_path"):
                     content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()} ({view_label}{frame_label}time {frame['time_sec']:.6f}s{reference_time}, evidence {frame['id']}): {frame[name + '_path']}"))
                     content.append(_preview_image(Path(frame[name + "_path"])))

@@ -509,3 +509,7 @@ body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annot
 .annotation-drop-target .prompt-input { outline: 1px dashed #74746e; outline-offset: 3px; }
 .annotation-drop-over .prompt-input { outline: 2px solid #74746e; }
 #reference-annotations:focus-visible, #scene-annotations:focus-visible { outline: 1px solid #74746e66; outline-offset: -1px; }
+
+.snapshot-comparison { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 1; }
+.scene-snapshot-media .snapshot-comparison img { position: absolute; object-fit: fill; max-width: none; pointer-events: none; }
+.scene-annotations { z-index: 2; }

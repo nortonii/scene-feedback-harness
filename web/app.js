@@ -53,7 +53,7 @@ const ui = {
   scope:id('feedback-scope'), range:id('feedback-range'), rangeStart:id('range-start'), rangeEnd:id('range-end'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
-  compareImage:id('compare-image'), compareToggle:id('compare-toggle'),
+  compareImage:id('compare-image'), snapshotCompareImage:id('snapshot-compare-image'), compareToggle:id('compare-toggle'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
   compareSummary:id('compare-summary'), compareStatus:id('compare-status'),
   comparePresets:[...document.querySelectorAll('[data-compare-opacity]')],
@@ -2125,6 +2125,8 @@ function freezeScene() {
   if (!editable() || state.sceneView !== 'live') return;
   if (dynamicEnabled()) { ensureDynamicMoment({showSnapshot:true}); return; }
   if (state.sceneSnapshots.length >= 8) { announce('最多保留 8 张截图，请先删除一张再截取。', true); return; }
+  const comparison = captureSnapshotComparison();
+  if (comparison === false) return;
   const before = annotationEditState();
   if (state.mode === 'select') state.mode = 'rectangle';
   settleOrbit();
@@ -2132,7 +2134,7 @@ function freezeScene() {
   state.snapshot = {
     id:newId(), name:'截图 ' + (Math.max(0, ...state.sceneSnapshots.map(entry => entry.number || 0)) + 1),
     number:Math.max(0, ...state.sceneSnapshots.map(entry => entry.number || 0)) + 1,
-    data_url:shot.data_url, image_width:shot.width, image_height:shot.height,
+    data_url:shot.data_url, image_width:shot.width, image_height:shot.height, comparison,
     scene_revision:state.sceneRevision,
     camera:cameraData(), selected_object_ids:state.selectedId ? [state.selectedId] : [],
     selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : []
@@ -2222,33 +2224,43 @@ function saveComparePreferences() {
     localStorage.setItem('astra-visual-compare:' + state.sessionId, JSON.stringify({enabled, opacity, lastPositive}));
   } catch { /* Keep this browser-only preference independent of feedback evidence. */ }
 }
+function currentComparison() {
+  return state.sceneView === 'snapshot' ? state.snapshot?.comparison : comparePreferences;
+}
 function compareAvailable() {
-  return !!activeReference() && state.sceneView !== 'snapshot';
+  return state.sceneView === 'snapshot' ? !!state.snapshot?.comparison : !!activeReference();
 }
 function renderCompareControls() {
-  const hasReference = !!activeReference();
-  const paused = hasReference && state.sceneView === 'snapshot';
-  const available = hasReference && !paused;
-  const {enabled, opacity} = comparePreferences;
+  const frozen = state.sceneView === 'snapshot';
+  const available = compareAvailable();
+  const {enabled=false, opacity=45} = currentComparison() || {};
   const visible = available && enabled && opacity > 0;
-  const summary = !hasReference ? '—' : paused ? '暂停' : visible ? opacity + '%' : '关';
-  const status = !hasReference ? '先添加参考图，再使用叠图对比。'
-    : paused ? '固定截图中暂停叠图；点击「3D 浏览」恢复。'
+  const summary = !available ? '—' : visible ? opacity + '%' : '关';
+  const status = !available ? (frozen ? '这张截图没有保存叠图参考；请回到 3D 新增截图。' : '先添加参考图，再使用叠图对比。')
+    : frozen ? '本图参考：' + state.snapshot.comparison.reference_name + '；叠图设置和标记将随反馈发送。'
     : visible ? '调整透明度，对照参考图与实时场景。' : '叠图已关闭，点击「叠图」开启。';
-  ui.compareImage.classList.toggle('hidden', !visible);
-  ui.compareImage.style.opacity = opacity / 100;
+  ui.compareImage.classList.toggle('hidden', frozen || !visible);
+  ui.compareImage.style.opacity = comparePreferences.opacity / 100;
+  const overlay = ui.snapshotCompareImage;
+  overlay.classList.toggle('hidden', !frozen || !visible);
+  if (frozen && available) {
+    const comparison = state.snapshot.comparison;
+    if (overlay.getAttribute('src') !== comparison.data_url) overlay.src = comparison.data_url;
+    overlay.style.opacity = opacity / 100;
+    for (const [property, field] of [['left','x'],['top','y'],['width','width'],['height','height']]) {
+      overlay.style[property] = comparison.rect[field] * 100 + '%';
+    }
+  }
   ui.compareOpacity.disabled = !available;
   ui.compareOpacity.value = String(opacity);
   ui.compareOpacity.setAttribute('aria-valuetext', opacity + '%');
   ui.opacityValue.textContent = opacity + '%';
-  if (ui.compareToggle) {
-    ui.compareToggle.disabled = !available;
-    ui.compareToggle.setAttribute('aria-pressed', String(visible));
-    ui.compareToggle.classList.toggle('active', visible);
-    ui.compareToggle.title = !available ? status : visible ? '关闭叠图' : '开启叠图';
-  }
-  if (ui.compareSummary) ui.compareSummary.textContent = summary;
-  if (ui.compareStatus) ui.compareStatus.textContent = status;
+  ui.compareToggle.disabled = !available;
+  ui.compareToggle.setAttribute('aria-pressed', String(visible));
+  ui.compareToggle.classList.toggle('active', visible);
+  ui.compareToggle.title = !available ? status : visible ? '关闭叠图' : '开启叠图';
+  ui.compareSummary.textContent = summary;
+  ui.compareStatus.textContent = status;
   for (const button of ui.comparePresets) {
     const selected = visible && Number(button.dataset.compareOpacity) === opacity;
     button.disabled = !available;
@@ -2256,22 +2268,62 @@ function renderCompareControls() {
     button.classList.toggle('active', selected);
   }
 }
-function setCompareOpacity(value) {
-  if (!compareAvailable() || !Number.isFinite(value)) return;
-  comparePreferences.opacity = Math.round(clamp(value, 0, 100));
-  comparePreferences.enabled = comparePreferences.opacity > 0;
-  if (comparePreferences.enabled) comparePreferences.lastPositive = comparePreferences.opacity;
-  renderCompareControls();
-  saveComparePreferences();
-}
-function toggleCompare() {
-  if (!compareAvailable()) return;
-  comparePreferences.enabled = !(comparePreferences.enabled && comparePreferences.opacity > 0);
-  if (comparePreferences.enabled && comparePreferences.opacity === 0) {
-    comparePreferences.opacity = comparePreferences.lastPositive;
+function updateComparison(next) {
+  if (state.sceneView === 'snapshot') {
+    // Replace evidence immutably so undo snapshots and queued IDB writes retain
+    // their original settings. The reference pixels/placement never change.
+    state.snapshot = {...state.snapshot, comparison:next};
+    for (const key of ['sceneSnapshots', 'dynamicSnapshots']) {
+      state[key] = state[key].map(entry => entry.id === state.snapshot.id ? state.snapshot : entry);
+    }
+    saveDraft();
+  } else {
+    Object.assign(comparePreferences, next);
+    saveComparePreferences();
   }
   renderCompareControls();
-  saveComparePreferences();
+}
+function setCompareOpacity(value) {
+  if (!editable() || !compareAvailable() || !Number.isFinite(value)) return;
+  const opacity = Math.round(clamp(value, 0, 100));
+  const current = currentComparison();
+  updateComparison({...current, opacity, enabled:opacity > 0, lastPositive:opacity || current.lastPositive || 45});
+}
+function toggleCompare() {
+  if (!editable() || !compareAvailable()) return;
+  const current = currentComparison();
+  const enabled = !(current.enabled && current.opacity > 0);
+  updateComparison({...current, enabled, opacity:enabled && !current.opacity ? current.lastPositive || 45 : current.opacity});
+}
+function captureSnapshotComparison() {
+  const ref = activeReference();
+  if (!ref) return null;
+  const image = ui.compareImage;
+  const sourceUrl = alignmentOverlayUrl(ref);
+  if (!imageReadyAtUrl(image, sourceUrl)) {
+    announce('叠图参考正在加载，请稍后再截图或发送。', true);
+    return false;
+  }
+  const stage = ui.sceneStage.getBoundingClientRect(), viewport = ui.viewport.getBoundingClientRect();
+  const scale = Math.min(stage.width / image.naturalWidth, stage.height / image.naturalHeight);
+  const width = image.naturalWidth * scale, height = image.naturalHeight * scale;
+  const canvas = scaledCanvas(image.naturalWidth, image.naturalHeight, 1440);
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  return {reference_id:ref.id, reference_name:ref.name || '参考图',
+    source:sourceUrl === ref.alignment_image_url ? 'undistorted' : 'original', source_url:sourceUrl,
+    data_url:canvas.toDataURL('image/png'),
+    enabled:comparePreferences.enabled, opacity:comparePreferences.opacity, lastPositive:comparePreferences.lastPositive,
+    alignment_exact:state.alignedReferenceId === ref.id && state.alignmentExact,
+    rect:{x:(stage.left + (stage.width - width) / 2 - viewport.left) / viewport.width,
+      y:(stage.top + (stage.height - height) / 2 - viewport.top) / viewport.height,
+      width:width / viewport.width, height:height / viewport.height}};
+}
+function comparisonMatchesLive(snapshot) {
+  const comparison = snapshot?.comparison, ref = activeReference();
+  if (!comparison) return !ref;
+  return comparison.reference_id === ref?.id && comparison.opacity === comparePreferences.opacity &&
+    comparison.enabled === comparePreferences.enabled &&
+    comparison.source === (alignmentOverlayUrl(ref) === ref?.alignment_image_url ? 'undistorted' : 'original');
 }
 
 function renderSceneView({persist=true}={}) {
@@ -3146,7 +3198,7 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   const matching = state.dynamicSnapshots.find((entry) => entry.id === state.snapshot?.id &&
     entry.clip_id === (state.referenceClip?.clip_id || null) && entry.reference_id === (activeReference()?.id || null) &&
     Math.abs(entry.time_sec - state.time) < 1e-6 &&
-    (state.sceneView === 'snapshot' || (entry.scene_revision === state.sceneRevision &&
+    (state.sceneView === 'snapshot' || (entry.scene_revision === state.sceneRevision && comparisonMatchesLive(entry) &&
       JSON.stringify(entry.camera) === JSON.stringify(cameraData()) &&
       JSON.stringify(entry.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []) &&
       JSON.stringify(entry.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []))));
@@ -3156,13 +3208,15 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   }
   if (state.dynamicSnapshots.length >= 8) { announce('已保留 8 个时刻，请先移除一个再圈画。', true); return null; }
   const ref = activeReference();
+  const comparison = captureSnapshotComparison();
+  if (comparison === false) return null;
   settleOrbit();
   const selectedShot = captureLiveScene();
   const priorVisibility = feedbackLayer.visible;
   feedbackLayer.visible = false;
   const shot = captureLiveScene({includeSize:true});
   feedbackLayer.visible = priorVisibility;
-  const moment = {id:newId(), data_url:shot.data_url, selected_data_url:selectedShot,
+  const moment = {id:newId(), data_url:shot.data_url, selected_data_url:selectedShot, comparison,
     image_width:shot.width, image_height:shot.height,
     time_sec:state.time, clip_id:state.referenceClip?.clip_id || null,
     scene_revision:state.sceneRevision, camera:cameraData(),
@@ -3287,7 +3341,8 @@ function momentDatabase() {
 }
 function saveMomentDraft() {
   if (!state.sessionId) return;
-  const signature = JSON.stringify([state.dynamicSnapshots.map(entry => entry.id), state.sceneSnapshots.map(entry => entry.id)]);
+  const signature = JSON.stringify([state.dynamicSnapshots, state.sceneSnapshots].map(entries => entries.map(entry =>
+    [entry.id, entry.comparison?.enabled, entry.comparison?.opacity, entry.comparison?.lastPositive])));
   if (signature === state.draftMomentSignature) return;
   state.draftMomentSignature = signature;
   const sessionId = state.sessionId, moments = {dynamicSnapshots:[...state.dynamicSnapshots], sceneSnapshots:[...state.sceneSnapshots]};
@@ -3316,6 +3371,13 @@ async function restoreMomentDraft() {
     if (state.snapshot && state.snapshot.time_sec === undefined && !state.sceneSnapshots.some(entry => entry.id === state.snapshot.id)) {
       state.snapshot = {...state.snapshot, name:state.snapshot.name || '截图 1', number:state.snapshot.number || 1};
       state.sceneSnapshots = [...state.sceneSnapshots.slice(0,7), state.snapshot];
+    }
+    // The active draft is saved synchronously. It may be newer than an IDB
+    // write interrupted by reload, so reconcile it into the saved collection.
+    if (state.snapshot) {
+      for (const key of ['sceneSnapshots', 'dynamicSnapshots']) {
+        state[key] = state[key].map(entry => entry.id === state.snapshot.id ? state.snapshot : entry);
+      }
     }
     state.draftMomentSignature = null;
     saveMomentDraft();
@@ -3500,7 +3562,7 @@ function prepareSceneAnnotation() {
   if (dynamicEnabled()) return !!ensureDynamicMoment({showSnapshot:true});
   settleOrbit();
   const snapshot = state.snapshot;
-  const reusable = snapshot && snapshot.scene_revision === state.sceneRevision &&
+  const reusable = snapshot && comparisonMatchesLive(snapshot) && snapshot.scene_revision === state.sceneRevision &&
     JSON.stringify(snapshot.camera) === JSON.stringify(cameraData()) &&
     JSON.stringify(snapshot.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []) &&
     JSON.stringify(snapshot.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []);
@@ -3971,10 +4033,32 @@ async function captureScene(snapshot) {
       drawAnnotation(annotatedContext, annotation, annotated.width, annotated.height);
     }
   }
-  return {
-    scene_original_data_url:dataUrl,
-    scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84)
-  };
+  const comparison = snapshot ? snapshot.comparison : captureSnapshotComparison();
+  if (comparison === false) throw new Error('叠图参考尚未加载，反馈未发送，请稍后重试。');
+  const extra = {};
+  if (comparison) {
+    const {data_url, lastPositive, ...metadata} = comparison;
+    extra.comparison = metadata;
+    if (comparison.enabled && comparison.opacity > 0) {
+      const composite = document.createElement('canvas');
+      composite.width = original.width; composite.height = original.height;
+      const context = composite.getContext('2d');
+      context.drawImage(original, 0, 0);
+      const reference = await loadImage(data_url), rect = comparison.rect;
+      context.globalAlpha = comparison.opacity / 100;
+      context.drawImage(reference, rect.x * composite.width, rect.y * composite.height,
+        rect.width * composite.width, rect.height * composite.height);
+      context.globalAlpha = 1;
+      for (const annotation of state.annotations) {
+        if (annotation.pane === 'scene' && snapshot && annotation.snapshot_id === snapshot.id) {
+          drawAnnotation(context, annotation, composite.width, composite.height);
+        }
+      }
+      extra.scene_comparison_data_url = composite.toDataURL('image/jpeg', 0.9);
+    }
+  }
+  return {scene_original_data_url:dataUrl,
+    scene_annotated_data_url:annotated.toDataURL('image/jpeg', 0.84), ...extra};
 }
 function insertNoteText(text, {replaceSelection=true}={}) {
   if (!editable()) return false;
@@ -4185,7 +4269,9 @@ async function submitFeedback() {
   setSubmitLabel('准备图片…');
   try {
     if (!state.pendingSubmission) {
-      if (state.sceneSnapshots.length && !(await api('/api/health')).scene_snapshots_supported) throw new Error('多截图服务正在更新，请稍后再发送；截图和标记已保留。');
+      const capabilities = await api('/api/health');
+      if ((activeReference() || [...state.sceneSnapshots, ...state.dynamicSnapshots].some(view => view.comparison)) && !capabilities.snapshot_comparison_supported) throw new Error('叠图反馈服务需要更新，请刷新后重试；截图和标记已保留。');
+      if (state.sceneSnapshots.length && !capabilities.scene_snapshots_supported) throw new Error('多截图服务正在更新，请稍后再发送；截图和标记已保留。');
       if (state.annotations.some(mark => mark.pane === 'scene' && !mark.frame_id && !state.sceneSnapshots.some(view => view.id === mark.snapshot_id))) throw new Error('有标记的原截图未恢复，请删除该标记或重新加载草稿后再发送。');
       const payload = await feedbackPayload(referencedSceneNodes, promptText);
       const key = newId();

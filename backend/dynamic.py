@@ -317,6 +317,12 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
                 frame["reference_camera"] = copy.deepcopy(reference["camera"])
         elif "reference_original" in images:
             raise APIError(400, "reference original image requires a reference clip")
+        from comparison import prepare_comparison
+        comparison_fields, comparison_images = prepare_comparison(store, session, item)
+        if comparison_fields and (reference_id or static_reference_id) and comparison_fields['comparison']['reference_id'] != (reference_id or static_reference_id):
+            raise APIError(400, "comparison reference must match its saved evidence frame")
+        frame.update(comparison_fields)
+        images.update(comparison_images)
         prepared.append({"frame": frame, "images": images})
     if require_oldest and min(item["frame"]["scene_revision"] for item in prepared) != revision:
         raise APIError(409, "submitted scene_revision must be the oldest saved dynamic evidence revision",

@@ -1503,6 +1503,10 @@ class WorkspaceGateway:
             lines.append(f"当前查看的参考图：{reference_names[active_id]} (ID {active_id})")
         if aligned_id in reference_names:
             lines.append(f"场景截图已按这张参考图的标定相机视角对齐：{reference_names[aligned_id]} (ID {aligned_id})。请把两张图作为同一视角比较；镜头畸变和标定误差仍可能造成少量像素偏差。")
+        if feedback.get("comparison"):
+            lines.append("当前叠图参数：" + json.dumps(feedback['comparison'], ensure_ascii=False))
+        if feedback.get('comparison') or any(frame.get('comparison') for frame in [*feedback.get('scene_snapshots', []), *feedback.get('dynamic_frames', [])]):
+            lines.append("叠图对比是参考图按记录透明度和 normalized_scene_image 位置叠加到干净场景截图后的辅助图，包含用户标记，并非新的建模结果。请结合独立的场景原图、参考原图、相机和标记判断偏差；透明重影不是新增物体。")
         if feedback.get("annotations"):
             lines.append("标记数据：" + json.dumps(feedback["annotations"], ensure_ascii=False))
         if feedback.get("human_pose"):
@@ -1529,7 +1533,7 @@ class WorkspaceGateway:
                 add(f"去畸变对齐图 {reference['name']} (ID {reference['id']})", reference["alignment_image_url"])
             if reference["id"] in annotated:
                 add(f"带用户标记的参考图 {reference['name']} (ID {reference['id']})", annotated[reference["id"]])
-        for key, label in (("scene_original_url", "冻结视角的干净场景截图"), ("scene_annotated_url", "带用户标记和高亮的场景截图")):
+        for key, label in (("scene_original_url", "冻结视角的干净场景截图"), ("scene_annotated_url", "带用户标记和高亮的场景截图"), ("comparison_reference_original_url", "叠图对应的参考原图"), ("comparison_reference_url", "实际叠加的参考图"), ("scene_comparison_url", "带用户标记的叠图对比（辅助图）")):
             if feedback.get(key):
                 add(label, feedback[key])
         for crop in feedback.get("crops", []):
@@ -1545,7 +1549,7 @@ class WorkspaceGateway:
             add("ViTPose 估计骨架（青色，区别于人工提示）：" + label, pose["pose_overlay_url"])
         for snapshot in feedback.get("scene_snapshots", []):
             lines.append("静态视角截图：" + json.dumps({key: value for key, value in snapshot.items() if not key.endswith("_url")}, ensure_ascii=False))
-            for field, label in (("scene_original", "原始截图"), ("scene_annotated", "带用户标记的截图")):
+            for field, label in (("scene_original", "原始截图"), ("scene_annotated", "带用户标记的截图"), ("comparison_reference_original", "叠图参考原图"), ("comparison_reference", "实际叠加参考图"), ("scene_comparison", "带标记的叠图对比（辅助图）")):
                 if snapshot.get(field + "_url"):
                     add(f"{snapshot['name']} · {label}，证据 {snapshot['id']}，场景版本 {snapshot['scene_revision']}", snapshot[field + "_url"])
         for frame in feedback.get("dynamic_frames", []):
@@ -1553,7 +1557,7 @@ class WorkspaceGateway:
             frame_label = f"片段第 {frame['frame_index'] + 1} 帧，" if "frame_index" in frame else ""
             view_label = f"机位 {frame['view_name']} (ID {frame['view_id']})，" if frame.get("view_id") else ""
             reference_time = f"，参考采样时间 {frame['reference_time_sec']:.6f} 秒" if "reference_time_sec" in frame else ""
-            for field, label in (("reference_original", "参考原帧"), ("reference_annotated", "带用户标记的参考帧"), ("scene_original", "干净场景帧"), ("scene_annotated", "带标记和高亮的场景帧")):
+            for field, label in (("reference_original", "参考原帧"), ("reference_annotated", "带用户标记的参考帧"), ("scene_original", "干净场景帧"), ("scene_annotated", "带标记和高亮的场景帧"), ("comparison_reference_original", "叠图参考原图"), ("comparison_reference", "实际叠加参考图"), ("scene_comparison", "带标记的叠图对比（辅助图）")):
                 if frame.get(field + "_url"):
                     add(f"{label}：{view_label}{frame_label}{frame['time_sec']:.6f} 秒{reference_time}，证据 {frame['id']}，场景版本 {frame['scene_revision']}", frame[field + "_url"])
         lines += ["", "红线、箭头、编号、框和画笔痕迹是用户后画的提示，不是参考图中的真实几何。请结合图像和原话继续当前重建任务；修改完成后调用 workspace_publish_scene 发布新的 GLB。"]

@@ -1177,6 +1177,8 @@ class SceneStore:
             if "screenshot_data_url" in payload and payload["screenshot_data_url"] is not None and "scene_annotated_data_url" not in prepared_scene:
                 prepared_scene["scene_annotated_data_url"] = self._decode_image_data_url(payload["screenshot_data_url"])
             crops = payload.get("crops", [])
+            from comparison import prepare_comparison
+            comparison_fields, comparison_images = prepare_comparison(self, session, payload)
             from human_pose import prepare_pose_feedback
             prepared_pose = prepare_pose_feedback(self, session_id, payload.get("pose_refs"), note)
             if not isinstance(crops, list) or len(crops) > MAX_CROPS:
@@ -1192,6 +1194,8 @@ class SceneStore:
                     raise APIError(400, "scene crop cannot name a reference image")
                 prepared_crops.append((crop["source"], ref_id, self._decode_image_data_url(crop.get("data_url"))))
             feedback = {"feedback_id": uuid.uuid4().hex, "session_id": session_id, "scene_revision": revision, "submitted_at": _now(), "annotations": normalized_annotations, "note": note, "inline_references": inline_references, "object_prompts": normalized_prompts, "reference_images": copy.deepcopy(session.get("reference_images", [])), "selected_object_ids": selected_ids, "selected_scene_nodes": selected_scene_nodes, "referenced_scene_nodes": referenced_scene_nodes}
+            feedback.update(comparison_fields)
+            feedback.update({key + "_url": self._write_media(data) for key, data in comparison_images.items()})
             if prepared_pose:
                 feedback["human_pose"] = [{**{key: value for key, value in item.items() if key != "_overlay_data"},
                                            "pose_overlay_url": self._write_media(item["_overlay_data"])} for item in prepared_pose]

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from test_dynamic_scenes import image_data
+from test_dynamic_scenes import image_data, calibrated_camera
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
 import mcp_server
@@ -90,6 +90,115 @@ class SceneSnapshotTests(unittest.TestCase):
         saved = SceneStore(self.store.data_dir).feedback_by_id(packet['feedback_id'])
         self.assertEqual(saved['annotations'], payload['annotations'])
         self.assertEqual(saved['inline_references'], packet['inline_references'])
+
+    def overlay_payload(self):
+        payload = self.payload()
+        _, pixels = image_data('green')
+        reference = self.store.add_reference(self.session, 'target.png', pixels)
+        comparison = {'reference_id': reference['id'], 'reference_name': 'untrusted name',
+                      'source': 'original', 'enabled': True, 'opacity': 45,
+                      'alignment_exact': False, 'rect': {'x': 0, 'y': .1, 'width': 1, 'height': .8}}
+        payload['scene_snapshots'][0].update(comparison=comparison, scene_comparison_data_url=pixels)
+        return payload, reference
+
+    def test_overlay_pixels_metadata_and_originals_reach_both_delivery_modes(self):
+        payload, reference = self.overlay_payload()
+        # Top-level evidence follows the same contract, including live captures.
+        first = payload['scene_snapshots'][0]
+        payload.update({key: copy.deepcopy(first[key]) for key in ('camera', 'comparison', 'scene_original_data_url', 'scene_comparison_data_url')})
+        packet = self.store.submit_feedback(self.session, payload)
+        for saved in (packet, packet['scene_snapshots'][0]):
+            self.assertEqual(saved['comparison']['reference_name'], 'target.png')
+            self.assertEqual(saved['comparison']['opacity'], 45)
+            self.assertEqual(saved['comparison']['rect'], first['comparison']['rect'])
+            self.assertEqual(saved['comparison_reference_original_url'], reference['url'])
+            self.assertEqual(saved['comparison_reference_url'], reference['url'])
+            self.assertNotEqual(saved['scene_comparison_url'], saved['scene_original_url'])
+        message, paths = self.gateway._turn_input(packet)
+        self.assertIn('透明重影不是新增物体', message)
+        self.assertIn('normalized_scene_image', message)
+        composite_path = str(self.store.media_dir / packet['scene_snapshots'][0]['scene_comparison_url'].rsplit('/', 1)[-1])
+        self.assertIn(composite_path, paths)
+        with patch.object(mcp_server, 'DATA_DIR', self.store.data_dir):
+            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]})
+        saved = result.structured_content['items'][0]['scene_snapshots'][0]
+        self.assertEqual(saved['scene_comparison_path'], composite_path)
+        self.assertTrue(any(content.type == 'text' and 'not new model geometry' in content.text for content in result.content))
+        self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(packet['feedback_id']), packet)
+
+    def test_disabled_overlay_preserves_settings_without_a_misleading_composite(self):
+        payload, reference = self.overlay_payload()
+        first = payload['scene_snapshots'][0]
+        first['comparison']['enabled'] = False
+        first.pop('scene_comparison_data_url')
+        packet = self.store.submit_feedback(self.session, payload)
+        saved = packet['scene_snapshots'][0]
+        self.assertFalse(saved['comparison']['enabled'])
+        self.assertNotIn('scene_comparison_url', saved)
+        self.assertEqual(saved['comparison_reference_original_url'], reference['url'])
+
+    def test_overlay_rejects_missing_reference_metadata_pixels_and_bad_placement(self):
+        base, _ = self.overlay_payload()
+        mutations = [
+            lambda v: v['comparison'].update(reference_id='unknown'),
+            lambda v: v['comparison'].update(opacity=101),
+            lambda v: v['comparison'].update(opacity=float('nan')),
+            lambda v: v['comparison'].update(enabled='true'),
+            lambda v: v['comparison'].update(source='undistorted'),
+            lambda v: v['comparison'].update(source_url='/media/not-the-saved-source.png'),
+            lambda v: v['comparison']['rect'].update(width=-1),
+            lambda v: v.pop('scene_comparison_data_url'),
+            lambda v: v.pop('comparison'),
+            lambda v: v.update(scene_comparison_data_url='not-an-image'),
+            lambda v: v['comparison'].update(enabled=False),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                payload = copy.deepcopy(base)
+                mutate(payload['scene_snapshots'][0])
+                with self.assertRaises(APIError):
+                    self.store.submit_feedback(self.session, payload)
+        self.assertEqual(self.store.list_all_feedback(), [])
+
+    def test_calibrated_overlay_retains_both_original_and_undistorted_sources(self):
+        payload, reference = self.overlay_payload()
+        raw, _ = image_data('blue')
+        aligned_url = self.store._write_media(raw)
+        source = self.store.state['sessions'][self.session]['reference_images'][0]
+        source.update(alignment_image_url=aligned_url, camera=calibrated_camera())
+        self.store._save()
+        payload['scene_snapshots'][0]['comparison'].update(source='undistorted', source_url=aligned_url, alignment_exact=True)
+        saved = self.store.submit_feedback(self.session, payload)['scene_snapshots'][0]
+        self.assertEqual(saved['comparison_reference_original_url'], reference['url'])
+        self.assertEqual(saved['comparison_reference_url'], aligned_url)
+        self.assertEqual(saved['comparison']['reference_camera'], calibrated_camera())
+        self.assertTrue(saved['comparison']['alignment_exact'])
+
+    def test_composite_must_use_scene_image_dimensions(self):
+        import base64
+        from io import BytesIO
+        from PIL import Image
+        payload, _ = self.overlay_payload()
+        buffer = BytesIO()
+        Image.new('RGB', (32, 24)).save(buffer, format='PNG')
+        payload['scene_snapshots'][0]['scene_comparison_data_url'] = 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode()
+        with self.assertRaisesRegex(APIError, 'dimensions'):
+            self.store.submit_feedback(self.session, payload)
+
+    def test_dynamic_overlay_keeps_its_own_reference_and_time(self):
+        payload, reference = self.overlay_payload()
+        frame = payload.pop('scene_snapshots')[0]
+        frame.update(time_sec=0, static_reference_id=reference['id'])
+        payload.update(annotations=[], note='Compare the saved overlay.', dynamic_frames=[frame],
+                       timeline={'clip_id': None, 'time_sec': 0, 'duration_sec': 1, 'fps': 1, 'scope': {'kind': 'frame'}})
+        packet = self.store.submit_feedback(self.session, payload)
+        saved = packet['dynamic_frames'][0]
+        self.assertEqual(saved['comparison']['reference_id'], reference['id'])
+        self.assertEqual(saved['time_sec'], 0)
+        self.assertTrue(saved['scene_comparison_url'])
+        message, paths = self.gateway._turn_input(packet)
+        self.assertIn('带标记的叠图对比', message)
+        self.assertIn(str(self.store.media_dir / saved['scene_comparison_url'].rsplit('/', 1)[-1]), paths)
 
     def test_mixed_static_and_dynamic_versions_preserve_oldest_revision(self):
         self.store.state['scene']['revision'] = 2

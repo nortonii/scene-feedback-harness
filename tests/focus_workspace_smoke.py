@@ -697,7 +697,7 @@ def verify_selection_panel(page, screenshots):
 
 
 def verify_overlay_toolbar(page, store, screenshots):
-    # Quoting a mark now keeps the snapshot; overlay comparison is explicitly live.
+    # Live comparison preferences and each saved screenshot have independent settings.
     page.locator("#browse-button").click()
     toggle = page.locator("#compare-toggle")
     panel = page.locator("#compare-panel")
@@ -739,11 +739,30 @@ def verify_overlay_toolbar(page, store, screenshots):
     page.locator(".view-popover summary").click()
     page.locator("#saved-snapshot-button").click()
     expect(overlay).to_be_hidden()
-    expect(toggle).to_be_disabled()
-    expect(toggle).to_have_attribute("aria-pressed", "false")
-    expect(slider).to_be_disabled()
-    for opacity in (25, 45, 75):
-        expect(page.locator(f'[data-compare-opacity="{opacity}"]')).to_be_disabled()
+    frozen_overlay = page.locator("#snapshot-compare-image")
+    expect(frozen_overlay).to_be_visible()
+    expect(toggle).to_be_enabled()
+    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(slider).to_be_enabled()
+    frozen_before = draft(page)["snapshot"]
+    panel.locator("summary").click()
+    page.locator('[data-compare-opacity="25"]').click()
+    panel.locator("summary").click()
+    expect(frozen_overlay).to_have_css("opacity", "0.25")
+    assert draft(page)["snapshot"]["comparison"]["opacity"] == 25
+    toggle.click()
+    expect(frozen_overlay).to_be_hidden()
+    toggle.click()
+    expect(frozen_overlay).to_be_visible()
+    page.reload()
+    wait_ready(page)
+    expect(frozen_overlay).to_be_visible()
+    expect(slider).to_have_value("25")
+    assert draft(page)["snapshot"]["data_url"] == frozen_before["data_url"]
+    assert draft(page)["snapshot"]["comparison"]["rect"] == frozen_before["comparison"]["rect"]
+    assert draft(page)["annotations"] == original["annotations"]
+    if screenshots:
+        page.screenshot(path=str(screenshots / "snapshot-overlay-marks.png"))
     preference = page.evaluate("""() => JSON.parse(localStorage.getItem(
       'astra-visual-compare:' + new URL(location.href).searchParams.get('session_id')) || '{}')""")
     assert preference["enabled"] is True and preference["opacity"] == 75
@@ -752,8 +771,9 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(overlay).to_be_visible()
     expect(overlay).to_have_css("opacity", "0.75")
-    for field in ("note", "annotations", "snapshot", "camera", "referencedSceneNodes"):
+    for field in ("note", "annotations", "camera", "referencedSceneNodes"):
         assert draft(page).get(field) == original.get(field), field
+    assert draft(page)["snapshot"]["data_url"] == original["snapshot"]["data_url"]
 
     panel.locator("summary").click()
     slider.focus()
@@ -781,6 +801,12 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(page.locator("#reference-title")).to_have_text("alternate-reference.png")
     expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(overlay).to_be_hidden()
+    page.locator("#snapshot-button").click()
+    expect(frozen_overlay).to_be_visible()
+    assert draft(page)["snapshot"]["comparison"]["reference_id"] == frozen_before["comparison"]["reference_id"]
+    assert frozen_overlay.get_attribute("src") == frozen_before["comparison"]["data_url"]
+    expect(slider).to_have_value("25")
+    page.locator("#browse-button").click()
     page.get_by_role("button", name="查看 reference.png", exact=True).click()
     expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(overlay).to_be_hidden()
@@ -1116,7 +1142,7 @@ def main():
                 verify_chat_resize(page, store, submissions, screenshots)
                 passed("pointer and keyboard resizing preserve draft and height; collapsed history disables resize until explicitly reopened, including after reload")
                 verify_overlay_toolbar(page, store, screenshots)
-                passed("overlay toolbar presets and slider apply immediately, remember opacity, pause on marked screenshots and keep saved off preference across reference changes")
+                passed("overlay toolbar preserves independent live/screenshot opacity and marks across toggle, reload and reference changes")
 
                 page.locator("#chat-collapse").click()
                 store.workspace_event("assistant_message", {"text": "收起时的新回复：标记已收到。"})
@@ -1227,8 +1253,10 @@ def main():
                 assert sent["scene_annotated_data_url"].startswith("data:image/")
                 assert sent["camera"] == before_submit["snapshot"]["camera"]
                 assert len(store.list_all_feedback()) == 1
+                from snapshot_overlay_checks import verify_overlay_payload
+                verify_overlay_payload(sent, first_view, store)
                 expect(page.locator("#feedback-note")).to_have_value("")
-                passed("real Ctrl Enter plus immediate duplicate click creates one feedback containing both saved views and their own annotations")
+                passed("real Ctrl Enter creates one feedback with independent snapshot overlays; composite pixels, original images, metadata and red marks persist")
 
                 expect(page.locator("#annotation-count")).to_have_text("0")
                 expect(page.locator("#undo-annotation")).to_be_disabled()
