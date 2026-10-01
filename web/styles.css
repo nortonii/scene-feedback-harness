@@ -262,6 +262,14 @@ input[type=range] { accent-color: #292925; }
 .composer { flex: none; min-width: 0; }
 .prompt-field { min-width: 0; }
 .prompt-input { position: relative; }
+.prompt-mentions { position: fixed; z-index: 80; display: flex; flex-direction: column; overflow: hidden; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: #faf9f5; box-shadow: 0 8px 28px #17171520; }
+#prompt-mention-status { flex: none; margin: 3px 6px 6px; color: var(--muted); font-size: var(--text-caption); line-height: 1.4; }
+#prompt-mention-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.prompt-mention-option { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 8px 10px; border-radius: 6px; text-align: left; touch-action: manipulation; }
+.prompt-mention-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-control); font-weight: 500; }
+.prompt-mention-option small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--text-caption); }
+.prompt-mention-option[aria-selected="true"], .prompt-mention-option:hover { background: #eae9e1; }
+.prompt-mention-option[aria-disabled="true"] { opacity: .5; cursor: default; background: transparent; }
 .prompt-input.prompt-drop-active { border-radius: 15px; outline: 2px dashed var(--ink); outline-offset: 3px; }
 .prompt-image-refs { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px; max-height: 108px; overflow-y: auto; }
 .prompt-image-chip { display: inline-flex; align-items: center; min-width: 0; max-width: min(260px, 100%); border: 1px solid var(--line); border-radius: 7px; background: #faf9f599; }

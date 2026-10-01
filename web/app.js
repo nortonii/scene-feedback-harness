@@ -9,6 +9,7 @@ import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
 import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, poseEvidenceLabel, drawPoseSkeleton, POSE_COLORS,
   handJointIndices, handJointLabel, poseEditToken, validPoseEdit, collectPoseEdits, correctedPoseFrame } from './human-pose.js';
 import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
+import { createPromptMentions } from './prompt-mentions.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -76,6 +77,7 @@ const ui = {
   clearAnnotations:id('clear-annotations'),
   referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
+  mentionMenu:id('prompt-mentions'), mentionList:id('prompt-mention-list'), mentionStatus:id('prompt-mention-status'),
   dragReference:id('drag-reference-image'), dragScene:id('drag-scene-image'),
   imageRefs:id('prompt-image-refs'), imagePreview:id('prompt-image-preview-dialog'),
   imagePreviewTitle:id('prompt-image-preview-title'), imagePreviewImage:id('prompt-image-preview-image'),
@@ -135,6 +137,8 @@ const frameImages = {
 };
 
 let minimalLayout = null;
+let promptMentions = null;
+let mentionSceneCache = null;
 const annotationHistory = createAnnotationHistory();
 const promptImageStore = createPromptImageStore(momentDatabase);
 const PROMPT_DRAG_MIME = 'application/x-scene-feedback-reference';
@@ -376,6 +380,7 @@ function removeAnnotation(annotationId) {
 function setSession(session) {
   if (state.sessionId !== session.session_id) {
     annotationHistory.clear(); promptDrag = null;
+    promptMentions?.close();
     state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
   }
   state.sessionId = session.session_id;
@@ -1028,6 +1033,7 @@ function renderWorkspace(workspace) {
   state.poseCorrectionsSupported = workspace.pose_corrections_supported === true;
   state.imageReferencesSupported = workspace.image_references_supported === true;
   renderPromptDragControls();
+  promptMentions?.refresh();
   state.networkError = null;
   state.projectId = workspace.project_id || state.projectId;
   if (typeof workspace.project_name === 'string' && workspace.project_name.trim()) state.projectName = workspace.project_name;
@@ -1900,7 +1906,7 @@ function nodeReference(objectId, hitObject, level='part') {
     if (chosen?.parent !== modelRoot) return null;
   } else {
     // Use the named hit node for a detailed part, skipping unnamed loader meshes.
-    while (chosen !== modelRoot && !chosen.name?.trim()) chosen = chosen.parent;
+    while (chosen !== modelRoot && !chosen.name?.trim() && !chosen.userData?.semantic_id && !chosen.userData?.stable_id) chosen = chosen.parent;
     if (chosen === modelRoot) chosen = hitObject;
   }
   const path = [];
@@ -2902,7 +2908,7 @@ async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=fa
     }
     state.humanDetails.set(job.job_id,detail); state.humanDetailErrors.delete(key); return detail;
   } catch (error) { state.humanDetailErrors.set(key,error.message); return null; }
-  finally { state.humanDetailLoads.delete(key); renderHumanPosePanel(); drawHumanPoseOverlay(); }
+  finally { state.humanDetailLoads.delete(key); renderHumanPosePanel(); drawHumanPoseOverlay(); promptMentions?.refresh(); }
 }
 async function loadHumanPoses() {
   if (!state.sessionId || state.humanLoading || state.navigatingProject) return;
@@ -2915,20 +2921,22 @@ async function loadHumanPoses() {
   finally { state.humanLoading=false; renderHumanPosePanel(); drawHumanPoseOverlay(); }
 }
 function insertHumanPoseReference(job, frame) {
-  if (!editable() || !frame || job.session_id !== state.sessionId) return;
+  if (!editable() || !frame || job.session_id !== state.sessionId) return false;
   const ref={job_id:job.job_id,reference_id:frame.reference_id}, token=poseToken(ref.job_id,ref.reference_id);
-  if (!token) return;
+  if (!token) return false;
   const existing=state.poseRefs.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id);
   try {
     const cited=collectPoseReferences(ui.note.value,state.poseRefs);
     if (!cited.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id) && cited.length >= 8) {
-      announce('每轮最多引用 8 个人体结果。',true); return;
+      announce('每轮最多引用 8 个人体结果。',true); return false;
     }
-  } catch (error) { announce(error.message,true); return; }
+  } catch (error) { announce(error.message,true); return false; }
   if (insertNoteReference('@' + humanJobName(job) + '（' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name) + '）',token)) {
     if (!existing) state.poseRefs.push(ref);
     saveDraft(); renderHumanPosePanel();
+    return true;
   }
+  return false;
 }
 async function viewHumanPose(job) {
   const detail=await ensureHumanPoseDetail(job,{retry:true,first:true});
@@ -4155,6 +4163,7 @@ function renderPromptDragControls() {
     button.disabled = !!reason;
     button.title = reason || '拖到提示，也可点击引用当前' + (pane === 'reference' ? '参考图' : '渲染图');
   }
+  promptMentions?.refresh();
 }
 function capturePromptImage(pane) {
   const reason = promptImageUnavailable(pane);
@@ -4291,16 +4300,143 @@ function selectedPromptReference() {
       model_url:item.url || null,scene_revision:state.sceneRevision}
     : {kind:'object',objectId:item.id,label:item.name || item.id};
 }
+function promptMentionImageSource(pane) {
+  const snapshot=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot : null;
+  return JSON.stringify(pane === 'reference'
+    ? [state.sessionId,activeReference()?.id,activeReference()?.url,referenceView()?.clip_id]
+    : [state.sessionId,state.sceneRevision,state.sceneView,snapshot?.id,snapshot?.scene_revision,
+      dynamicEnabled() ? state.time : null,clipReference()?.id,referenceView()?.clip_id]);
+}
+function mentionSceneNodes() {
+  const roots=state.sceneObjects.map((item) => state.objectNodes.get(item.id)?.userData.gltfRoot || null);
+  if (mentionSceneCache?.revision === state.sceneRevision && mentionSceneCache.roots.length === roots.length &&
+      roots.every((root,index) => root === mentionSceneCache.roots[index])) return mentionSceneCache.nodes;
+  const nodes=[];
+  // Traverse only when models change, never for each query character. Bound
+  // pathological imported trees while retaining named, addressable nodes.
+  let visited=0;
+  state.sceneObjects.forEach((item,index) => {
+    const root=roots[index];
+    if (!root) return;
+    const pending=[...root.children];
+    while (pending.length && visited < 20000 && nodes.length < 6000) {
+      const node=pending.pop(); visited++;
+      pending.push(...node.children);
+      if (!node.name?.trim() && !node.userData?.semantic_id && !node.userData?.stable_id) continue;
+      const reference=nodeReference(item.id,node,'part');
+      if (!reference?.node_path.length) continue;
+      nodes.push({reference,label:reference.node_name || reference.semantic_id || reference.stable_id || '节点 ' + reference.node_path.join('/'),
+        category:reference.node_path.length === 1 ? '物品' : '部件',modelName:item.name || item.id,
+        model_url:item.url || null,scene_revision:state.sceneRevision});
+    }
+  });
+  mentionSceneCache={revision:state.sceneRevision,roots,nodes};
+  return nodes;
+}
+function getPromptMentionCandidates() {
+  if (!editable()) return [];
+  const sessionId=state.sessionId, candidates=[], keys=new Set();
+  const add=(item) => {
+    if (keys.has(item.key)) return;
+    keys.add(item.key); candidates.push({...item,sessionId});
+  };
+  const addNode=(node,label,source={},context='') => {
+    const item=sceneObject(node?.parent_object_id);
+    if (!item || !node.node_path?.length || !resolveSceneNode(node)) return;
+    const modelURL=source.model_url ?? item.url ?? null;
+    if (modelURL !== (item.url || null)) return;
+    const key=node.parent_object_id+':'+node.node_path.join('/');
+    add({key:'node:'+key,kind:'node',label:label || node.node_name || node.semantic_id || node.stable_id || key,
+      detail:(context || (node.node_path.length === 1 ? '物品' : '部件'))+' · '+(item.name || item.id)+' · '+node.node_path.join('/'),
+      search:['物品 对象 部件 节点 node part item',key,node.node_name,node.semantic_id,node.stable_id].join(' '),
+      descriptor:{kind:'node',node:structuredClone(node),label:label || node.node_name || key,
+        model_url:modelURL,scene_revision:source.scene_revision ?? state.sceneRevision}});
+  };
+  const selection=selectedPromptReference();
+  if (selection?.kind === 'node') addNode(selection.node,selection.label,selection,'当前选中部件');
+  for (const node of state.referencedSceneNodes) addNode(node,node.node_name || node.semantic_id || node.stable_id,node,'已引用部件');
+  for (const item of state.sceneObjects) add({key:'object:'+item.id,kind:'object',label:item.name || item.id,
+    detail:'对象 · '+item.id,search:'物体 物品 对象 object item '+item.id,
+    descriptor:{kind:'object',objectId:item.id,label:item.name || item.id}});
+  for (const node of mentionSceneNodes()) addNode(node.reference,node.label,node,node.category);
+  state.annotations.forEach((mark,index) => {
+    const number=circled[Number(mark.group_id)] || String(index+1), time=annotationTimeLabel(mark);
+    const label='标记'+number+' · '+(labels[mark.type] || '标记');
+    add({key:'annotation:'+mark.id,kind:'annotation',label,
+      detail:(mark.pane === 'reference' ? '参考图' : '场景')+(time ? ' · '+time : '')+(mark.text ? ' · '+mark.text : ''),
+      search:['标注 标记 提示 annotation mark',index+1,mark.group_id,mark.id,mark.text,mark.object_id,mark.reference_image_id].join(' '),
+      descriptor:{kind:'annotation',annotationId:mark.id,label:'标记'+number+(time ? '（'+time+'）' : '')}});
+  });
+  if (state.imageReferencesSupported) {
+    for (const pane of ['reference','scene']) {
+      const reason=promptImageUnavailable(pane), ref=activeReference();
+      const snapshot=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot : null;
+      const time=pane === 'reference' ? ref?.time_sec : snapshot?.time_sec ?? (dynamicEnabled() ? state.time : null);
+      add({key:'current-image:'+pane,kind:'current-image',label:pane === 'reference' ? '左侧参考图' : '右侧渲染图',
+        detail:reason || (pane === 'reference' ? ref?.name || ref?.id || '当前参考图' : '版本 '+(snapshot?.scene_revision ?? state.sceneRevision))+
+          (Number.isFinite(time) ? ' · '+time.toFixed(3)+' s' : '')+' · 选中时固定截图',
+        search:'图片 图像 截图 image photo screenshot '+(pane === 'reference' ? '左图 参考 reference '+(ref?.name || '')+' '+(ref?.id || '') : '右图 场景 scene 渲染'),
+        disabled:reason,descriptor:{kind:'capture-image',pane,source:promptMentionImageSource(pane)}});
+    }
+    state.imageRefs.forEach((entry,index) => add({key:'saved-image:'+entry.id,kind:'saved-image',label:entry.label,
+      detail:'已保存图片 '+(index+1)+' · 固定截图',search:'图片 图像 已保存 image photo screenshot '+entry.id+' '+(index+1),
+      descriptor:{kind:'saved-image',imageId:entry.id}}));
+  }
+  for (const job of state.humanJobs) {
+    const frame=humanCurrentFrame(job);
+    if (job.status !== 'completed' || job.session_id !== state.sessionId || !frame || frame.reference_id !== activeReference()?.id) continue;
+    add({key:'pose:'+job.job_id+':'+frame.reference_id,kind:'pose',label:humanJobName(job),
+      detail:poseEvidenceLabel(job)+' · '+poseFrameLabel(frame,job.reference_name),
+      search:'人体 骨架 关键点 人体证据 pose human skeleton '+humanJobNumber(job)+' '+job.job_id+' '+frame.reference_id,
+      descriptor:{kind:'pose',jobId:job.job_id,referenceId:frame.reference_id}});
+  }
+  if (state.poseCorrectionsSupported) for (const sample of state.poseEdits.filter(validPoseEdit)) {
+    add({key:'pose-edit:'+sample.id,kind:'pose-edit',label:'手部修正 · '+(sample.label || sample.reference_id),
+      detail:'人工二维修正 · '+sample.edits.length+' 点',
+      search:'手部 修正 关键点 草稿 pose_edit correction manual '+sample.id+' '+sample.job_id+' '+sample.reference_id+' '+sample.edits.map((edit) => edit.name).join(' '),
+      descriptor:{kind:'pose-edit',editId:sample.id,jobId:sample.job_id,referenceId:sample.reference_id,imageSha256:sample.image_sha256}});
+  }
+  return candidates;
+}
+function insertPromptMention(candidate) {
+  if (!editable() || candidate.sessionId !== state.sessionId || candidate.disabled) return false;
+  const descriptor=candidate.descriptor;
+  if (descriptor.kind === 'capture-image') {
+    if (descriptor.source !== promptMentionImageSource(descriptor.pane)) throw new Error('画面已切换，请重新选择当前图片。');
+    return addPromptImageReference(capturePromptImage(descriptor.pane));
+  }
+  if (descriptor.kind === 'saved-image') {
+    const entry=state.imageRefs.find((item) => item.id === descriptor.imageId);
+    if (!entry) throw new Error('这张保存图片已移除，请重新引用图片。');
+    return addPromptImageReference(entry);
+  }
+  if (descriptor.kind === 'pose') {
+    const job=state.humanJobs.find((item) => item.job_id === descriptor.jobId && item.status === 'completed' && item.session_id === state.sessionId);
+    const frame=job && humanCurrentFrame(job);
+    if (frame?.reference_id !== descriptor.referenceId || activeReference()?.id !== descriptor.referenceId) throw new Error('人体来源帧已切换，请重新选择当前帧结果。');
+    return insertHumanPoseReference(job,frame);
+  }
+  if (descriptor.kind === 'pose-edit') {
+    if (!state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面。');
+    const sample=state.poseEdits.find((item) => item.id === descriptor.editId);
+    if (!validPoseEdit(sample) || sample.job_id !== descriptor.jobId || sample.reference_id !== descriptor.referenceId || sample.image_sha256 !== descriptor.imageSha256) throw new Error('这份修正草稿已失效，请重新选择。');
+    collectPoseEdits(ui.note.value,state.poseEdits);
+    return insertNoteReference('手部修正（'+sample.label+'）',poseEditToken(sample.id));
+  }
+  if (descriptor.kind === 'node' && !resolveSceneNode(descriptor.node)) throw new Error('这处部件已失效，请重新选择。');
+  return insertPromptDragReference(descriptor);
+}
 function insertPromptDragReference(descriptor) {
-  if (!editable() || !descriptor) return;
-  if (descriptor.kind === 'image') addPromptImageReference(descriptor.image);
-  else if (descriptor.kind === 'object' && sceneObject(descriptor.objectId)) insertNoteReference(descriptor.label,`[[object:${descriptor.objectId}]]`);
+  if (!editable() || !descriptor) return false;
+  if (descriptor.kind === 'image') return addPromptImageReference(descriptor.image);
+  else if (descriptor.kind === 'object' && sceneObject(descriptor.objectId)) return insertNoteReference(descriptor.label,`[[object:${descriptor.objectId}]]`);
   else if (descriptor.kind === 'node' && sceneObject(descriptor.node.parent_object_id)?.url === descriptor.model_url) {
-    insertSceneNodeReference(descriptor.node,descriptor.label,
+    return insertSceneNodeReference(descriptor.node,descriptor.label,
       {model_url:descriptor.model_url,scene_revision:descriptor.scene_revision});
   }
-  else if (descriptor.kind === 'annotation' && state.annotations.some((mark) => mark.id === descriptor.annotationId)) insertNoteReference(descriptor.label,`[[annotation:${descriptor.annotationId}]]`);
+  else if (descriptor.kind === 'annotation' && state.annotations.some((mark) => mark.id === descriptor.annotationId)) return insertNoteReference(descriptor.label,`[[annotation:${descriptor.annotationId}]]`);
   else announce('这处引用已失效，请重新选择后拖入。',true);
+  return false;
 }
 function bindPromptDrag(element,getDescriptor,kind) {
   element.draggable = true; element.dataset.promptDrag = kind;
@@ -4410,14 +4546,16 @@ function insertAllAnnotationReferences() {
   }
 }
 function insertSceneNodeReference(node, label, source=null) {
-  if (!editable() || !node?.node_path?.length) return;
+  if (!editable() || !node?.node_path?.length) return false;
   const key = node.parent_object_id + ':' + node.node_path.join('/');
   const index = state.referencedSceneNodes.findIndex((entry) => entry.parent_object_id + ':' + entry.node_path.join('/') === key);
   const captured = {...node, model_url:source?.model_url ?? sceneObject(node.parent_object_id)?.url ?? null,
     scene_revision:source?.scene_revision ?? state.sceneRevision};
+  if (!insertNoteReference(label || '场景节点', `[[node:${key}]]`)) return false;
   if (index < 0) state.referencedSceneNodes.push(captured);
   else state.referencedSceneNodes[index] = captured;
-  insertNoteReference(label || '场景节点', `[[node:${key}]]`);
+  saveDraft();
+  return true;
 }
 function promptReferences(note=ui.note.value) {
   if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
@@ -4781,6 +4919,9 @@ function bindEvents() {
   minimalLayout = setupMinimalLayout({getState:() => state});
   bindPromptReferenceEvents();
   bindPoseEditEvents();
+  promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
+    getCandidates:getPromptMentionCandidates,onSelect:insertPromptMention,isEnabled:editable,
+    onError:(message) => announce(message,true)});
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);
   id('close-projects').addEventListener('click', () => ui.projectsDialog.close());
@@ -4899,6 +5040,7 @@ function bindEvents() {
   }
   ui.note.addEventListener('input',() => { renderPromptImageReferences(); saveDraft(); });
   ui.note.addEventListener('keydown', (event) => {
+    if (promptMentions.isComposing(event) || promptMentions.handleKeydown(event)) return;
     if (event.key !== 'Enter' || !(event.ctrlKey || event.metaKey) || event.altKey ||
         event.isComposing || event.keyCode === 229 || ui.submit.disabled) return;
     event.preventDefault();
