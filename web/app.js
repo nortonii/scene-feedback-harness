@@ -90,7 +90,7 @@ const state = {
   pendingProjectCreate:null, projectCreationResult:null, projectCreationError:null,
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server',
-  boundThreadId:null, desktopAvailable:false, queue:[], approvals:[], targets:null, targetChoice:null,
+  boundThreadId:null, desktopAvailable:false, projectCreationSupported:false, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
   canSetPermissions:false,
@@ -708,7 +708,7 @@ function renderCreateProject() {
   ui.projectEffort.disabled = locked || !efforts.length;
   ui.projectPermissions.disabled = locked || !state.canSetPermissions;
   ui.createProject.classList.toggle('hidden', !!state.projectCreationResult);
-  ui.createProject.disabled = !state.workspaceReady || !state.desktopAvailable || !!busy ||
+  ui.createProject.disabled = !state.workspaceReady || !state.projectCreationSupported || !!busy ||
     (!pending && (!ui.projectName.value.trim() || !state.projectModelChoice || !state.canSetPermissions));
   ui.createProject.textContent = state.creatingProject ? '正在创建…' : pending ? '重试同一次创建' : '新建场景 + Codex 任务';
   ui.openCreatedProject.classList.toggle('hidden', !state.projectCreationResult);
@@ -717,12 +717,12 @@ function renderCreateProject() {
   else if (state.projectCreationResult?.creation_status === 'unavailable') ui.createProjectHelp.textContent =
     '场景文件不可用：' + (state.projectCreationResult.creation_error || state.projectCreationError || '请恢复场景目录后刷新列表。');
   else if (state.projectCreationResult) ui.createProjectHelp.textContent = state.projectCreationError
-    ? '场景已建立，任务未完成：' + state.projectCreationError + '。打开该场景后可在「任务」中继续连接。'
+    ? '场景已建立，任务未完成：' + state.projectCreationError + (state.deliveryMode === 'external' ? '。打开该场景后可在「任务」中继续连接。' : '。请检查后端连接；该次请求不会重复创建会话。')
     : '场景已建立，可以打开。';
   else if (pending) ui.createProjectHelp.textContent = '上次创建的结果尚未确认。可刷新场景列表找回，或使用同一请求重试；不会重复创建任务。';
   else if (state.projectCreationError) ui.createProjectHelp.textContent = state.projectCreationError;
   else if (state.modelLoadError) ui.createProjectHelp.textContent = '无法读取可用模型：' + state.modelLoadError;
-  else if (!state.desktopAvailable) ui.createProjectHelp.textContent = '请先将工作台连接到 Codex Desktop，才能创建新场景和任务。';
+  else if (!state.projectCreationSupported) ui.createProjectHelp.textContent = '当前服务未启用场景创建，请启用 Codex CLI 或连接 Codex Desktop。';
   else if (!state.canSetPermissions) ui.createProjectHelp.textContent = '正在读取创建任务所需的模型和权限选项。';
   else ui.createProjectHelp.textContent = '创建空白场景和独立的 Codex 任务，然后进入新场景。';
 }
@@ -764,7 +764,7 @@ async function navigateProject(project, {allowCreation=false}={}) {
   }
 }
 async function createSceneProject() {
-  if (!state.workspaceReady || !state.desktopAvailable || projectBusyReason() || state.projectCreationResult) return;
+  if (!state.workspaceReady || !state.projectCreationSupported || projectBusyReason() || state.projectCreationResult) return;
   let request = state.pendingProjectCreate;
   if (!request) {
     const name = ui.projectName.value.trim();
@@ -940,7 +940,7 @@ async function loadTargets() {
   }
 }
 async function loadModels({forProjects=false}={}) {
-  if (!state.desktopAvailable || (!forProjects && state.deliveryMode !== 'external') || state.loadingModels) return;
+  if ((forProjects ? !state.projectCreationSupported : !state.desktopAvailable || state.deliveryMode !== 'external') || state.loadingModels) return;
   state.loadingModels = true;
   renderTargetPicker();
   renderCreateProject();
@@ -1021,6 +1021,7 @@ function renderWorkspace(workspace) {
   if (typeof workspace.project_name === 'string' && workspace.project_name.trim()) state.projectName = workspace.project_name;
   state.deliveryMode = workspace.delivery_mode === 'external' ? 'external' : 'app_server';
   state.desktopAvailable = workspace.desktop_available ?? !!workspace.thread_id;
+  state.projectCreationSupported = workspace.project_creation_supported ?? state.desktopAvailable;
   const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;

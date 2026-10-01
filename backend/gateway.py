@@ -76,6 +76,9 @@ class WorkspaceGateway:
         result["desktop_available"] = self.external_review and bool(
             result.get("thread_id") or getattr(self.adapter, "thread_id", None) or self.desktop_seed_thread_id
         )
+        result["project_creation_supported"] = result["desktop_available"] or (
+            not self.external_review and callable(getattr(self.adapter, "list_models", None))
+        )
         if self.project_name:
             result["project_name"] = self.project_name
         result["reference_clip"] = self.store.get_session(result["session_id"]).get("reference_clip")
@@ -371,6 +374,13 @@ class WorkspaceGateway:
         return {"models": models, "default_model": default_model or (models[0]["model"] if models else None)}
 
     def list_models(self) -> dict[str, Any]:
+        if not self.external_review:
+            if not callable(getattr(self.adapter, "list_models", None)):
+                raise APIError(409, "Codex CLI is not configured for this workspace")
+            try:
+                return {**self._visible_models(self.adapter), "permission_modes_supported": True}
+            except Exception as exc:
+                raise APIError(503, f"cannot list Codex CLI models: {exc}") from exc
         _, current_id = self._desktop_entry()
         try:
             bridge = SharedThreadBridge.connect_to_desktop(current_id)
