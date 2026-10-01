@@ -471,6 +471,8 @@ class CodexAppServerAdapter:
             ),
         }
         return {
+            **({"sandbox_workspace_write.network_access": self.network_access}
+               if self.sandbox == "workspace-write" else {}),
             **({"model_reasoning_effort": self.reasoning_effort} if self.reasoning_effort else {}),
             "mcp_servers": {
                 "scene_feedback": {

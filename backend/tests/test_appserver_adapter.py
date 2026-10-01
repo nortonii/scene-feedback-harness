@@ -36,6 +36,8 @@ def thread_result(thread_id):
                       activePermissionProfile={"id": ":read-only", "extends": None})
     elif permission_metadata == "workspace-no-network":
         result.update(sandbox={"type": "workspaceWrite", "networkAccess": False}, approvalPolicy="on-request")
+    elif permission_metadata == "configured-network":
+        result.update(sandbox={"type": "workspaceWrite", "networkAccess": msg["params"].get("config", {}).get("sandbox_workspace_write.network_access", False)}, approvalPolicy="on-request")
     elif permission_metadata == "external":
         result.update(sandbox={"type": "externalSandbox"}, approvalPolicy="never")
     return result
@@ -188,6 +190,20 @@ class AppServerAdapterTests(unittest.TestCase):
                 for frame in turns:
                     self.assertEqual(frame["params"]["sandboxPolicy"], effective)
                     self.assertEqual(frame["params"]["approvalPolicy"], approval)
+
+    def test_workspace_network_is_applied_before_start_and_resume_verification(self) -> None:
+        for network in (True, False):
+            with self.subTest(network=network), tempfile.TemporaryDirectory() as directory:
+                for _ in range(2):
+                    adapter, log = self.fixture(directory, [], network_access=network,
+                                                permission_metadata="configured-network")
+                    try:
+                        self.assertEqual(adapter.start(), "thread-test")
+                    finally:
+                        adapter.close()
+                frames = [json.loads(line) for line in log.read_text().splitlines()]
+                methods = [frame['method'] for frame in frames if frame.get('method') in {'thread/start', 'thread/resume', 'turn/start'}]
+                self.assertEqual(methods, ['thread/start', 'thread/resume'])
 
     def test_effective_read_only_override_is_rejected_without_losing_created_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
