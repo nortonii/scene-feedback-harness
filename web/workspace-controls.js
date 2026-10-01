@@ -53,7 +53,9 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
     const gap = parseFloat(getComputedStyle(strip).columnGap) || 0;
     const cards = [...strip.children];
     const contentWidth = cards.reduce((total, card) => total + card.getBoundingClientRect().width, 0) + Math.max(0, cards.length-1) * gap;
-    const available = Math.max(0, gallery.parentElement.clientWidth - 20 - 6 - 28);
+    const navigation = byId('camera-navigation');
+    const reserved = navigation && !navigation.classList.contains('hidden') ? navigation.offsetWidth + 14 : 0;
+    const available = Math.max(0, gallery.parentElement.clientWidth - 20 - 6 - 28 - reserved);
     gallery.style.setProperty('--snapshot-strip-width', Math.min(contentWidth, available) + 'px');
   }
   function refresh() {
@@ -127,7 +129,9 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   window.addEventListener('blur', () => finish(true));
   mobile.addEventListener('change', () => { finish(true); applySplit(); });
   new ResizeObserver(applySplit).observe(workspace);
-  new ResizeObserver(sizeGallery).observe(gallery.parentElement);
+  const galleryObserver = new ResizeObserver(sizeGallery);
+  galleryObserver.observe(gallery.parentElement);
+  if (byId('camera-navigation')) galleryObserver.observe(byId('camera-navigation'));
   applySplit(); applySize(); refresh();
   return {refresh, eraserRadius:() => diameter / 2, sceneLabelsVisible:() => sceneLabelsVisible};
 }

@@ -263,13 +263,23 @@ export function setupChatDock({getState}) {
     }
   }
 
-  function open({focus=false}={}) {
+  function open({focus=false, approval=false}={}) {
     if (collapsed) {
       collapsed = false;
       applyLayout({animate:true});
       persist();
     }
-    if (focus) byId('feedback-note')?.focus({preventScroll:true});
+    if (approval) {
+      requestAnimationFrame(async () => {
+        await Promise.allSettled((dock?.getAnimations() || []).map(animation => animation.finished));
+        if (collapsed) return;
+        const card = byId('chat-approvals')?.querySelector('.approval-card, .queue-card');
+        if (card) {
+          card.scrollIntoView({block:'nearest'});
+          card.focus({preventScroll:true});
+        } else if (focus) byId('feedback-note')?.focus({preventScroll:true});
+      });
+    } else if (focus) byId('feedback-note')?.focus({preventScroll:true});
   }
 
   function refresh() {
@@ -291,6 +301,16 @@ export function setupChatDock({getState}) {
       } catch { /* Ignore an unavailable or invalid saved preference. */ }
       applyLayout();
     }
+    const pending = state.feedbackTransport === 'mcp_events' ? 0 : (state.approvals || []).length +
+      (state.queue || []).filter(item => item?.feedback_id && (['blocked_stale','delivery_uncertain'].includes(item.status) || (item.status === 'failed' && !item.turn_id))).length;
+    const waitingForApproval = pending > 0 || state.agent?.status === 'awaiting_approval';
+    const approvalPanel = byId('chat-approvals');
+    approvalPanel?.classList.toggle('hidden', !pending);
+    const count = byId('chat-approval-count');
+    if (count) count.textContent = pending > 1 ? pending + ' 项待处理' : '';
+    const review = byId('review-pending');
+    review?.classList.toggle('hidden', !pending);
+    if (review) review.textContent = '到会话中处理待确认操作' + (pending > 1 ? '（' + pending + '）' : '');
     const status = state.agent?.status || 'disconnected';
     const failed = !!state.networkError || state.sessionStatus === 'error' ||
       (state.sessionStatus !== 'connecting' && ['error', 'disconnected', 'delivery_uncertain'].includes(status));
@@ -298,12 +318,13 @@ export function setupChatDock({getState}) {
       : state.networkError ? '连接中断，正在重试'
       : state.sessionStatus === 'connecting' ? '正在连接'
       : state.sessionStatus !== 'open' ? '会话已结束'
+      : waitingForApproval ? '等待你确认'
       : state.submitting ? '正在发送'
       : ({idle:'等待反馈', running:'Codex 正在处理', awaiting_approval:'等待审批',
         waiting:'反馈已排队', disconnected:'Codex 连接中断', delivery_uncertain:'送达待核实',
         error:'Codex 执行出错', waiting_for_mcp:'等待 MCP 读取', external_idle:'等待 MCP 读取'})[status] || '正在连接';
     const compactStatus = byId('chat-status');
-    const running = !failed && state.sessionStatus === 'open' && (state.submitting || status === 'running');
+    const running = !waitingForApproval && !failed && state.sessionStatus === 'open' && (state.submitting || status === 'running');
     if (compactStatus) {
       compactStatus.textContent = label;
       compactStatus.title = state.networkError || state.agent?.error || byId('agent-status')?.textContent || label;
@@ -311,10 +332,13 @@ export function setupChatDock({getState}) {
       compactStatus.classList.toggle('running', running);
       compactStatus.classList.toggle('queued', !failed && ['awaiting_approval', 'waiting'].includes(status));
     }
-    launcher?.classList.toggle('has-attention', failed || status === 'awaiting_approval');
+    launcher?.classList.toggle('has-attention', failed || waitingForApproval);
     launcherStatus = label;
     if (launcher) {
       launcher.classList.toggle('is-running', running);
+      launcher.classList.toggle('needs-approval', waitingForApproval);
+      const launcherLabel = launcher.querySelector('[data-chat-launcher-label]');
+      if (launcherLabel) launcherLabel.textContent = waitingForApproval ? '待确认' : '展开会话';
       launcher.setAttribute('aria-busy', String(running));
       launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
     }
@@ -382,7 +406,7 @@ export function setupChatDock({getState}) {
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
     for (const element of [dock, dock?.querySelector('.chat-dock-header'),
-      dock?.querySelector('.composer'), byId('timeline-panel')]) {
+      dock?.querySelector('.composer'), byId('chat-approvals'), byId('timeline-panel')]) {
       if (element) observer.observe(element);
     }
   }
@@ -395,7 +419,11 @@ export function setupChatDock({getState}) {
     persist();
     launcher?.focus({preventScroll:true});
   });
-  launcher?.addEventListener('click', () => open({focus:true}));
+  launcher?.addEventListener('click', () => open({focus:true, approval:launcher.classList.contains('needs-approval')}));
+  byId('review-pending')?.addEventListener('click', () => {
+    byId('activity-dialog')?.close();
+    open({approval:true});
+  });
   historyToggle?.addEventListener('click', () => {
     finishResize();
     rememberScroll();

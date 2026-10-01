@@ -136,7 +136,7 @@ def verify_chat_activity(page, store, screenshots):
             page.screenshot(path=str(screenshots / 'chat-collapsed-running.png'))
 
         for status, label in [('idle', '等待反馈'), ('error', 'Codex 执行出错'),
-                              ('awaiting_approval', '等待审批')]:
+                              ('awaiting_approval', '等待你确认')]:
             set_status(status, label)
             expect(launcher).to_have_attribute('aria-busy', 'false')
             expect(spinner).to_be_hidden()

@@ -62,7 +62,7 @@ def assert_launcher(page):
     assert box["height"] <= 64, box
     assert launcher.evaluate("el => el.scrollWidth <= el.clientWidth"), "Launcher content overflows"
     assert launcher.evaluate("""el => {
-      const label = el.querySelector('span:not(#chat-unread-count)');
+      const label = el.querySelector('[data-chat-launcher-label]');
       const range = document.createRange();
       range.selectNodeContents(label);
       return range.getClientRects().length === 1;

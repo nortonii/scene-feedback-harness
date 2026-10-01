@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { SceneNavigation } from './scene-navigation.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
@@ -96,7 +96,7 @@ const ui = {
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
   feedbackIntro:id('feedback-intro'),
-  approvals:id('approval-list'), queue:id('queue-list'), conversation:id('conversation')
+  approvals:id('approval-list'), pendingQueue:id('chat-pending-queue'), queue:id('queue-list'), conversation:id('conversation')
 };
 const comparePreferences = {sessionId:null, enabled:true, opacity:45, lastPositive:45};
 const state = {
@@ -170,13 +170,13 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.65;
 renderer.domElement.tabIndex = 0;
 ui.viewport.appendChild(renderer.domElement);
-const controls = new OrbitControls(camera, renderer.domElement);
+const controls = new SceneNavigation(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.target.set(0, 0, 0.65);
 controls.minDistance = 0.3;
 controls.maxDistance = 250;
-controls.screenSpacePanning = false;
+controls.screenSpacePanning = true;
 controls.update();
 threeScene.add(new THREE.HemisphereLight(0xdcefff, 0x7e8a93, 2.3));
 const keyLight = new THREE.DirectionalLight(0xffedda, 3.5);
@@ -266,7 +266,7 @@ function saveDraft() {
       activeReferenceId:state.activeReferenceId, note:ui.note.value,
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
-        alignmentExact:state.alignmentExact,
+        alignmentExact:state.alignmentExact, freeRotation:controls.freeRotation,
         referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
       snapshot:state.snapshot, sceneView:state.sceneView, sceneSnapshotIds:state.sceneSnapshots.map(entry => entry.id),
       dynamicTime:state.time, activeViewId:state.activeViewId, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
@@ -337,6 +337,7 @@ function restoreDraft() {
     const currentNote = typeof draft.note === 'string' ? draft.note : '';
     ui.note.value = [oldPrompts, currentNote].filter(Boolean).join('\n\n');
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
+      controls.setFree(draft.camera.freeRotation === true, {notify:false});
       camera.position.set(...draft.camera.position);
       if (draft.camera.up?.length === 3) camera.up.set(...draft.camera.up);
       if (Number.isFinite(draft.camera.fov) && draft.camera.fov > 1 && draft.camera.fov < 179) camera.fov = draft.camera.fov;
@@ -1259,11 +1260,20 @@ function renderExternalDelivery() {
 }
 function renderQueue({boundExternal=false}={}) {
   ui.queue.replaceChildren();
+  const pendingIds = new Set();
   const latest = state.queue.at(-1);
   for (const item of state.queue) {
     if (!item || ((item.status === 'completed' || item.status === 'discarded') && (!boundExternal || item !== latest))) continue;
     const oldTarget = boundExternal && !!item.target_thread_id && item.target_thread_id !== state.boundThreadId;
     const retryableFailed = item.status === 'failed' && !item.turn_id;
+    const manual = !!item.feedback_id && (['blocked_stale','delivery_uncertain'].includes(item.status) || retryableFailed);
+    const signature = JSON.stringify([item, state.sceneRevision, boundExternal, state.boundThreadId]);
+    if (manual) {
+      pendingIds.add(item.feedback_id);
+      const saved = [...ui.pendingQueue.children].find(node => node.dataset.feedbackId === item.feedback_id);
+      if (saved?.dataset.signature === signature) continue;
+      saved?.remove();
+    }
     const card = document.createElement('div');
     card.className = 'queue-card' + (item.status === 'queued' && item.error ? ' retrying'
       : item.status === 'delivery_uncertain' ? ' uncertain'
@@ -1312,12 +1322,12 @@ function renderQueue({boundExternal=false}={}) {
       confirm.type = 'button';
       confirm.textContent = '确认按旧截图发送';
       confirm.addEventListener('click', async () => {
-        confirm.disabled = true;
+        actions.querySelectorAll('button').forEach(button => button.disabled = true);
         try {
           await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{confirm:true}});
           announce('已确认；Codex 空闲后会处理这条消息。');
           await refreshWorkspace();
-        } catch (error) { announce('确认失败：' + error.message, true); confirm.disabled = false; }
+        } catch (error) { announce('确认失败：' + error.message, true); actions.querySelectorAll('button').forEach(button => button.disabled = false); }
       });
       actions.append(confirm);
       const discard = document.createElement('button');
@@ -1383,8 +1393,14 @@ function renderQueue({boundExternal=false}={}) {
       actions.append(retry);
       card.append(actions);
     }
-    ui.queue.append(card);
+    if (manual) {
+      card.dataset.feedbackId = item.feedback_id;
+      card.dataset.signature = signature;
+      card.tabIndex = -1;
+      ui.pendingQueue.append(card);
+    } else ui.queue.append(card);
   }
+  for (const card of [...ui.pendingQueue.children]) if (!pendingIds.has(card.dataset.feedbackId)) card.remove();
 }
 function approvalDetails(approval) {
   if (approval.details && typeof approval.details === 'object' && !Array.isArray(approval.details)) return approval.details;
@@ -1615,15 +1631,18 @@ function approvalButton(actions, label, makePayload, approval, card) {
   button.addEventListener('click', async () => {
     let payload;
     try { payload = makePayload(); }
-    catch (error) { announce(error.message, true); return; }
+    catch (error) { card.querySelector('.approval-error').textContent = error.message; return; }
+    card.querySelector('.approval-error').textContent = '';
     actions.querySelectorAll('button').forEach((node) => node.disabled = true);
     try {
       await api('/api/workspace/approvals/' + encodeURIComponent(approval.approval_id) + '/respond', {method:'POST', body:payload});
+      state.approvals = state.approvals.filter(item => item.approval_id !== approval.approval_id);
       card.remove();
+      minimalLayout?.refresh();
       try { await refreshWorkspace(); }
       catch { announce('审批已送达，工作台状态会稍后刷新。'); }
     } catch (error) {
-      announce('审批响应失败：' + error.message, true);
+      card.querySelector('.approval-error').textContent = '发送失败：' + error.message + '。请重试。';
       actions.querySelectorAll('button').forEach((node) => node.disabled = false);
     }
   });
@@ -1635,6 +1654,9 @@ function createApprovalCard(approval) {
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.dataset.approvalId = approval.approval_id;
+  card.tabIndex = -1;
+  const error = document.createElement('p'); error.className = 'approval-error'; error.setAttribute('role', 'alert');
+  card.append(error);
   const title = document.createElement('strong');
   const body = document.createElement('div');
   body.className = 'approval-detail';
@@ -1751,8 +1773,13 @@ function createApprovalCard(approval) {
   } else if (kind === 'item/commandExecution/requestApproval' || kind === 'item/fileChange/requestApproval') {
     title.textContent = kind.includes('fileChange') ? 'Codex 请求修改文件' : 'Codex 请求执行命令';
     approvalText(body, details.reason || details.message);
-    if (details.command) approvalText(body, details.command, 'approval-raw');
-    else if (details.changes) approvalText(body, JSON.stringify(details.changes, null, 2), 'approval-raw');
+    if (details.command || details.changes) {
+      const disclosure = document.createElement('details');
+      const summary = document.createElement('summary'); summary.textContent = details.command ? '命令 · ' + String(details.command).split('\n')[0].slice(0, 96) : '查看文件修改';
+      disclosure.append(summary);
+      approvalText(disclosure, details.command || JSON.stringify(details.changes, null, 2), 'approval-raw');
+      body.append(disclosure);
+    }
     else if (!body.textContent) approvalText(body, approval.prompt || kind);
     addDecision('accept', '允许');
     addDecision('decline', '拒绝');
@@ -1846,7 +1873,9 @@ async function fetchEvents(initial=false) {
     } else if (event.type === 'feedback_requested') {
       appendConversation('assistant', message || '请查看当前场景并给出反馈。', event.at);
     } else if (event.type === 'approval_requested') {
-      appendConversation('status', 'Codex 正在等待审批。', event.at);
+      appendConversation('status', 'Codex 正在等待你确认，请在输入框上方处理。', event.at);
+    } else if (event.type === 'approval_resolved') {
+      appendConversation('status', ({accept:'已允许该操作。', decline:'已拒绝该操作。', cancel:'已取消该操作。', resolved_elsewhere:'该请求已在其他入口处理。', structured:'已提交所需回答。'})[payload.decision] || '确认已处理。', event.at);
     }
   }
   state.eventCursor = Number.isInteger(events.next_cursor) ? events.next_cursor : state.eventCursor;
@@ -2030,6 +2059,7 @@ function alignActiveReference({showLive=true, notify=false, persist=true}={}) {
     updateAlignmentStatus();
     return false;
   }
+  controls.cancelTransition();
   // Clear any remaining damped orbit motion before placing the recorded camera.
   const damping = controls.enableDamping;
   controls.enableDamping = false;
@@ -2062,25 +2092,27 @@ function alignActiveReference({showLive=true, notify=false, persist=true}={}) {
   if (notify) announce('已切换到「' + (ref.name || '参考图') + '」的拍摄机位。');
   return true;
 }
-function frameBox(box) {
+function frameBox(box, {smooth=false, keepDirection=false}={}) {
   if (!box || box.isEmpty()) return;
+  controls.cancelTransition();
+  controls.flush();
+  const direction = keepDirection ? camera.position.clone().sub(controls.target).normalize() : new THREE.Vector3(1,-1.4,0.95).normalize();
   leaveReferenceCamera();
   const center = box.getCenter(new THREE.Vector3());
   const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.45);
-  const distance = Math.max(radius / Math.sin(camera.fov * Math.PI / 360) * 1.25, 2.5);
-  camera.position.copy(center).addScaledVector(new THREE.Vector3(1,-1.4,0.95).normalize(), distance);
-  controls.target.copy(center);
+  const halfFov = Math.min(camera.fov * Math.PI / 360, Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect));
+  const distance = Math.max(radius / Math.sin(halfFov) * 1.15, 0.6);
   camera.near = Math.max(distance / 1000, 0.005);
   camera.far = Math.max(distance * 100, 100);
   camera.updateProjectionMatrix();
-  controls.update();
+  controls.moveTo(center.clone().addScaledVector(direction, distance), center, {smooth});
   saveDraft();
 }
-function frameAll() {
+function frameAll(options={}) {
   const box = new THREE.Box3();
   for (const root of state.objectNodes.values()) box.expandByObject(root);
   if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(0,0,0.5), new THREE.Vector3(3,3,2));
-  frameBox(box);
+  frameBox(box, options);
 }
 function clearSelectionHelper() {
   if (!selectionHelper) return;
@@ -3842,7 +3874,7 @@ function updateSceneHint() {
   }
   if (state.sceneView === 'live') {
     ui.sceneHint.textContent = state.mode === 'select'
-      ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
+      ? (controls.freeRotation ? '自由旋转 · ' : '') + '左拖旋转 · 右拖平移 · 滚轮缩放 · 双击聚焦'
       : '直接在渲染图上圈画，自动保留当前截图';
   } else if (state.mode === 'select') {
     const selected = selectedAnnotation();
@@ -3873,6 +3905,10 @@ function updateMode() {
   renderer.domElement.style.cursor = drawing && state.sceneView === 'live' ? (state.mode === 'erase' ? 'not-allowed' : 'crosshair') : '';
   updateAnnotationSelectionHint();
   controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
+  id('camera-navigation').classList.toggle('hidden', state.sceneView !== 'live' || state.mode !== 'select');
+  id('camera-navigation').querySelectorAll('button').forEach(button => button.disabled = !controls.enabled);
+  id('free-rotation').disabled = id('upright-camera').disabled = !controls.enabled;
+  id('free-rotation').setAttribute('aria-pressed', String(controls.freeRotation));
   ui.referenceHint.classList.toggle('hidden', !activeReference());
   updateSceneHint();
   state.drag = null;
@@ -5257,7 +5293,7 @@ function setRendererSize(width, height) {
 function animate(timestamp) {
   requestAnimationFrame(animate);
   advanceTimeline(timestamp);
-  controls.update();
+  controls.tick(timestamp);
   if (state.sceneView === 'live') renderer.render(threeScene, camera);
 }
 async function poll() {
@@ -5475,18 +5511,53 @@ function bindEvents() {
     renderSelection();
     saveDraft();
   });
-  ui.frame.addEventListener('click', () => {
+  const focusSelection = () => {
     if (!editable()) return;
     browseScene();
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
-    if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
-    else if (state.selectedId) frameBox(objectBox(state.selectedId));
-    else frameAll();
+    if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode), {smooth:true, keepDirection:true});
+    else if (state.selectedId) frameBox(objectBox(state.selectedId), {smooth:true, keepDirection:true});
+    else frameAll({smooth:true});
     minimalLayout?.closeReferences();
+  };
+  ui.frame.addEventListener('click', focusSelection);
+  renderer.domElement.addEventListener('dblclick', (event) => {
+    if (!editable() || state.sceneView !== 'live' || state.mode !== 'select') return;
+    const selection = pickScene(event);
+    if (!selection) return;
+    selectObject(selection.objectId, selection.sceneNode, selection.detailNode);
+    focusSelection();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key.toLowerCase() !== 'f' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 ||
+        event.target.closest('input, textarea, select, [contenteditable], dialog[open]') || document.querySelector('dialog[open]') || state.sceneView !== 'live') return;
+    event.preventDefault(); focusSelection();
+  });
+  const directions = {front:[0,-1,0], back:[0,1,0], left:[-1,0,0], right:[1,0,0], top:[0,-.0001,1], bottom:[0,-.0001,-1], iso:[1,-1.4,.95]};
+  id('camera-navigation').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-camera-view]');
+    if (!button || !editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera();
+    controls.setFree(false);
+    const direction = new THREE.Vector3(...directions[button.dataset.cameraView]).normalize();
+    controls.moveTo(controls.target.clone().addScaledVector(direction, Math.max(.3, controls.getDistance())), controls.target, {up:new THREE.Vector3(0,0,1)});
+    updateMode();
+  });
+  id('free-rotation').addEventListener('click', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera(); controls.setFree(!controls.freeRotation); updateMode(); saveDraft();
+  });
+  id('upright-camera').addEventListener('click', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera(); controls.setFree(false); updateMode(); saveDraft();
+  });
+  id('frame-all').addEventListener('click', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    controls.setFree(false); frameAll({smooth:true}); updateMode();
   });
   ui.resetView.addEventListener('click', () => {
     if (!editable()) return;
-    browseScene(); frameAll(); minimalLayout?.closeReferences();
+    browseScene(); controls.setFree(false); frameAll({smooth:true}); updateMode(); minimalLayout?.closeReferences();
   });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);

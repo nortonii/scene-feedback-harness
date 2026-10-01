@@ -41,13 +41,17 @@ The page retains its warm off-white background and black or gray controls, with 
 | Scene name at the top | Switch independent scenes; with Codex Desktop connected, create a new scene and reconstruction task |
 | Current task name at the top | With Codex Desktop connected, switch the current scene's recipient or create a task with a name, model, reasoning effort, and permissions |
 | Conversation dock | History appears above the prompt. `收起记录` hides history only; `收起会话` hides the entire dock, and `展开会话` at the lower right brings it back |
-| `记录` at the top | Execution, approvals, and feedback queue. Closed by default; a new approval, actionable failure, or uncertain delivery opens it once |
+| `记录` at the top | Execution and feedback queue. Approvals, old-snapshot confirmations, retries and delivery checks appear above the conversation prompt; no automatic modal |
 | `物体与标记` in the top toolbar | Object and mark references. Clicking `引用` inserts at the prompt cursor, closes the panel, and returns focus to the prompt |
 | Reference pane’s `导入` menu | Import reference images, videos, or a frame sequence, and set the sequence FPS; dynamic imports append independent views |
 | `叠图` at the top of the scene pane | Toggle the reference overlay; click its percentage to open the opacity slider and presets |
 | Reference view selector | Switch dynamic reference views on the shared timeline |
 | Human evidence inside `物体与标记` | Shown only for imported or completed historical results; view, cite and download 2D skeletons |
 | Timeline’s `选项` menu | Feedback scope, time interval, and GLB animation action selection |
+
+Pending decisions stay visible when history is collapsed. A collapsed conversation shows `! 待确认` instead of the spinner; opening it focuses the pending card. Forms survive status refreshes and failed responses, and resolved approvals appear in chat history.
+
+In 3D, left-drag rotates, right-drag pans in screen space, and the wheel zooms toward the cursor. Double-click an object, or select it and press `F`, to focus and orbit it; typing never triggers this shortcut. The corner direction pad smoothly selects front/back/left/right/top/bottom or an oblique view; `全景` fits the scene. The camera menu offers `自由旋转` for unrestricted rotation and `回正` for upright orbit. Camera/mode persist with the draft. Direction controls are hidden for snapshots, whose images and marks remain unchanged.
 
 Collapsing the dock keeps the current unsent draft, marks, camera, and frozen evidence intact, so you can keep selecting and annotating. Inserting an object, mark, or human-pose reference opens the prompt automatically. With history expanded, drag the thin handle along the top edge to resize the dock; pulling upward shows more history. Double-click it to restore the default size, or focus it and use the up/down arrow keys. Collapsing history hides the resize handle and keeps the prompt compact; explicitly expanding history restores resizing and the previous height. Collapse preferences and the custom height are saved per workspace session in this browser and restored on reload; smaller windows clamp the height to fit. New messages show an unread count without opening the dock. Reading older messages preserves your scroll position; use the latest-message button to catch up. The dock replays recent persisted workspace messages, displaying up to 100 entries. In unbound external MCP mode, later model replies still appear in the original Codex task.
 

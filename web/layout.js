@@ -7,9 +7,6 @@ export function setupMinimalLayout({getState}) {
     .map(byId).filter(Boolean);
   const previousFocus = new WeakMap();
   const skipFocusRestore = new WeakSet();
-  const seenAttention = new Set();
-  const pendingAttention = new Set();
-  let activeAttention = new Set();
 
   function syncDialogButtons(dialog) {
     for (const button of document.querySelectorAll('[data-open-dialog]')) {
@@ -43,23 +40,6 @@ export function setupMinimalLayout({getState}) {
     }
   }
 
-  function annotationEditorOpen() {
-    const editor = byId('text-editor');
-    return editor && !editor.classList.contains('hidden');
-  }
-
-  function showPendingAttention() {
-    for (const key of pendingAttention) {
-      if (!activeAttention.has(key)) pendingAttention.delete(key);
-    }
-    const activity = byId('activity-dialog');
-    if (activity?.open) { pendingAttention.clear(); return; }
-    if (!pendingAttention.size || annotationEditorOpen()) return;
-    if (document.querySelector('dialog[open]')) return;
-    openDialog(activity);
-    pendingAttention.clear();
-  }
-
   function refresh() {
     chat.refresh();
     const state = getState() || {};
@@ -88,12 +68,6 @@ export function setupMinimalLayout({getState}) {
           (item.status === 'failed' && !item.turn_id))) continue;
       attention.add('queue:' + (item.feedback_id || item.id || index) + ':' + item.status);
     }
-    activeAttention = attention;
-    for (const key of attention) {
-      if (seenAttention.has(key)) continue;
-      seenAttention.add(key);
-      pendingAttention.add(key);
-    }
     const count = byId('attention-count');
     if (count) {
       count.textContent = String(attention.size);
@@ -116,7 +90,6 @@ export function setupMinimalLayout({getState}) {
     }
     const moreLabel = byId('more-tools-label');
     if (moreLabel) moreLabel.textContent = mode === 'text' ? '字' : mode === 'freehand' ? '画笔' : '更多';
-    showPendingAttention();
   }
 
   for (const dialog of dialogs) {
@@ -132,8 +105,7 @@ export function setupMinimalLayout({getState}) {
       const target = previousFocus.get(dialog);
       previousFocus.delete(dialog);
       if (!skipRestore && target?.isConnected && !target.disabled) target.focus({preventScroll:true});
-      showPendingAttention();
-    });
+      });
   }
 
   document.addEventListener('click', (event) => {
