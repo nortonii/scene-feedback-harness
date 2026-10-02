@@ -103,7 +103,8 @@ export function setupWorkspaceChrome({getState, setMode, revealReference}) {
     const state = getState();
     sceneButton.hidden = state.sceneView !== 'snapshot';
     document.querySelector('.selection-popover').hidden = state.sceneView !== 'live';
-    byId('selection-level-label').textContent = state.selectionLevel === 'part' ? '选择部件' : '选择物体';
+    byId('selection-level-label').textContent = state.selectionLevel === 'part' ? '部件' : '物体';
+    document.querySelector('.selection-popover > summary').setAttribute('aria-label', `选择层级：${state.selectionLevel === 'part' ? '部件' : '物体'}`);
     refButton.disabled = !state.workspaceReady || !state.activeReferenceId;
     const newSnapshot = state.sceneView === 'snapshot' && previousView !== state.sceneView;
     const newTool = state.mode !== 'select' && previousMode !== state.mode;
