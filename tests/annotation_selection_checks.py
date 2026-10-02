@@ -23,6 +23,7 @@ def verify_annotation_selection(page, screenshots):
     dock = page.locator("#chat-dock")
 
     def tool(name):
+        open_annotation_tools(page, "scene")
         control(page, f'button[data-tool="{name}"]').click()
 
     def position(selector, x, y):
@@ -96,6 +97,7 @@ def verify_annotation_selection(page, screenshots):
     tool("point")
     click(scene, *scene_point_at)
     first_point = marks()[-1]
+    choose_tool(page, "point", "reference")
     click(reference, *reference_point_at)
     reference_point = marks()[-1]
     assert point_number(reference_point) == point_number(first_point) + 1
@@ -121,6 +123,7 @@ def verify_annotation_selection(page, screenshots):
     selected(scene, rectangle["id"])
     click(scene, .375, .635)
     selected(scene, "")
+    choose_tool(page, "select", "reference")
     click(reference, *reference_point_at)
     selected(reference, reference_point["id"])
     click(scene, *scene_point_at)
@@ -234,7 +237,7 @@ def verify_annotation_selection(page, screenshots):
     snapshot_is(second_snapshot)
 
     # Leave the shared fixture clean for subsequent checks.
-    control(page, "#clear-annotations").click()
+    control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     count(0)
     browse.click()

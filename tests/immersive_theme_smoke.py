@@ -307,10 +307,10 @@ def main():
                     ref=bounds(page,'.reference-pane'); timeline=bounds(page,'#timeline-panel')
                     assert timeline['x'] >= ref['x'] and timeline['x']+timeline['width'] <= ref['x']+ref['width']+1
                     assert timeline['y'] >= ref['y'] and timeline['y']+timeline['height'] <= ref['y']+ref['height']+1
-                    for selector in ('#timeline-seek','#timeline-play','#timeline-time','#save-moment'):
+                    for selector in ('#timeline-seek','#timeline-play','#timeline-time'):
                         assert_inside(page,selector)
                     control(page, '.timeline-options summary').click()
-                    assert_inside(page,'.timeline-details');page.locator('#feedback-scope').select_option('range')
+                    assert_inside(page,'.timeline-details');assert_inside(page,'#save-moment');page.locator('#feedback-scope').select_option('range')
                     expect(page.locator('#range-start')).to_be_visible();page.keyboard.press('Escape')
                     page.screenshot(path=str(out / ('reference-video-mobile.png' if width==390 else 'reference-video-desktop.png')))
                 control(page, '#timeline-next').click()

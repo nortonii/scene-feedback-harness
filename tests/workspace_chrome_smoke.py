@@ -192,7 +192,7 @@ def main():
                 for selector in ('#task-dialog-button','#activity-dialog-button','#help-button'):
                     expect(page.locator(selector)).to_be_hidden()
                 assert page.locator('.topbar button:visible, .topbar summary:visible').count() == 5
-                assert page.locator('#references-dialog-button').evaluate("el => !!el.closest('#scene-stage')")
+                assert page.locator('#references-dialog-button').evaluate("el => !!el.closest('.scene-pane > .pane-head')")
                 control(page, '#help-button').click()
                 expect(page.locator('#help-dialog')).to_be_visible()
                 page.keyboard.press('Escape')
@@ -282,7 +282,7 @@ def main():
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 control(page, '#annotate-reference-button').click()
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
-                choose_tool(page, 'point')
+                choose_tool(page, 'point', 'scene')
                 point(page, '#scene-annotations', .72, .42)
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 3')
                 expect(page.locator('#annotation-context-label')).to_have_text('截图')

@@ -1,7 +1,7 @@
 import { setupReferenceWindow } from './reference-window.js';
 
 // Layout preferences never alter the scene camera, snapshots or feedback evidence.
-export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}}={}) {
+export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasActiveGesture=()=>false}={}) {
   const root = document.documentElement;
   const toggle = document.getElementById('immersive-toggle');
   const referenceToggle = document.getElementById('immersive-reference-toggle');
@@ -94,7 +94,7 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}}={}) 
   referenceToggle.addEventListener('click', () => setReference(!referenceVisible));
   document.getElementById('immersive-reference-close').addEventListener('click', () => setReference(false, {focus:true}));
   document.addEventListener('keydown', event => {
-    if (event.key !== 'Escape' || event.defaultPrevented || reference.dataset.referenceGesture || !immersive || !referenceVisible ||
+    if (event.key !== 'Escape' || event.defaultPrevented || hasActiveGesture() || reference.dataset.referenceGesture || !immersive || !referenceVisible ||
         document.querySelector('dialog[open], details.popover[open]') ||
         event.target.closest('input, textarea, select, [contenteditable]')) return;
     setReference(false, {focus:true});

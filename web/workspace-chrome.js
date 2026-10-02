@@ -1,5 +1,5 @@
 // The floating tool dock reuses the real controls; scene/evidence state stays in app.js.
-export function setupWorkspaceChrome({getState, setMode, revealReference}) {
+export function setupWorkspaceChrome({getState, setMode, activateToolPane, revealReference}) {
   const byId = id => document.getElementById(id);
   const root = document.documentElement;
   const dock = byId('annotation-tool-panel');
@@ -85,6 +85,7 @@ export function setupWorkspaceChrome({getState, setMode, revealReference}) {
     if (pane === 'reference' && reference.inert) revealReference?.();
     const wasOpen = opened;
     target = pane; opened = true;
+    activateToolPane?.(pane);
     animation?.cancel(); render();
     if (!wasOpen && !reduced.matches) animation = dock.animate([
       {opacity:0, translate:'6px 0'}, {opacity:1, translate:'0 0'}
@@ -95,7 +96,7 @@ export function setupWorkspaceChrome({getState, setMode, revealReference}) {
     const trigger = target === 'reference' ? refButton : sceneButton;
     animation?.cancel();
     opened = false;
-    if (resetTool && getState().mode !== 'select') setMode('select');
+    if (resetTool && getState().mode !== 'select') setMode('select',target);
     render();
     if (focus) (trigger.hidden ? byId('browse-button') : trigger).focus({preventScroll:true});
   }
@@ -110,7 +111,7 @@ export function setupWorkspaceChrome({getState, setMode, revealReference}) {
     const newTool = state.mode !== 'select' && previousMode !== state.mode;
     previousView = state.sceneView; previousMode = state.mode;
     if (newSnapshot) open('scene');
-    else if (newTool && !opened) open(target === 'reference' && !reference.inert ? 'reference' : 'scene');
+    else if (newTool && !opened) open(state.toolPane === 'reference' && !reference.inert ? 'reference' : 'scene');
     schedulePosition();
   }
   function layoutChanged() {
@@ -125,10 +126,11 @@ export function setupWorkspaceChrome({getState, setMode, revealReference}) {
   document.addEventListener('pointerdown', event => {
     const pane = event.target.closest('#reference-annotations') ? 'reference'
       : event.target.closest('#scene-annotations, #viewport canvas') ? 'scene' : null;
-    if (pane && (opened || getState().mode !== 'select')) {
-      if (pane === 'scene' && getState().sceneView === 'live' && getState().mode === 'select') close();
-      else open(pane);
-    }
+    if (!pane) return;
+    const state = getState();
+    if (pane === 'scene' && state.sceneView === 'live' && state.paneModes.scene === 'select') return;
+    if (opened || state.paneModes[pane] !== 'select') open(pane);
+
   }, {capture:true});
   for (const details of document.querySelectorAll('details.popover')) details.addEventListener('toggle', schedulePosition);
   const pill = byId('session-pill');

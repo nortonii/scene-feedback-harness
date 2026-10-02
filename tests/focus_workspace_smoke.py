@@ -250,11 +250,11 @@ def verify_chat_resize(page, store, submissions, screenshots):
 def verify_clear_confirmation(page, screenshots):
     before = draft(page)
     dialog = page.locator("#clear-annotations-dialog")
-    clear = control(page, "#clear-annotations")
+    clear = control(page, "#clear-round")
     cancel = page.locator("#cancel-clear-annotations")
     assert before["annotations"] and before["sceneSnapshotIds"]
     for action in ("cancel", "Escape", "Enter"):
-        clear.click()
+        control(page, "#clear-round").click()
         expect(dialog).to_be_visible()
         expect(cancel).to_be_focused()
         # Undo/delete shortcuts must not change evidence behind the modal.
@@ -268,9 +268,9 @@ def verify_clear_confirmation(page, screenshots):
         else:
             page.keyboard.press(action)
         expect(dialog).to_be_hidden()
-        expect(clear).to_be_focused()
+        expect(page.locator("#workspace-menu > summary")).to_be_focused()
         assert draft(page) == before
-    clear.click()
+    control(page, "#clear-round").click()
     page.set_viewport_size({"width": 340, "height": 844})
     box = dialog.bounding_box()
     assert box["x"] >= 0 and box["x"] + box["width"] <= 340
@@ -280,7 +280,7 @@ def verify_clear_confirmation(page, screenshots):
     after = draft(page)
     assert not after["annotations"] and not after["sceneSnapshotIds"] and not after["snapshot"]
     expect(clear).to_be_disabled()
-    expect(page.locator("#undo-annotation")).to_be_focused()
+    expect(page.locator("#workspace-menu > summary")).to_be_focused()
     control(page, "#undo-annotation").click()
     for key in ("annotations", "sceneSnapshotIds", "snapshot", "sceneView", "note"):
         assert draft(page).get(key) == before.get(key), key
@@ -303,7 +303,7 @@ def verify_scene_modes(page, screenshots):
 
     mode(False)
     control(page, "#chat-collapse").click()
-    expect(annotate).to_have_text("截图")
+    expect(annotate).to_have_text("截图库")
     empty = draft(page)
     annotate.click()
     mode(False)
@@ -433,7 +433,7 @@ def verify_scene_modes(page, screenshots):
     page.evaluate("scrollTo(0, 0)")
     # Return to the initial fixture before the existing workspace regressions.
     verify_clear_confirmation(page, screenshots)
-    control(page, "#clear-annotations").click()
+    control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     annotate.click()
     mode(False)
@@ -473,7 +473,7 @@ def verify_eraser(page, screenshots):
     stroke(scene, (.2, .35), (.8, .35))
     tool("rectangle")
     stroke(scene, (.25, .55), (.5, .8))
-    tool("point")
+    choose_tool(page, "point", "reference")
     page.mouse.click(*position("#reference-annotations", .5, .5))
     control(page, "#browse-button").click()
     control(page, "#capture-scene-button").click()
@@ -517,6 +517,7 @@ def verify_eraser(page, screenshots):
         assert draft(page)["annotations"] == original["annotations"]
     control(page, "#reference-zoom-in").click()
     control(page, "#reference-zoom-in").click()
+    choose_tool(page, "erase", "reference")
     page.mouse.click(*position("#reference-annotations", .5, .5))
     expect(page.locator("#annotation-count")).to_have_text("3")
     assert all(mark["pane"] == "scene" for mark in draft(page)["annotations"])
@@ -535,7 +536,7 @@ def verify_eraser(page, screenshots):
     expect(page.locator(".snapshot-open")).to_have_count(2)
     assert draft(page)["snapshot"] == first
     control(page, "#reference-zoom-reset").click()
-    control(page, "#clear-annotations").click()
+    control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     control(page, "#browse-button").click()
     control(page, "#chat-launcher").click()
@@ -560,8 +561,9 @@ def verify_workspace_controls(page, screenshots):
 
     control(page, "#chat-collapse").click()
     control(page, "#capture-scene-button").click()
-    control(page, 'button[data-tool="point"]').click()
+    choose_tool(page, "point", "reference")
     page.mouse.click(*center("#reference-annotations"))
+    choose_tool(page, "point", "scene")
     page.mouse.click(*center("#scene-annotations"))
     original = draft(page)
     snapshot_pixels = page.locator("#scene-snapshot-image").get_attribute("src")
@@ -679,7 +681,7 @@ def verify_workspace_controls(page, screenshots):
         page.locator("#eraser-size").press("ArrowRight")
     expect(page.locator("#eraser-size")).to_have_value("20")
     page.keyboard.press("Escape")
-    control(page, "#clear-annotations").click()
+    control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     control(page, "#browse-button").click()
     control(page, "#chat-launcher").click()
@@ -1098,9 +1100,9 @@ def main():
                 expect(page.locator("#conversation")).to_contain_text("已调整柜子位置")
                 expect(page.locator(".feedback-heading")).to_be_hidden()
                 references = page.locator("#references-dialog-button")
-                assert references.evaluate("el => !!el.closest('#scene-stage')")
+                assert references.evaluate("el => !!el.closest('.scene-pane > .pane-head')")
                 reference_box = references.bounding_box()
-                header_box = page.locator("#scene-stage").bounding_box()
+                header_box = page.locator(".scene-pane > .pane-head").bounding_box()
                 assert reference_box["y"] >= header_box["y"] and reference_box["y"] + reference_box["height"] <= header_box["y"] + header_box["height"]
                 assert geometry(page)["scene-stage"]["height"] >= 650, geometry(page)
                 print(json.dumps({"workspace_geometry": geometry(page)}, ensure_ascii=False), flush=True)
@@ -1143,7 +1145,8 @@ def main():
                 passed("collapsed preferences and draft survive reload independently of recorded history")
 
                 control(page, "#chat-collapse").click()
-                control(page, 'button[data-tool="rectangle"]').click()
+                control(page, "#capture-scene-button").click()
+                choose_tool(page, "rectangle", "scene")
                 stage = page.locator("#scene-stage").bounding_box()
                 page.mouse.move(stage["x"] + stage["width"] * .30, stage["y"] + stage["height"] * .35)
                 page.mouse.down()
@@ -1414,7 +1417,7 @@ def main():
                 expect(page.locator(".moment-card")).to_have_count(2)
                 passed("eraser removes only the active dynamic frame's marks and preserves both evidence frames")
                 control(page, "#browse-button").click()
-                control(page, "#clear-annotations").click()
+                control(page, "#clear-round").click()
                 control(page, "#confirm-clear-annotations").click()
                 passed("explicit capture saves the current dynamic frame; snapshot browsing restores the last operated moment without creating another")
 
@@ -1423,7 +1426,8 @@ def main():
                 secondary_id = clip["views"][0]["clip_id"]
                 page.locator("#reference-view-select").select_option(secondary_id)
                 expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
-                expect(page.locator("#reference-title")).to_have_text("side-002.png")
+                expect(page.locator("#reference-title")).to_have_text("同步侧面机位")
+                expect(page.locator("#reference-frame-label")).to_contain_text("2 /")
                 expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
                 expect(page.locator("#compare-image")).to_be_hidden()
                 assert page.locator("#timeline-seek").input_value() == before_view_time

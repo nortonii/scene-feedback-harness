@@ -20,6 +20,7 @@ def verify_annotation_label_visibility(page, screenshots):
         return draft(page)["annotations"]
 
     def tool(name):
+        open_annotation_tools(page, "scene")
         if name in ("text", "freehand") and not page.locator(f'button[data-tool="{name}"]').is_visible():
             control(page, "#more-tools summary").click()
         control(page, f'button[data-tool="{name}"]').click()
@@ -72,6 +73,7 @@ def verify_annotation_label_visibility(page, screenshots):
     tool("point")
     click(scene, *point_at)
     scene_mark = marks()[-1]
+    choose_tool(page, "point", "reference")
     click(reference, .5, .48)
     reference_mark = marks()[-1]
     tool("text")
@@ -163,7 +165,7 @@ def verify_annotation_label_visibility(page, screenshots):
     toggle.click()
     expect(toggle).to_have_attribute("aria-pressed", "true")
     assert any(pixels(scene, label_box(scene, scene_mark))[3::4]), "Names should reappear immediately"
-    control(page, "#clear-annotations").click()
+    control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     expect(page.locator("#annotation-count")).to_have_text("0")
     control(page, "#browse-button").click()
