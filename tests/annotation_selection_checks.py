@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from playwright.sync_api import expect
+from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 
 def verify_annotation_selection(page, screenshots):
@@ -22,7 +23,7 @@ def verify_annotation_selection(page, screenshots):
     dock = page.locator("#chat-dock")
 
     def tool(name):
-        page.locator(f'button[data-tool="{name}"]').click()
+        control(page, f'button[data-tool="{name}"]').click()
 
     def position(selector, x, y):
         box = page.locator(selector).bounding_box()
@@ -55,12 +56,12 @@ def verify_annotation_selection(page, screenshots):
 
     def collapse_chat():
         if dock.is_visible():
-            page.locator("#chat-collapse").click()
+            control(page, "#chat-collapse").click()
         expect(dock).to_be_hidden()
 
     def open_chat():
         if not dock.is_visible():
-            page.locator("#chat-launcher").click()
+            control(page, "#chat-launcher").click()
         expect(note).to_be_visible()
         settle_chat()
 
@@ -86,7 +87,7 @@ def verify_annotation_selection(page, screenshots):
     assert not marks(), "Selection checks require an initially empty visual draft"
     note.fill("")
     collapse_chat()
-    page.locator("#capture-scene-button").click()
+    control(page, "#capture-scene-button").click()
     first_snapshot = draft(page)["snapshot"]
     first_pixels = page.locator("#scene-snapshot-image").get_attribute("src")
     scene_point_at = (.52, .42)
@@ -131,7 +132,7 @@ def verify_annotation_selection(page, screenshots):
     count(2)
     assert {mark["id"] for mark in marks()} == {reference_point["id"], rectangle["id"]}
     snapshot_is(first_snapshot)
-    page.locator("#undo-annotation").click()
+    control(page, "#undo-annotation").click()
     assert marks() == original_marks, "Undo must restore both evidence and its readable name"
 
     # Backspace without a selected mark must neither delete the last mark nor
@@ -188,7 +189,7 @@ def verify_annotation_selection(page, screenshots):
     browse.click()
     expect(page.locator("#scene-snapshot-media")).to_be_hidden()
     expect(browse).to_have_attribute("aria-pressed", "true")
-    page.locator("#capture-scene-button").click()
+    control(page, "#capture-scene-button").click()
     second_snapshot = draft(page)["snapshot"]
     assert second_snapshot["id"] != first_snapshot["id"]
     tool("point")
@@ -233,8 +234,8 @@ def verify_annotation_selection(page, screenshots):
     snapshot_is(second_snapshot)
 
     # Leave the shared fixture clean for subsequent checks.
-    page.locator("#clear-annotations").click()
-    page.locator("#confirm-clear-annotations").click()
+    control(page, "#clear-annotations").click()
+    control(page, "#confirm-clear-annotations").click()
     count(0)
     browse.click()
     open_chat()

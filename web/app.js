@@ -5,6 +5,7 @@ import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMo
 import { setupMinimalLayout } from './layout.js';
 import { setupImmersive } from './immersive.js';
 import { setupTheme } from './theme.js';
+import { setupWorkspaceChrome } from './workspace-chrome.js';
 import { setupWorkspaceControls } from './workspace-controls.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { eraserHitsAnnotation } from './eraser.js';
@@ -150,6 +151,7 @@ let promptMentions = null;
 let mentionSceneCache = null;
 let workspaceControls = null;
 let immersiveWorkspace = null;
+let workspaceChrome = null;
 let backgroundTransition = null;
 let annotationReferenceDrag = null;
 const annotationDragGhost = document.createElement('div');
@@ -3939,7 +3941,7 @@ function updateMode() {
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   renderSceneSnapshots();
   document.body.dataset.tool = state.mode;
-  immersiveWorkspace?.syncState();
+  workspaceChrome?.syncState();
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
   const drawing = state.mode !== 'select' && editable();
@@ -4102,6 +4104,7 @@ async function revealAnnotation(annotation) {
   setMode('select');
   state.selectedAnnotationId = annotation.id;
   minimalLayout?.closeReferences(); drawOverlays(); saveDraft();
+  workspaceChrome?.open(annotation.pane);
   (annotation.pane === 'scene' ? ui.sceneCanvas : ui.referenceCanvas).focus({preventScroll:true});
 }
 function selectAnnotationFromPointer(event,pane) {
@@ -5389,7 +5392,8 @@ function bindEvents() {
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   minimalLayout = setupMinimalLayout({getState:() => state});
   setupTheme({onChange:applyTheme});
-  immersiveWorkspace = setupImmersive({getState:() => state, onResize:() => { resizeScene(); updateReferenceGeometry(); }});
+  immersiveWorkspace = setupImmersive({onResize:() => { resizeScene(); updateReferenceGeometry(); }, onLayoutChange:() => workspaceChrome?.layoutChanged()});
+  workspaceChrome = setupWorkspaceChrome({getState:() => state, setMode, revealReference:() => immersiveWorkspace.setReference(true)});
   bindPromptReferenceEvents();
   bindPoseEditEvents();
   promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
@@ -5471,11 +5475,13 @@ function bindEvents() {
     saveDraft();
   });
   ui.referenceStage.addEventListener('wheel', (event) => {
+    if (event.target.closest('.reference-corner-tools, button, summary, input, select')) return;
     if (!activeReference()) return;
     event.preventDefault();
     setReferenceZoom(state.referenceZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), event);
   }, {passive:false});
   ui.referenceStage.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('.reference-corner-tools, button, summary, input, select')) return;
     if (!activeReference() || !(state.mode === 'select' || state.spacePan)) return;
     event.preventDefault();
     ui.referenceStage.setPointerCapture(event.pointerId);
@@ -5641,6 +5647,7 @@ function bindEvents() {
   });
   id('help-button').addEventListener('click', () => id('help-dialog').showModal());
   id('close-help').addEventListener('click', () => id('help-dialog').close());
+  id('help-dialog').addEventListener('close', () => id('workspace-menu').querySelector('summary').focus({preventScroll:true}));
   renderer.domElement.addEventListener('pointerdown', (event) => {
     pointerDown = {x:event.clientX, y:event.clientY, button:event.button};
   });

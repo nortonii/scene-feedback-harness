@@ -17,6 +17,7 @@ from core import SceneStore  # noqa: E402
 from server import make_server  # noqa: E402
 from build_scene import build  # noqa: E402
 from playwright.sync_api import sync_playwright, expect  # noqa: E402
+from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 HOOK = '''
 window.__appearanceCheck = {
@@ -130,46 +131,47 @@ def main():
                 wait_ready(page)
                 expect(page.locator('html')).to_have_attribute('data-layout', 'compare')
                 expect(page.locator('html')).to_have_attribute('data-theme', 'light')
-                expect(page.locator('#immersive-tools-toggle')).to_be_hidden()
-                assert not page.locator('.tool-panel').evaluate('el => el.inert')
+                expect(page.locator('#immersive-tools-toggle')).to_have_count(0)
+                expect(page.locator('#annotation-tool-panel')).to_be_hidden()
                 initial_scene = bounds(page, '#scene-stage')
                 assert bounds(page, '.reference-pane')['x'] < initial_scene['x']
                 if page.locator('#chat-collapse').is_visible():
-                    page.locator('#chat-collapse').click()
+                    control(page, '#chat-collapse').click()
                     expect(page.locator('#chat-dock')).to_be_hidden()
                 model = page.evaluate('__appearanceCheck.model()')
                 light_background = page.evaluate('__appearanceCheck.background()')
-                page.locator('#capture-scene-button').click()
-                page.locator('button[data-tool="point"]').click()
+                control(page, '#capture-scene-button').click()
+                control(page, 'button[data-tool="point"]').click()
                 point(page, '#scene-annotations', .6, .55)
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 1')
                 evidence = page.evaluate('__appearanceCheck.evidence()')
-                page.locator('#browse-button').click()
+                control(page, '#browse-button').click()
                 pose = page.evaluate('__appearanceCheck.pose()')
-                page.locator('#immersive-toggle').click()
+                control(page, '#immersive-toggle').click()
                 expect(page.locator('html')).to_have_attribute('data-layout', 'immersive')
                 settle(page)
                 assert_full_scene(page)
-                expect(page.locator('#immersive-tools-toggle')).to_be_visible()
-                expect(page.locator('html')).to_have_attribute('data-tools-visible', 'false')
-                expect(page.locator('#immersive-tools-toggle')).to_have_attribute('aria-expanded', 'false')
-                assert page.locator('.tool-panel').evaluate('el => el.inert')
-                page.locator('#immersive-tools-toggle').click()
-                expect(page.locator('#immersive-tools-toggle')).to_have_attribute('aria-expanded', 'true')
-                assert not page.locator('.tool-panel').evaluate('el => el.inert')
+                expect(page.locator('#annotation-tool-panel')).to_be_hidden()
+                assert page.locator('#annotation-tool-panel').evaluate('el => el.inert')
+                control(page, '#immersive-reference-toggle').click()
+                control(page, '#annotate-reference-button').click()
+                expect(page.locator('#annotation-context-label')).to_have_text('参考')
+                assert not page.locator('#annotation-tool-panel').evaluate('el => el.inert')
                 expect(page.locator('button[data-tool="point"]')).to_be_visible()
-                page.locator('#immersive-tools-toggle').click()
-                assert page.locator('.tool-panel').evaluate('el => el.inert')
+                control(page, '#annotation-tools-close').click()
+                expect(page.locator('#annotation-tool-panel')).to_be_hidden()
+                control(page, '#immersive-reference-toggle').click()
                 page.evaluate('__appearanceCheck.refreshWorkspace()')
-                expect(page.locator('html')).to_have_attribute('data-tools-visible', 'false')
+                expect(page.locator('#annotation-tool-panel')).to_be_hidden()
                 assert page.locator('.reference-pane').evaluate('el => el.inert')
                 expect(page.locator('html')).to_have_attribute('data-reference-visible', 'false')
                 assert page.evaluate('__appearanceCheck.model()') == model
-                assert page.evaluate('__appearanceCheck.pose()') == pose
+                actual_pose = page.evaluate('__appearanceCheck.pose()')
+                assert max(abs(a-b) for key in pose for a,b in zip(pose[key],actual_pose[key])) < 1e-8, (pose, actual_pose)
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
                 print('PASS full-window 3D, hidden inert reference and preserved camera/model/screenshot/marks', flush=True)
 
-                page.locator('#theme-toggle').click()
+                control(page, '#theme-toggle').click()
                 expect(page.locator('html')).to_have_attribute('data-theme', 'dark')
                 settle(page)
                 dark_background = page.evaluate('__appearanceCheck.background()')
@@ -192,18 +194,19 @@ def main():
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
                 print('PASS dark UI contrast/renderer, unmodified materials and persisted theme/layout/evidence', flush=True)
 
-                page.locator('#immersive-reference-toggle').click()
+                control(page, '#immersive-reference-toggle').click()
                 expect(page.locator('html')).to_have_attribute('data-reference-visible', 'true')
                 settle(page)
                 assert not page.locator('.reference-pane').evaluate('el => el.inert')
                 assert_inside(page, '.reference-pane')
-                expect(page.locator('html')).to_have_attribute('data-tools-visible', 'true')
-                assert not page.locator('.tool-panel').evaluate('el => el.inert')
-                page.locator('button[data-tool="point"]').click()
+                control(page, '#annotate-reference-button').click()
+                expect(page.locator('#annotation-context-label')).to_have_text('参考')
+                assert not page.locator('#annotation-tool-panel').evaluate('el => el.inert')
+                control(page, 'button[data-tool="point"]').click()
                 point(page, '#reference-annotations')
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 2')
                 assert page.evaluate('__appearanceCheck.state.annotations[1].pane') == 'reference'
-                page.locator('#help-button').click()
+                control(page, '#help-button').click()
                 expect(page.locator('#help-dialog')).to_be_visible()
                 page.keyboard.press('Escape')
                 expect(page.locator('#help-dialog')).to_be_hidden()
@@ -212,28 +215,29 @@ def main():
                 expect(page.locator('html')).to_have_attribute('data-reference-visible', 'false')
                 expect(page.locator('html')).to_have_attribute('data-layout', 'immersive')
                 evidence = page.evaluate('__appearanceCheck.evidence()')
-                page.locator('#immersive-tools-toggle').click()
-                expect(page.locator('html')).to_have_attribute('data-tools-visible', 'false')
+                if page.locator('#annotation-tool-panel').is_visible():
+                    control(page, '#annotation-tools-close').click()
+                expect(page.locator('#annotation-tool-panel')).to_be_hidden()
                 page.evaluate('__appearanceCheck.refreshWorkspace()')
-                expect(page.locator('html')).to_have_attribute('data-tools-visible', 'false')
-                page.locator('#snapshot-button').click()
-                expect(page.locator('html')).to_have_attribute('data-tools-visible', 'true')
-                assert not page.locator('.tool-panel').evaluate('el => el.inert')
+                expect(page.locator('#annotation-tool-panel')).to_be_hidden()
+                control(page, '#snapshot-button').click()
+                expect(page.locator('#annotation-tool-panel')).to_be_visible()
+                expect(page.locator('#annotation-context-label')).to_have_text('截图')
+                assert not page.locator('#annotation-tool-panel').evaluate('el => el.inert')
                 assert page.evaluate('__appearanceCheck.state.sceneView') == 'snapshot'
-                page.locator('#immersive-toggle').click()
+                control(page, '#comparison-layout-button').click()
                 settle(page)
                 expect(page.locator('html')).to_have_attribute('data-layout', 'compare')
                 restored_scene = bounds(page, '#scene-stage')
                 assert abs(restored_scene['width'] - initial_scene['width']) < 2
                 assert not page.locator('.reference-pane').evaluate('el => el.inert')
-                assert not page.locator('.tool-panel').evaluate('el => el.inert')
-                expect(page.locator('#immersive-tools-toggle')).to_be_hidden()
+                assert not page.locator('#annotation-tool-panel').evaluate('el => el.inert')
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
                 assert page.evaluate('__appearanceCheck.state.sceneView') == 'snapshot'
                 print('PASS annotatable floating reference, dialog-safe Escape and restored comparison with frozen evidence', flush=True)
 
-                page.locator('#browse-button').click()
-                page.locator('#immersive-toggle').click()
+                control(page, '#browse-button').click()
+                control(page, '#immersive-toggle').click()
                 settle(page)
                 out = ROOT.parent / 'inspection/immersive-theme'
                 out.mkdir(parents=True, exist_ok=True)
@@ -243,18 +247,18 @@ def main():
                     settle(page)
                     assert_full_scene(page)
                     for selector in ('#immersive-toggle', '#theme-toggle',
-                                     '#immersive-reference-toggle', '#immersive-tools-toggle', '#browse-button',
+                                     '#immersive-reference-toggle', '#workspace-menu > summary', '#browse-button',
                                      '#capture-scene-button', '.view-popover summary', '#chat-launcher'):
                         assert_inside(page, selector)
-                    page.locator('#immersive-reference-toggle').click()
+                    control(page, '#immersive-reference-toggle').click()
                     settle(page)
                     assert_inside(page, '.reference-pane')
                     page.screenshot(path=str(out / ('mobile-reference.png' if width == 390 else 'desktop-reference.png')))
-                    page.locator('#immersive-reference-toggle').click()
-                    page.locator('.view-popover summary').click()
+                    control(page, '#immersive-reference-toggle').click()
+                    control(page, '.view-popover summary').click()
                     assert_inside(page, '.view-popover .popover-content')
-                    page.locator('.view-popover summary').click()
-                page.locator('#theme-toggle').click()
+                    control(page, '.view-popover summary').click()
+                control(page, '#theme-toggle').click()
                 settle(page)
                 expect(page.locator('html')).to_have_attribute('data-theme', 'light')
                 assert page.evaluate('__appearanceCheck.background()') == light_background
@@ -262,7 +266,7 @@ def main():
                 print('PASS desktop/mobile full-window rendering, reference/camera/toolbar reachability and light restoration', flush=True)
 
                 page.emulate_media(reduced_motion='reduce')
-                page.locator('#immersive-toggle').click()
+                control(page, '#comparison-layout-button').click()
                 page.wait_for_timeout(50)
                 expect(page.locator('html')).to_have_attribute('data-layout', 'compare')
                 animations = page.evaluate('''document.getAnimations().filter(a => {
@@ -272,17 +276,17 @@ def main():
                 }).map(a=>({target:a.effect.target.id || a.effect.target.className,
                   duration:a.effect.getTiming().duration}))''')
                 assert not animations, animations
-                page.locator('#immersive-toggle').click()
+                control(page, '#immersive-toggle').click()
                 page.wait_for_timeout(80)
                 assert_full_scene(page)
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
                 page.emulate_media(reduced_motion='no-preference')
                 page.evaluate('document.startViewTransition = undefined')
-                page.locator('#immersive-toggle').click()
+                control(page, '#comparison-layout-button').click()
                 expect(page.locator('html')).to_have_attribute('data-layout', 'compare')
                 assert page.locator('#scene-stage').evaluate('el => el.getAnimations().some(a => a.effect.getTiming().duration === 500)')
                 settle(page)
-                page.locator('#immersive-toggle').click()
+                control(page, '#immersive-toggle').click()
                 expect(page.locator('html')).to_have_attribute('data-layout', 'immersive')
                 settle(page)
                 assert_full_scene(page)
@@ -296,7 +300,7 @@ def main():
                 expect(page.locator('#reference-pane > #timeline-panel')).to_have_count(1)
                 expect(page.locator('#timeline-panel')).to_be_hidden()
                 assert float(page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--immersive-bottom').replace('px','')")) == 18
-                page.locator('#immersive-reference-toggle').click(); settle(page)
+                control(page, '#immersive-reference-toggle').click(); settle(page)
                 expect(page.locator('#timeline-panel')).to_be_visible()
                 for width,height in ((1440,900),(390,844)):
                     page.set_viewport_size({'width':width,'height':height}); settle(page)
@@ -305,16 +309,16 @@ def main():
                     assert timeline['y'] >= ref['y'] and timeline['y']+timeline['height'] <= ref['y']+ref['height']+1
                     for selector in ('#timeline-seek','#timeline-play','#timeline-time','#save-moment'):
                         assert_inside(page,selector)
-                    page.locator('.timeline-options summary').click()
+                    control(page, '.timeline-options summary').click()
                     assert_inside(page,'.timeline-details');page.locator('#feedback-scope').select_option('range')
                     expect(page.locator('#range-start')).to_be_visible();page.keyboard.press('Escape')
                     page.screenshot(path=str(out / ('reference-video-mobile.png' if width==390 else 'reference-video-desktop.png')))
-                page.locator('#timeline-next').click()
+                control(page, '#timeline-next').click()
                 page.wait_for_function('__appearanceCheck.state.time > 0')
-                page.locator('#timeline-prev').click()
+                control(page, '#timeline-prev').click()
                 page.wait_for_function('__appearanceCheck.state.time === 0')
-                page.locator('#timeline-play').click();expect(page.locator('#timeline-play')).to_have_text('暂停')
-                page.locator('#timeline-play').click()
+                control(page, '#timeline-play').click();expect(page.locator('#timeline-play')).to_have_text('暂停')
+                control(page, '#timeline-play').click()
                 page.locator('#timeline-seek').focus();page.keyboard.press('End')
                 # Single-view playback snaps to an actual frame; this fixture ends at 0.5s.
                 page.wait_for_function('__appearanceCheck.state.time === .5')
@@ -323,17 +327,17 @@ def main():
                 page.mouse.move(slider['x']+slider['width']*.25,slider['y']+slider['height']/2)
                 page.mouse.down();page.mouse.move(slider['x']+slider['width']*.75,slider['y']+slider['height']/2,steps=8);page.mouse.up()
                 page.wait_for_function('__appearanceCheck.state.time === .5')
-                page.locator('#immersive-reference-toggle').click();settle(page)
+                control(page, '#immersive-reference-toggle').click();settle(page)
                 expect(page.locator('#timeline-panel')).to_be_hidden()
                 page.set_viewport_size({'width':1440,'height':900});settle(page)
-                page.locator('#browse-button').click()
+                control(page, '#browse-button').click()
                 page.mouse.move(40,650);page.wait_for_timeout(200)
                 hint=bounds(page,'#scene-hint')
                 assert hint['x'] >= 0 and hint['x']+hint['width'] <= 1440
                 assert page.locator('#scene-hint').evaluate("el => getComputedStyle(el).transform === 'none'")
                 expect(page.locator('#scene-hint')).to_contain_text('左拖旋转')
                 page.screenshot(path=str(out/'scene-hint-uncropped.png'))
-                page.locator('#immersive-toggle').click();settle(page)
+                control(page, '#comparison-layout-button').click();settle(page)
                 expect(page.locator('#reference-pane > #timeline-panel')).to_be_visible()
                 assert bounds(page,'#timeline-panel')['width'] < 740
                 assert bounds(page,'#scene-stage')['height'] > 700

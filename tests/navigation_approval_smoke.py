@@ -12,6 +12,7 @@ from core import SceneStore
 from server import make_server
 from build_scene import build
 from playwright.sync_api import sync_playwright, expect
+from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 class Decisions:
     def __init__(self): self.calls=[]; self.fail=True
@@ -42,10 +43,10 @@ def main():
     page.route('**/app.js',lambda route:route.fulfill(status=200,content_type='text/javascript',body=source))
     page.goto(server.browser_url(session['session_id']))
     page.wait_for_function('window.__navCheck && __navCheck.state.workspaceReady && !__navCheck.state.sceneLoading')
-    if page.locator('#chat-launcher').is_visible():page.locator('#chat-launcher').click()
+    if page.locator('#chat-launcher').is_visible():control(page, '#chat-launcher').click()
     page.locator('#feedback-note').fill('保留输入草稿')
-    if page.locator('#chat-history-toggle').get_attribute('aria-expanded')=='true':page.locator('#chat-history-toggle').click()
-    page.locator('#chat-collapse').click()
+    if page.locator('#chat-history-toggle').get_attribute('aria-expanded')=='true':control(page, '#chat-history-toggle').click()
+    control(page, '#chat-collapse').click()
     expect(page.locator('#chat-dock')).to_be_hidden()
     aid,bid=uuid.uuid4().hex,uuid.uuid4().hex
     approvals=[{'approval_id':aid,'request_id':'fixture-command','kind':'item/commandExecution/requestApproval','details':{'reason':'生成新的预览文件','command':'python build_scene.py'},'prompt':'fixture'},
@@ -58,7 +59,7 @@ def main():
     expect(page.locator('#chat-launcher')).to_contain_text('待确认')
     expect(page.locator('.chat-launcher-attention')).to_be_visible()
     expect(page.locator('.chat-launcher-spinner')).to_be_hidden()
-    page.locator('#chat-launcher').click()
+    control(page, '#chat-launcher').click()
     command=page.locator(f'[data-approval-id="{aid}"]');form=page.locator(f'[data-approval-id="{bid}"]')
     expect(command).to_be_focused(timeout=5000)
     expect(page.locator('#chat-history')).to_be_hidden()
@@ -79,7 +80,7 @@ def main():
     expect(page.locator('#chat-approvals')).to_be_hidden()
     expect(page.locator('#feedback-note')).to_have_value('保留输入草稿')
     page.reload();page.wait_for_function('window.__navCheck && __navCheck.state.workspaceReady && !__navCheck.state.sceneLoading')
-    if page.locator('#chat-history-toggle').get_attribute('aria-expanded')=='false':page.locator('#chat-history-toggle').click()
+    if page.locator('#chat-history-toggle').get_attribute('aria-expanded')=='false':control(page, '#chat-history-toggle').click()
     expect(page.locator('#conversation')).to_contain_text('已允许该操作')
     assert len(decisions.calls)==3,decisions.calls
     assert decisions.calls[-1][1]['content']['name']=='书房'
@@ -93,10 +94,10 @@ def main():
     expect(page.locator('#activity-dialog')).not_to_be_visible()
     with store.lock:store.state['workspace']['queue']=[];store._save()
     page.evaluate('__navCheck.refreshWorkspace()')
-    page.locator('#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
+    control(page, '#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
     def choose(view):
-      if not page.locator('.view-popover').get_attribute('open') == '': page.locator('.view-popover summary').click()
-      page.locator(f'[data-camera-view="{view}"]').click()
+      if not page.locator('.view-popover').get_attribute('open') == '': control(page, '.view-popover summary').click()
+      control(page, f'[data-camera-view="{view}"]').click()
     geometry=page.evaluate('__navCheck.geometry()')
     # Six precise directions and an opposite-side transition without crossing the pivot.
     for view,axis,sign in [('front',1,-1),('back',1,1),('left',0,-1),('right',0,1),('top',2,1),('bottom',2,-1)]:
@@ -108,7 +109,7 @@ def main():
       d=page.evaluate('(()=>{const c=__navCheck;return c.camera.position.clone().sub(c.controls.target).normalize().toArray()})()')
       assert d[axis]*sign>.999,(view,d)
     choose('iso');page.wait_for_function('!__navCheck.controls.transition')
-    page.locator('.view-popover summary').click();page.locator('#frame-all').click();page.wait_for_function('!__navCheck.controls.transition')
+    control(page, '.view-popover summary').click();control(page, '#frame-all').click();page.wait_for_function('!__navCheck.controls.transition')
     page.wait_for_timeout(150)
     # Pick an actual visible object with a real double click.
     xy=page.evaluate('''()=>{const c=document.querySelector('#viewport canvas'),r=c.getBoundingClientRect();for(let y=.35;y<.85;y+=.1)for(let x=.2;x<.8;x+=.1){const p={clientX:r.x+r.width*x,clientY:r.y+r.height*y};if(__navCheck.pickScene(p))return [p.clientX,p.clientY];}throw Error('No visible scene object');}''')
@@ -125,14 +126,14 @@ def main():
     old_distance=page.evaluate('__navCheck.controls.getDistance()')
     page.mouse.wheel(0,-180);page.wait_for_timeout(350)
     assert page.evaluate('__navCheck.controls.getDistance()')<old_distance
-    page.locator('#chat-launcher').click();expect(page.locator('#feedback-note')).to_be_focused()
+    control(page, '#chat-launcher').click();expect(page.locator('#feedback-note')).to_be_focused()
     before_typing=page.evaluate('__navCheck.position()')
     page.locator('#feedback-note').press('f')
     after_typing=page.evaluate('__navCheck.position()')
     assert max(abs(a-b) for key in ('p','t','up') for a,b in zip(after_typing[key],before_typing[key]))<.005,(before_typing,after_typing)
-    page.locator('#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
+    control(page, '#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
     print('PASS six directions, smooth opposite view, double-click pivot, screen pan/zoom, typing guard and unchanged geometry',flush=True)
-    page.locator('.view-popover summary').click();page.locator('#free-rotation').click()
+    control(page, '.view-popover summary').click();control(page, '#free-rotation').click()
     assert page.evaluate('__navCheck.controls.freeRotation')
     box=page.locator('#viewport canvas').bounding_box()
     x,y=box['x']+box['width']*.5,box['y']+box['height']*.45
@@ -144,20 +145,20 @@ def main():
     assert page.evaluate('__navCheck.controls.freeRotation')
     restored=page.evaluate('__navCheck.position()')
     assert max(abs(a-b) for a,b in zip(after['up'],restored['up']))<.005,(after,restored)
-    page.locator('.view-popover summary').click();page.locator('#upright-camera').click()
+    control(page, '.view-popover summary').click();control(page, '#upright-camera').click()
     assert page.evaluate('__navCheck.position().up')==[0,0,1]
     assert not page.evaluate('__navCheck.controls.freeRotation')
-    page.locator('#capture-scene-button').click()
+    control(page, '#capture-scene-button').click()
     expect(page.locator('#camera-navigation')).to_be_hidden()
     snapshot=page.evaluate('JSON.stringify(__navCheck.state.snapshot)')
-    page.locator('#browse-button').click();choose('back');page.wait_for_function('!__navCheck.controls.transition')
-    page.locator('#snapshot-button').click()
+    control(page, '#browse-button').click();choose('back');page.wait_for_function('!__navCheck.controls.transition')
+    control(page, '#snapshot-button').click()
     assert page.evaluate('JSON.stringify(__navCheck.state.snapshot)')==snapshot
     print('PASS free rotation, persisted tilted camera, upright reset and frozen snapshot protection',flush=True)
-    page.locator('#browse-button').click()
+    control(page, '#browse-button').click()
     page.set_viewport_size({'width':390,'height':844});page.wait_for_timeout(250)
     expect(page.locator('#camera-navigation')).to_be_hidden()
-    page.locator('.view-popover summary').click()
+    control(page, '.view-popover summary').click()
     r=page.locator('.view-popover .popover-content').bounding_box()
     assert r['x']>=0 and r['x']+r['width']<=391
     assert page.locator('#scene-stage #camera-navigation').count()==0
@@ -166,7 +167,7 @@ def main():
     page.set_viewport_size({'width':1440,'height':900})
     with store.lock:store.state['workspace']['approvals']=[approvals[0]];store._save()
     store.workspace_agent(status='awaiting_approval');page.evaluate('__navCheck.refreshWorkspace()')
-    page.locator('#chat-launcher').click();expect(page.locator('#chat-approvals')).to_be_visible();page.wait_for_timeout(650)
+    control(page, '#chat-launcher').click();expect(page.locator('#chat-approvals')).to_be_visible();page.wait_for_timeout(650)
     page.screenshot(path=str(out/'inline-confirmation.png'))
     # Publish a standard Y-up GLB in the isolated fixture, retaining its geometry coordinates.
     raw=(tmp/'room.glb').read_bytes();length=struct.unpack_from('<I',raw,12)[0];doc=json.loads(raw[20:20+length])
@@ -184,12 +185,12 @@ def main():
     pose=page.evaluate('__navCheck.position()');delta=[a-b for a,b in zip(pose['p'],pose['t'])]
     assert delta[1]>0 and abs(delta[0])+abs(delta[2])<abs(delta[1])*.001,delta
     geometry=page.evaluate('__navCheck.geometry()')
-    page.locator('.view-popover summary').click();page.locator('#ground-axis').select_option('z')
+    control(page, '.view-popover summary').click();page.locator('#ground-axis').select_option('z')
     page.wait_for_function('!__navCheck.controls.transition');assert page.evaluate('__navCheck.position().up')==[0,0,1]
     page.reload();page.wait_for_function('window.__navCheck && !__navCheck.state.sceneLoading')
     assert page.evaluate('__navCheck.position().up')==[0,0,1]
     assert page.evaluate('__navCheck.state.groundAxis')=='z'
-    page.locator('.view-popover summary').click();page.locator('#ground-axis').select_option('auto')
+    control(page, '.view-popover summary').click();page.locator('#ground-axis').select_option('auto')
     page.wait_for_function('!__navCheck.controls.transition');assert page.evaluate('__navCheck.position().up')==[0,1,0]
     assert page.evaluate('__navCheck.geometry()')==geometry
     print('PASS standard Y-up GLB, legacy Z-up demo, axis override persistence and unchanged model transforms',flush=True)
