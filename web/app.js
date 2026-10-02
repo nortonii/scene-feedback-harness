@@ -3597,6 +3597,12 @@ function renderTimeline({moments=true}={}) {
   renderPoseEditor();
   const enabled = dynamicEnabled();
   ui.timeline.classList.toggle('hidden', !enabled);
+  // Keep one set of playback controls and listeners while moving it with its media.
+  const referenceTimeline = !!state.referenceClip;
+  const timelineParent = document.querySelector(referenceTimeline ? '.reference-pane' : '.workspace');
+  ui.timeline.classList.toggle('reference-timeline', referenceTimeline);
+  if (ui.timeline.parentElement !== timelineParent) timelineParent.appendChild(ui.timeline);
+  ui.timeline.setAttribute('aria-label', referenceTimeline ? '参考视频时间轴' : '动态场景时间轴');
   const duration = timelineDuration();
   const displayedTime = state.timelineTarget ?? state.time;
   ui.seek.max = String(duration || 1); ui.seek.value = String(displayedTime);

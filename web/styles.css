@@ -81,7 +81,7 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 1px
 select, input[type=text], input[type=number], textarea { border: 1px solid var(--line); background: transparent; border-radius: 0; padding: 7px 8px; }
 select { min-width: 0; font-size: var(--text-control); }
 .workspace { display: grid; grid-template-columns: minmax(0,var(--reference-share,1fr)) 12px minmax(0,var(--scene-share,1fr)); grid-template-rows: minmax(0,1fr); column-gap: 0; min-width: 0; min-height: 0; padding: 6px 0 8px; }
-.workspace:has(.timeline-panel:not(.hidden)) { grid-template-rows: minmax(0,1fr) auto; }
+.workspace:has(.timeline-panel:not(.hidden):not(.reference-timeline)) { grid-template-rows: minmax(0,1fr) auto; }
 .visual-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .pane-head { flex-wrap: wrap; position: relative; z-index: 20; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; padding: 0 0 4px; }
 .pane-head:has(.popover[open]) { z-index: 50; }
@@ -245,8 +245,8 @@ input[type=range] { accent-color: #292925; }
 }
 .chat-launcher svg { flex: none; width: 18px; height: 18px; }
 .chat-unread-count { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 4px; border-radius: 9px; color: var(--paper); background: var(--ink); font-size: var(--text-caption); }
-.app-shell:has(.timeline-panel:not(.hidden)) .feedback-panel,
-.app-shell:has(.timeline-panel:not(.hidden)) .chat-launcher { bottom: 110px; }
+.app-shell:has(.timeline-panel:not(.hidden):not(.reference-timeline)) .feedback-panel,
+.app-shell:has(.timeline-panel:not(.hidden):not(.reference-timeline)) .chat-launcher { bottom: 110px; }
 @supports ((backdrop-filter: blur(18px)) or (-webkit-backdrop-filter: blur(18px))) {
   .feedback-panel, .chat-launcher { --glass-fill: #f5f4efa3; -webkit-backdrop-filter: blur(30px) saturate(1.25); backdrop-filter: blur(30px) saturate(1.25); }
   /* Keep the center clear; concentrate reflected light along the edges. */
@@ -442,7 +442,7 @@ dialog::backdrop { background: #17171522; }
   .selection-level-section { padding-left: 0; border: 0; gap: 8px; }
   .selection-level-button { padding: 4px 10px; }
   .workspace { grid-template-columns: minmax(0,1fr); grid-template-rows: auto auto; gap: 14px; }
-  .workspace:has(.timeline-panel:not(.hidden)) { grid-template-rows: auto auto auto; }
+  .workspace:has(.timeline-panel:not(.hidden):not(.reference-timeline)) { grid-template-rows: auto auto auto; }
   .visual-pane { min-height: 364px; }
   .pane-head { min-height: 34px; }
   .pane-heading h2 { max-width: 140px; }
@@ -453,8 +453,8 @@ dialog::backdrop { background: #17171522; }
   .timeline-controls input[type=range] { min-width: 120px; }
   .feedback-panel { width: calc(100vw - 20px); bottom: max(10px, env(safe-area-inset-bottom)); max-height: calc(100dvh - 110px); }
   .chat-launcher { right: 12px; bottom: max(10px, env(safe-area-inset-bottom)); }
-  .app-shell:has(.timeline-panel:not(.hidden)) .feedback-panel,
-  .app-shell:has(.timeline-panel:not(.hidden)) .chat-launcher { bottom: max(10px, env(safe-area-inset-bottom)); }
+  .app-shell:has(.timeline-panel:not(.hidden):not(.reference-timeline)) .feedback-panel,
+  .app-shell:has(.timeline-panel:not(.hidden):not(.reference-timeline)) .chat-launcher { bottom: max(10px, env(safe-area-inset-bottom)); }
   .chat-dock-header { gap: 6px; padding: 4px 8px; }
   .chat-history-toggle, .chat-collapse { gap: 5px; padding-left: 5px; padding-right: 5px; }
   #chat-dock-body { padding: 0 10px 10px; }
@@ -587,3 +587,16 @@ body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annot
 
 
 .scene-snapshot-reveal { min-width: 0; flex-shrink: 1; }
+
+/* Video playback belongs to the reference, keeping the scene canvas unobstructed. */
+.reference-pane > .reference-timeline { flex: none; width: 100%; margin-top: 6px; padding-top: 8px; }
+.reference-timeline .timeline-controls { display: grid; grid-template-columns: 28px 44px 28px minmax(0,1fr) auto; gap: 4px; }
+.reference-timeline #timeline-prev { grid-area: 1 / 1; }
+.reference-timeline #timeline-play { grid-area: 1 / 2; }
+.reference-timeline #timeline-next { grid-area: 1 / 3; }
+.reference-timeline #timeline-time { grid-row: 1; grid-column: 4 / -1; justify-self: end; min-width: 0; font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.reference-timeline #timeline-seek { grid-row: 2; grid-column: 1 / -1; width: 100%; min-width: 0; margin: 5px 0; }
+.reference-timeline #save-moment { grid-row: 3; grid-column: 1 / 4; justify-self: start; }
+.reference-timeline .timeline-options { grid-row: 3; grid-column: 4 / -1; justify-self: end; margin-left: 0; }
+.reference-timeline .timeline-details { min-width: min(260px, calc(100vw - 64px)); max-width: calc(100vw - 64px); }
+.reference-timeline .moment-strip:has(> .muted:only-child) { display: none; }

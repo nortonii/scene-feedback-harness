@@ -6,6 +6,7 @@ changes the user's sessions. Run with Playwright and its Chromium installed.
 from __future__ import annotations
 
 from pathlib import Path
+import base64
 import sys
 import tempfile
 import threading
@@ -19,7 +20,7 @@ from playwright.sync_api import sync_playwright, expect  # noqa: E402
 
 HOOK = '''
 window.__appearanceCheck = {
-  state, camera, controls, refreshWorkspace,
+  state, camera, controls, refreshWorkspace, setReferenceClip,
   background: () => threeScene.background.getHexString(),
   model: () => JSON.stringify([...state.objectNodes.values()].flatMap(root => {
     const rows = [];
@@ -287,6 +288,58 @@ def main():
                 assert_full_scene(page)
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
                 print('PASS contextual annotation tools, manual collapse respected by polling and animated fallback without View Transition API', flush=True)
+                image_url = 'data:image/png;base64,' + base64.b64encode((ROOT / 'examples/room_demo/reference.png').read_bytes()).decode()
+                server.scene_store.set_reference_clip(session['session_id'], {'name':'reference-video.mp4', 'fps':2,
+                    'frames':[{'name':'frame0.png','data_url':image_url,'time_sec':0},
+                              {'name':'frame1.png','data_url':image_url,'time_sec':.5}]})
+                page.reload(); wait_ready(page); settle(page)
+                expect(page.locator('#reference-pane > #timeline-panel')).to_have_count(1)
+                expect(page.locator('#timeline-panel')).to_be_hidden()
+                assert float(page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--immersive-bottom').replace('px','')")) == 18
+                page.locator('#immersive-reference-toggle').click(); settle(page)
+                expect(page.locator('#timeline-panel')).to_be_visible()
+                for width,height in ((1440,900),(390,844)):
+                    page.set_viewport_size({'width':width,'height':height}); settle(page)
+                    ref=bounds(page,'.reference-pane'); timeline=bounds(page,'#timeline-panel')
+                    assert timeline['x'] >= ref['x'] and timeline['x']+timeline['width'] <= ref['x']+ref['width']+1
+                    assert timeline['y'] >= ref['y'] and timeline['y']+timeline['height'] <= ref['y']+ref['height']+1
+                    for selector in ('#timeline-seek','#timeline-play','#timeline-time','#save-moment'):
+                        assert_inside(page,selector)
+                    page.locator('.timeline-options summary').click()
+                    assert_inside(page,'.timeline-details');page.locator('#feedback-scope').select_option('range')
+                    expect(page.locator('#range-start')).to_be_visible();page.keyboard.press('Escape')
+                    page.screenshot(path=str(out / ('reference-video-mobile.png' if width==390 else 'reference-video-desktop.png')))
+                page.locator('#timeline-next').click()
+                page.wait_for_function('__appearanceCheck.state.time > 0')
+                page.locator('#timeline-prev').click()
+                page.wait_for_function('__appearanceCheck.state.time === 0')
+                page.locator('#timeline-play').click();expect(page.locator('#timeline-play')).to_have_text('暂停')
+                page.locator('#timeline-play').click()
+                page.locator('#timeline-seek').focus();page.keyboard.press('End')
+                # Single-view playback snaps to an actual frame; this fixture ends at 0.5s.
+                page.wait_for_function('__appearanceCheck.state.time === .5')
+                page.keyboard.press('Home');page.wait_for_function('__appearanceCheck.state.time === 0')
+                slider=bounds(page,'#timeline-seek')
+                page.mouse.move(slider['x']+slider['width']*.25,slider['y']+slider['height']/2)
+                page.mouse.down();page.mouse.move(slider['x']+slider['width']*.75,slider['y']+slider['height']/2,steps=8);page.mouse.up()
+                page.wait_for_function('__appearanceCheck.state.time === .5')
+                page.locator('#immersive-reference-toggle').click();settle(page)
+                expect(page.locator('#timeline-panel')).to_be_hidden()
+                page.set_viewport_size({'width':1440,'height':900});settle(page)
+                page.locator('#browse-button').click()
+                page.mouse.move(40,650);page.wait_for_timeout(200)
+                hint=bounds(page,'#scene-hint')
+                assert hint['x'] >= 0 and hint['x']+hint['width'] <= 1440
+                assert page.locator('#scene-hint').evaluate("el => getComputedStyle(el).transform === 'none'")
+                expect(page.locator('#scene-hint')).to_contain_text('左拖旋转')
+                page.screenshot(path=str(out/'scene-hint-uncropped.png'))
+                page.locator('#immersive-toggle').click();settle(page)
+                expect(page.locator('#reference-pane > #timeline-panel')).to_be_visible()
+                assert bounds(page,'#timeline-panel')['width'] < 740
+                assert bounds(page,'#scene-stage')['height'] > 700
+                page.evaluate('__appearanceCheck.setReferenceClip(null)')
+                expect(page.locator('.workspace > #timeline-panel')).to_have_count(1)
+                print('PASS reference-owned video timeline, desktop/mobile controls and range menu, hidden-reference behavior, full scene height, uncropped hint and animation-only fallback',flush=True)
                 assert not errors, errors
                 browser.close()
                 print('PASS reduced-motion transitions, preserved accumulated evidence and no browser errors', flush=True)

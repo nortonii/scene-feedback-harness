@@ -12,7 +12,7 @@
 .reference-pane { view-transition-name: floating-reference; position: relative; z-index: 21; }
 #chat-dock { view-transition-name: floating-chat; }
 #chat-launcher { view-transition-name: chat-launcher; }
-#timeline-panel { view-transition-name: scene-timeline; }
+#timeline-panel:not(.reference-timeline) { view-transition-name: scene-timeline; }
 /* Keep floating controls above the animating WebGL snapshot. */
 ::view-transition-group(scene-canvas) { z-index: 1; }
 ::view-transition-group(floating-reference) { z-index: 2; }
@@ -72,11 +72,11 @@ html[data-layout=immersive] { overflow: hidden; }
 [data-layout=immersive] .scene-notice { position: fixed; z-index: 23; right: 20px; top: calc(var(--immersive-content-top,196px) + 54px); }
 [data-layout=immersive] .timeline-panel { position: fixed; z-index: 24; left: 20px; right: 20px; bottom: 14px; width: auto; padding: 8px 12px; border-radius: 16px; }
 [data-layout=immersive] .feedback-panel,
-[data-layout=immersive] .app-shell:has(.timeline-panel:not(.hidden)) .feedback-panel,
+[data-layout=immersive] .app-shell:has(.timeline-panel:not(.hidden):not(.reference-timeline)) .feedback-panel,
 [data-layout=immersive] .chat-launcher,
-[data-layout=immersive] .app-shell:has(.timeline-panel:not(.hidden)) .chat-launcher { bottom: var(--immersive-bottom,18px); }
+[data-layout=immersive] .app-shell:has(.timeline-panel:not(.hidden):not(.reference-timeline)) .chat-launcher { bottom: var(--immersive-bottom,18px); }
 [data-layout=immersive] .feedback-panel { max-width: min(820px, calc(100vw - 40px)); }
-[data-layout=immersive] #scene-hint { bottom: calc(var(--immersive-bottom,18px) + 6px); left: 24px; }
+[data-layout=immersive] #scene-hint { bottom: calc(var(--immersive-bottom,18px) + 6px); left: 24px; transform: none; max-width: calc(100% - 48px); border-radius: 9px; text-align: left; }
 [data-layout=immersive] .selected-chip { bottom: calc(var(--immersive-bottom,18px) + 40px); }
 @media (max-width: 1100px) {
   .topbar { gap: 10px; }
@@ -123,3 +123,5 @@ html[data-layout=immersive] { overflow: hidden; }
   [data-layout=immersive] .appearance-button { gap: 4px; padding: 6px; }
   [data-layout=immersive] #immersive-tools-toggle span { display: none; }
 }
+
+[data-layout=immersive] .reference-pane > .reference-timeline { position: relative; inset: auto; z-index: auto; width: 100%; padding: 8px 0 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }

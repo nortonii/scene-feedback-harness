@@ -30,7 +30,7 @@ export function setupImmersive({onResize=() => {}, getState=() => ({})}={}) {
     const sceneHead = document.querySelector('.scene-pane > .pane-head').getBoundingClientRect();
     root.style.setProperty('--immersive-content-top', `${sceneTop + sceneHead.height + 12}px`);
     const timeline = document.getElementById('timeline-panel');
-    const bottom = timeline.classList.contains('hidden') ? 18 : innerHeight - timeline.getBoundingClientRect().top + 12;
+    const bottom = (timeline.classList.contains('hidden') || timeline.classList.contains('reference-timeline')) ? 18 : innerHeight - timeline.getBoundingClientRect().top + 12;
     root.style.setProperty('--immersive-bottom', `${bottom}px`);
   }
   function refresh() {
