@@ -1,0 +1,125 @@
+.appearance-actions { display: flex; align-items: center; gap: 4px; flex: none; margin-left: auto; }
+.appearance-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 32px; border: 1px solid transparent; border-radius: 11px; padding: 6px 10px; color: var(--muted); font-size: var(--text-control); font-weight: 500; white-space: nowrap; transition: background-color 180ms, color 180ms, border-color 180ms; }
+.appearance-button svg { width: 16px; height: 16px; flex: none; }
+.appearance-button:hover { color: var(--ink); background: var(--surface-hover,#17171508); }
+.appearance-button[aria-pressed=true], #immersive-reference-toggle[aria-expanded=true], #immersive-tools-toggle[aria-expanded=true] { color: var(--ink); background: var(--surface-hover,#1717150a); border-color: var(--line); }
+#theme-toggle { width: 34px; padding: 7px; }
+#immersive-reference-toggle[hidden], #immersive-tools-toggle[hidden], #immersive-reference-close { display: none; }
+#scene-stage { view-transition-name: scene-canvas; }
+.topbar { view-transition-name: workspace-header; }
+.tool-panel { view-transition-name: workspace-tools; position: relative; z-index: 60; }
+.scene-pane > .pane-head { view-transition-name: scene-tools; }
+.reference-pane { view-transition-name: floating-reference; position: relative; z-index: 21; }
+#chat-dock { view-transition-name: floating-chat; }
+#chat-launcher { view-transition-name: chat-launcher; }
+#timeline-panel { view-transition-name: scene-timeline; }
+/* Keep floating controls above the animating WebGL snapshot. */
+::view-transition-group(scene-canvas) { z-index: 1; }
+::view-transition-group(floating-reference) { z-index: 2; }
+::view-transition-group(scene-timeline) { z-index: 3; }
+::view-transition-group(floating-chat), ::view-transition-group(chat-launcher) { z-index: 4; }
+::view-transition-group(workspace-header), ::view-transition-group(workspace-tools), ::view-transition-group(scene-tools) { z-index: 5; }
+::view-transition-group(workspace-header), ::view-transition-group(workspace-tools),
+::view-transition-group(scene-tools), ::view-transition-group(floating-reference),
+::view-transition-group(floating-chat), ::view-transition-group(chat-launcher),
+::view-transition-group(scene-timeline) { animation-duration: 560ms; animation-timing-function: cubic-bezier(.22,1,.36,1); }
+::view-transition-group(scene-canvas) { animation-duration: 560ms; animation-timing-function: cubic-bezier(.22,1,.36,1); }
+::view-transition-old(scene-canvas), ::view-transition-new(scene-canvas) { height: 100%; object-fit: fill; mix-blend-mode: normal; }
+::view-transition-group(root) { animation-duration: 360ms; }
+::view-transition-old(root) { animation-duration: 220ms; }
+::view-transition-old(floating-reference) { animation-duration: 180ms; }
+::view-transition-new(root) { animation-duration: 360ms; }
+
+html[data-layout=immersive] { overflow: hidden; }
+[data-layout=immersive] body { overflow: hidden; }
+[data-layout=immersive] .app-shell { height: 100dvh; min-height: 0; padding: 0; display: block; }
+[data-layout=immersive] .workspace { display: block; padding: 0; }
+[data-layout=immersive] .scene-pane { min-height: 0; }
+[data-layout=immersive] #scene-stage { position: fixed; inset: 0; width: 100%; height: 100dvh; min-height: 0; z-index: 0; }
+[data-layout=immersive] .topbar,
+[data-layout=immersive] .tool-panel,
+[data-layout=immersive] .scene-pane > .pane-head,
+[data-layout=immersive] .reference-pane,
+[data-layout=immersive] .timeline-panel {
+  border: 1px solid var(--surface-border,#ffffffb3);
+  background: var(--surface-glass,#f5f4efc9);
+  box-shadow: var(--surface-shadow,0 8px 28px #1717150d), inset 0 1px 0 #ffffff12;
+  backdrop-filter: blur(22px) saturate(1.15);
+  -webkit-backdrop-filter: blur(22px) saturate(1.15);
+}
+[data-layout=immersive] .topbar { position: fixed; z-index: 45; left: 20px; right: 20px; top: 16px; min-height: 48px; padding: 8px 16px; border-radius: 18px; gap: 16px; }
+[data-layout=immersive] .brand h1 { font-size: 18px; }
+[data-layout=immersive] .top-actions { margin-left: 0; gap: 14px; }
+[data-layout=immersive] .tool-panel { position: fixed; z-index: 43; top: var(--immersive-tools-top,78px); left: 20px; width: max-content; max-width: calc(100vw - 40px); padding: 6px 10px; min-height: 44px; gap: 14px; border-radius: 16px; }
+[data-layout=immersive] .tool-button { border-radius: 9px; }
+[data-layout=immersive] .tool-button.active { background: var(--surface-hover,#17171508); border-color: var(--line); }
+[data-layout=immersive] .scene-pane > .pane-head { position: fixed; z-index: 42; top: var(--immersive-scene-top,136px); left: 20px; right: 20px; width: max-content; max-width: calc(100vw - 40px); min-height: 42px; padding: 5px 10px; gap: 20px; border-radius: 15px; }
+[data-layout=immersive] .scene-pane > .pane-head .eyebrow,
+[data-layout=immersive] #scene-title,
+[data-layout=immersive] #drag-scene-image { display: none; }
+[data-layout=immersive] #workspace-divider { display: none; }
+[data-layout=immersive] .reference-pane { position: fixed; z-index: 22; left: 20px; top: var(--immersive-content-top,196px); width: clamp(300px, 28vw, 420px); height: min(52dvh, 480px); max-height: calc(100dvh - var(--immersive-content-top,196px) - var(--immersive-bottom,18px) - 12px); min-height: 0; padding: 10px; border-radius: 20px; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity 280ms, visibility 280ms; }
+[data-layout=immersive][data-reference-visible=true] .reference-pane { visibility: visible; opacity: 1; pointer-events: auto; }
+[data-layout=immersive] .reference-pane .pane-head { gap: 4px; padding-bottom: 8px; }
+[data-layout=immersive] .reference-pane .stage { min-height: 0; border-radius: 12px; }
+[data-layout=immersive] .reference-pane .pane-actions { gap: 0; }
+[data-layout=immersive] .reference-pane .pane-heading { flex: 1; }
+[data-layout=immersive] .reference-pane #drag-reference-image { display: none; }
+[data-layout=immersive] .reference-pane #reference-title { max-width: 120px; }
+[data-layout=immersive] #immersive-reference-close { display: inline-flex; width: 28px; height: 28px; margin-left: auto; justify-content: center; align-items: center; border-radius: 9px; color: var(--muted); }
+[data-layout=immersive] #immersive-reference-close:hover { color: var(--ink); background: var(--surface-hover,#17171508); }
+[data-layout=immersive] .scene-snapshots { top: var(--immersive-content-top,196px); left: auto; right: 20px; max-width: min(48vw, 680px); }
+[data-layout=immersive] .scene-notice { position: fixed; z-index: 23; right: 20px; top: calc(var(--immersive-content-top,196px) + 54px); }
+[data-layout=immersive] .timeline-panel { position: fixed; z-index: 24; left: 20px; right: 20px; bottom: 14px; width: auto; padding: 8px 12px; border-radius: 16px; }
+[data-layout=immersive] .feedback-panel,
+[data-layout=immersive] .app-shell:has(.timeline-panel:not(.hidden)) .feedback-panel,
+[data-layout=immersive] .chat-launcher,
+[data-layout=immersive] .app-shell:has(.timeline-panel:not(.hidden)) .chat-launcher { bottom: var(--immersive-bottom,18px); }
+[data-layout=immersive] .feedback-panel { max-width: min(820px, calc(100vw - 40px)); }
+[data-layout=immersive] #scene-hint { bottom: calc(var(--immersive-bottom,18px) + 6px); left: 24px; }
+[data-layout=immersive] .selected-chip { bottom: calc(var(--immersive-bottom,18px) + 40px); }
+@media (max-width: 1100px) {
+  .topbar { gap: 10px; }
+  .appearance-actions { gap: 1px; }
+  .appearance-button { padding: 6px 8px; }
+  [data-layout=immersive] .topbar { gap: 10px; }
+  [data-layout=immersive] .topbar .brand { display: none; }
+}
+@media (max-width: 640px) {
+  .appearance-actions { margin-left: auto; }
+  [data-layout=immersive] .topbar { left: 10px; right: 10px; top: 10px; padding: 8px 10px; flex-wrap: wrap; gap: 6px; }
+  [data-layout=immersive] .scene-meta { margin-left: 0; max-width: 36%; }
+  [data-layout=immersive] .scene-meta #scene-name { max-width: 100%; }
+  [data-layout=immersive] .top-actions { gap: 12px; width: 100%; padding: 0 2px; }
+  [data-layout=immersive] .tool-panel { left: 10px; max-width: calc(100vw - 20px); width: calc(100vw - 20px); gap: 4px 10px; padding: 6px; }
+  [data-layout=immersive] .tool-button { padding: 4px 6px; }
+  [data-layout=immersive] .annotation-history-tools .compact-button > span:last-child { display: none; }
+  [data-layout=immersive] .selection-level-button { padding: 4px 8px; }
+  [data-layout=immersive] .toolbar-references { padding: 4px 5px; gap: 4px; }
+  [data-layout=immersive] .scene-pane > .pane-head { left: 10px; right: 10px; width: calc(100vw - 20px); max-width: none; padding: 5px 7px; gap: 4px; }
+  [data-layout=immersive] .scene-pane .pane-heading { width: 100%; }
+  [data-layout=immersive] .scene-pane .pane-actions { width: 100%; justify-content: space-between; }
+  [data-layout=immersive] .reference-pane { left: 10px; width: calc(100vw - 20px); height: 40dvh; max-height: calc(100dvh - var(--immersive-content-top,240px) - var(--immersive-bottom,18px) - 12px); }
+  [data-layout=immersive] .scene-snapshots { right: 10px; max-width: calc(100vw - 20px); }
+  [data-layout=immersive][data-reference-visible=true] .scene-snapshots { visibility: hidden; pointer-events: none; }
+  [data-layout=immersive] .timeline-panel { left: 10px; right: 10px; bottom: 10px; }
+  [data-layout=immersive] .feedback-panel { max-width: calc(100vw - 20px); }
+  [data-layout=immersive] #scene-hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation-duration: 0s !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  [data-layout=immersive] :is(.topbar,.tool-panel,.scene-pane > .pane-head,.reference-pane,.timeline-panel) { background: var(--paper); backdrop-filter: none; -webkit-backdrop-filter: none; }
+}
+
+/* An uncluttered live view: reveal drawing controls when the work needs them. */
+[data-layout=immersive] .tool-panel { transition: opacity 240ms ease, transform 320ms cubic-bezier(.22,1,.36,1), visibility 240ms; }
+[data-layout=immersive][data-tools-visible=false] .tool-panel { opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-6px) scale(.985); }
+[data-layout=immersive] .scene-pane > .pane-head,
+[data-layout=immersive] .reference-pane,
+[data-layout=immersive] .scene-snapshots { transition: top 360ms cubic-bezier(.22,1,.36,1), opacity 260ms ease, visibility 260ms; }
+@media (max-width: 380px) {
+  [data-layout=immersive] .appearance-button { gap: 4px; padding: 6px; }
+  [data-layout=immersive] #immersive-tools-toggle span { display: none; }
+}

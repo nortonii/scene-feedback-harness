@@ -3,6 +3,8 @@ import { SceneNavigation } from './scene-navigation.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
+import { setupImmersive } from './immersive.js';
+import { setupTheme } from './theme.js';
 import { setupWorkspaceControls } from './workspace-controls.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { eraserHitsAnnotation } from './eraser.js';
@@ -147,6 +149,8 @@ let minimalLayout = null;
 let promptMentions = null;
 let mentionSceneCache = null;
 let workspaceControls = null;
+let immersiveWorkspace = null;
+let backgroundTransition = null;
 let annotationReferenceDrag = null;
 const annotationDragGhost = document.createElement('div');
 annotationDragGhost.className = 'annotation-drag-ghost hidden';
@@ -2154,7 +2158,7 @@ function renderSelection() {
     if (state.selectedSceneNode && !selectedNode) state.selectedSceneNode = null;
     const box = selectedNode ? new THREE.Box3().setFromObject(selectedNode) : objectBox(item.id);
     if (box) {
-      selectionHelper = new THREE.Box3Helper(box, 0x292925);
+      selectionHelper = new THREE.Box3Helper(box, document.documentElement.dataset.theme === 'dark' ? 0xecece8 : 0x292925);
       selectionHelper.material.transparent = true;
       selectionHelper.material.opacity = 0.95;
       selectionHelper.material.depthTest = false;
@@ -3929,6 +3933,7 @@ function updateMode() {
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   renderSceneSnapshots();
   document.body.dataset.tool = state.mode;
+  immersiveWorkspace?.syncState();
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
   const drawing = state.mode !== 'select' && editable();
@@ -5326,8 +5331,26 @@ function setRendererSize(width, height) {
   renderer.getSize(rendererSize);
   if (rendererSize.x !== width || rendererSize.y !== height) renderer.setSize(width, height, false);
 }
+function applyTheme({dark, animate=false}) {
+  const palette = {background:new THREE.Color(dark ? '#202327' : '#eae9e3'), grid:new THREE.Color(dark ? '#8e9ba8' : '#ffffff')};
+  const apply = () => {
+    threeScene.background.copy(palette.background); threeScene.fog.color.copy(palette.background);
+    ground.material.color.copy(palette.background); grid.material.color.copy(palette.grid);
+  };
+  if (animate) backgroundTransition = {start:performance.now(), from:threeScene.background.clone(), gridFrom:grid.material.color.clone(), ...palette};
+  else { backgroundTransition = null; apply(); }
+  if (selectionHelper) selectionHelper.material.color.set(dark ? '#ecece8' : '#292925');
+}
 function animate(timestamp) {
   requestAnimationFrame(animate);
+  if (backgroundTransition) {
+    const t = Math.min(1, (timestamp - backgroundTransition.start) / 380);
+    const ease = t * t * (3 - 2 * t);
+    threeScene.background.lerpColors(backgroundTransition.from, backgroundTransition.background, ease);
+    threeScene.fog.color.copy(threeScene.background); ground.material.color.copy(threeScene.background);
+    grid.material.color.lerpColors(backgroundTransition.gridFrom, backgroundTransition.grid, ease);
+    if (t === 1) backgroundTransition = null;
+  }
   advanceTimeline(timestamp);
   controls.tick(timestamp);
   if (state.sceneView === 'live') renderer.render(threeScene, camera);
@@ -5359,6 +5382,8 @@ async function poll() {
 function bindEvents() {
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   minimalLayout = setupMinimalLayout({getState:() => state});
+  setupTheme({onChange:applyTheme});
+  immersiveWorkspace = setupImmersive({getState:() => state, onResize:() => { resizeScene(); updateReferenceGeometry(); }});
   bindPromptReferenceEvents();
   bindPoseEditEvents();
   promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,

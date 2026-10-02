@@ -1,0 +1,216 @@
+/* Appearance tokens are shared by the split workspace and the immersive view.
+   Images, canvas output, model materials and annotation colors remain untouched. */
+:root {
+  color-scheme: light;
+  --surface: #faf9f5;
+  --surface-glass: #f5f4efd9;
+  --surface-hover: #17171509;
+  --surface-border: #ffffffa3;
+  --surface-shadow: 0 8px 32px #17171512, inset 0 1px 0 #ffffffa3;
+  --appearance-ease: cubic-bezier(.22,1,.36,1);
+  --appearance-duration: 380ms;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #191b1e;
+  --ink: #ecece8;
+  --muted: #a3a6aa;
+  --line: #3b3e43;
+  --stage: #202327;
+  --surface: #24272b;
+  --surface-glass: #24272bdb;
+  --surface-hover: #ffffff0b;
+  --surface-border: #ffffff1c;
+  --surface-shadow: 0 12px 36px #00000036, inset 0 1px 0 #ffffff0a;
+  background: var(--paper);
+}
+
+/* An action icon: the moon opens night mode, the sun returns to daylight. */
+#theme-toggle {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  color: var(--muted);
+  transition: color 180ms, background-color 180ms, border-color 180ms;
+}
+#theme-toggle:hover {
+  color: var(--ink);
+  background: var(--surface-hover);
+  border-color: var(--line);
+}
+#theme-toggle:active { background: var(--surface-hover); }
+#theme-toggle svg {
+  position: absolute;
+  width: 17px;
+  height: 17px;
+  transition: opacity 260ms ease, transform 420ms var(--appearance-ease);
+  pointer-events: none;
+}
+.theme-icon-sun { opacity: 0; transform: rotate(-75deg) scale(.55); }
+.theme-icon-moon { opacity: 1; transform: rotate(0) scale(1); }
+[data-theme="dark"] .theme-icon-sun { opacity: 1; transform: rotate(0) scale(1); }
+[data-theme="dark"] .theme-icon-moon { opacity: 0; transform: rotate(65deg) scale(.55); }
+
+/* Animate colors only on surfaces that do not already animate their dimensions.
+   Snapshot drawers, pane sizing and the chat morph keep their own timing. */
+html.theme-transitioning,
+html.theme-transitioning :where(body, .topbar, .tool-panel, .pane-head, .stage,
+  .feedback-panel, .chat-launcher, .chat-dock-header, .chat-history,
+  .conversation-item, .prompt-image-chip, #feedback-note, .chat-approvals,
+  .approval-card, .queue-card, .popover-content, dialog, .toast, .text-editor,
+  .prompt-mentions, .selected-chip, .stage-hint) {
+  transition: background-color var(--appearance-duration) ease,
+    color var(--appearance-duration) ease,
+    border-color var(--appearance-duration) ease,
+    box-shadow var(--appearance-duration) ease;
+}
+
+[data-theme="dark"] :where(select, input, textarea) { color: var(--ink); }
+[data-theme="dark"] :where(select option, select optgroup) { background: var(--surface); color: var(--ink); }
+[data-theme="dark"] input[type="range"] { accent-color: #c9ccc8; }
+[data-theme="dark"] ::selection { background: #c6d4d435; color: var(--ink); }
+[data-theme="dark"] :where(.conversation, #chat-dock-body, .chat-approvals, dialog,
+  .reference-strip, .scene-snapshot-strip, .moment-strip) { scrollbar-color: #747a8266 transparent; }
+[data-theme="dark"] :where(.popover-content, .prompt-mentions, .toast, .text-editor) {
+  background: var(--surface);
+  border-color: var(--line);
+  box-shadow: var(--surface-shadow);
+}
+[data-theme="dark"] :where(dialog, .confirm-dialog) {
+  background: var(--paper);
+  border-color: var(--line);
+  box-shadow: 0 24px 80px #00000066;
+}
+[data-theme="dark"] dialog::backdrop { background: #080a0d88; }
+[data-theme="dark"] :where(.tool-button:hover, .compact-button:hover:not(:disabled),
+  .icon-button:hover) { background-color: var(--surface-hover); }
+[data-theme="dark"] .emphasis-button:hover:not(:disabled) { background: var(--ink); }
+[data-theme="dark"] .empty-graphic { color: #7b8189; }
+[data-theme="dark"] :where(.session-pill.error, .session-pill.cancelled, .chat-status.error,
+  .project-error, .agent-status.error, .conversation-item.error, .toast.error,
+  .approval-error, .human-pose-job .human-pose-error, .annotation-select[aria-pressed="true"]) {
+  color: #efb2a4;
+}
+[data-theme="dark"] .session-pill.error::before { background: #efb2a4; }
+[data-theme="dark"] .new-scene-badge { color: #bdc3bf; }
+[data-theme="dark"] .stage-hint { color: #d5d7d6; background: #24272bdb; }
+[data-theme="dark"] :where(.selected-chip, .annotation-drag-ghost) {
+  background: var(--surface-glass);
+  border-color: var(--line);
+  color: var(--ink);
+  box-shadow: 0 4px 18px #00000028;
+}
+[data-theme="dark"] .object-color { border-color: #ffffff26; }
+
+/* Smoked glass uses a quiet edge highlight, rather than a bright white wash. */
+[data-theme="dark"] :where(.feedback-panel, .chat-launcher) {
+  --muted: #b3b7bc;
+  --glass-fill: #24272bf5;
+  --glass-sheen: linear-gradient(135deg, #ffffff09, transparent 42%, #ffffff03);
+  border-color: #ffffff24;
+  box-shadow: 0 18px 56px #00000040, 0 3px 12px #00000020,
+    inset 0 1px 0 #ffffff12, inset 0 -1px 0 #00000014;
+}
+[data-theme="dark"] :where(.feedback-panel, .chat-launcher)::before {
+  background: radial-gradient(ellipse at 0% 0%, #ffffff08, transparent 45%),
+    radial-gradient(ellipse at 100% 100%, #ffffff04, transparent 45%);
+}
+[data-theme="dark"] .chat-launcher:hover {
+  border-color: #ffffff3b;
+  box-shadow: 0 12px 32px #00000050, inset 0 1px 0 #ffffff1a;
+}
+[data-theme="dark"] :where(.chat-dock-header, .chat-history) { border-color: #ffffff0d; }
+[data-theme="dark"] .chat-resize-handle::after { background: #c5cacf55; box-shadow: 0 1px 0 #00000033; }
+[data-theme="dark"] :where(.chat-resize-handle:hover, .chat-resize-handle:focus-visible)::after,
+[data-theme="dark"] .feedback-panel.resizing .chat-resize-handle::after { background: #d7dadb99; }
+[data-theme="dark"] :where(.chat-history-toggle:hover, .chat-collapse:hover) {
+  background: #ffffff0c;
+  box-shadow: inset 0 1px 0 #ffffff08;
+}
+[data-theme="dark"] .chat-latest {
+  background: #33373cf2;
+  border-color: #ffffff24;
+  box-shadow: 0 3px 14px #00000030;
+}
+[data-theme="dark"] .conversation-item { border-color: #ffffff20; }
+[data-theme="dark"] .conversation-item.user {
+  border-color: #ffffff17;
+  background: #ffffff08;
+  box-shadow: inset 0 1px 0 #ffffff07, 0 2px 8px #0000000a;
+}
+[data-theme="dark"] #feedback-note {
+  background: #14171a45;
+  border-color: #ffffff20;
+  box-shadow: inset 0 1px 3px #00000014, 0 1px 0 #ffffff06;
+  caret-color: var(--ink);
+}
+[data-theme="dark"] #feedback-note::placeholder { color: #a3a9af; }
+[data-theme="dark"] #feedback-note:focus {
+  background: #15181b77;
+  border-color: #b8c5ce66;
+  box-shadow: 0 0 0 2px #cedce512, inset 0 1px 0 #ffffff06;
+}
+[data-theme="dark"] .submit-button {
+  background: linear-gradient(155deg, #e4e7e4, #bfc7c5);
+  color: #242a2b;
+  border-color: #ffffff44;
+  box-shadow: inset 0 1px 0 #ffffff5c, 0 3px 10px #00000024;
+}
+[data-theme="dark"] .submit-button:hover:not(:disabled) {
+  box-shadow: inset 0 1px 0 #ffffff9c, 0 4px 15px #00000040;
+}
+[data-theme="dark"] .prompt-image-chip { background: #ffffff06; }
+[data-theme="dark"] :where(.prompt-mention-option[aria-selected="true"], .prompt-mention-option:hover) {
+  background: #ffffff0c;
+}
+[data-theme="dark"] .prompt-mention-option[aria-disabled="true"] { background: transparent; }
+[data-theme="dark"] :where(.approval-card, .queue-card) { background: var(--surface); }
+[data-theme="dark"] :where(.queue-card.failed, .queue-card.uncertain) { border-color: #aa7e6a; }
+[data-theme="dark"] .chat-approvals { background: #d2a66d06; border-color: #d3ad714a; }
+[data-theme="dark"] .chat-approvals :where(.approval-card, .queue-card) { background: transparent; border-color: #ffffff14; }
+[data-theme="dark"] .chat-approvals :where(.approval-card, .queue-card):focus-visible { outline-color: #d3ad71; }
+[data-theme="dark"] :where(.chat-approval-heading > span:first-child, .chat-launcher-attention) {
+  background: #d5b788;
+  color: #2c261d;
+}
+[data-theme="dark"] :where(.chat-launcher.has-attention, .chat-launcher.needs-approval) { border-color: #d3ad7177; }
+
+[data-theme="dark"] .scene-mode-switch { background: #00000016; }
+[data-theme="dark"] .scene-mode-switch .compact-button[aria-pressed="false"]:hover:not(:disabled) { background: #ffffff0a; }
+[data-theme="dark"] .scene-mode-switch .compact-button[aria-pressed="true"] { box-shadow: 0 1px 4px #00000026; }
+[data-theme="dark"] :where(.compare-toggle[aria-pressed="true"]:not(:disabled),
+  .compare-presets .compact-button[aria-pressed="true"]) { background: #ffffff10; }
+[data-theme="dark"] .compare-toggle:hover:not(:disabled) { background: #ffffff14; }
+[data-theme="dark"] .scene-snapshots { background: #24272be8; box-shadow: 0 3px 12px #0000001a; }
+[data-theme="dark"] .snapshot-strip-toggle:hover { background: #ffffff0c; }
+[data-theme="dark"] .snapshot-open[aria-pressed="true"] { background: #ffffff0a; border-color: #bec6cb; }
+[data-theme="dark"] .scene-snapshot-strip::-webkit-scrollbar-thumb { background: #8d949b66; }
+[data-theme="dark"] .scene-snapshot-strip::-webkit-scrollbar-thumb:hover { background: #a8afb7; }
+[data-theme="dark"] .view-popover .popover-content { background: #24272bf0; border-color: #ffffff20; box-shadow: var(--surface-shadow); }
+[data-theme="dark"] .camera-navigation { border-color: #ffffff14; }
+[data-theme="dark"] .camera-directions button { background: #ffffff08; }
+[data-theme="dark"] :where(.camera-directions button:hover:not(:disabled), .camera-directions button:focus-visible) { background: #ffffff13; }
+
+@supports ((backdrop-filter: blur(18px)) or (-webkit-backdrop-filter: blur(18px))) {
+  [data-theme="dark"] .feedback-panel { --glass-fill: #24272b91; }
+  [data-theme="dark"] .chat-launcher { --glass-fill: #24272bc9; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  [data-theme="dark"] :where(.feedback-panel, .chat-launcher, .scene-snapshots,
+    .view-popover .popover-content) {
+    background: var(--surface);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  html.theme-transitioning,
+  html.theme-transitioning *,
+  #theme-toggle svg { transition: none !important; }
+}
