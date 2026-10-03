@@ -312,8 +312,8 @@ def main():
                     for selector in ('#timeline-seek','#timeline-play','#timeline-time'):
                         assert_inside(page,selector)
                     control(page, '.timeline-options summary').click()
-                    assert_inside(page,'.timeline-details');assert_inside(page,'#save-moment');page.locator('#feedback-scope').select_option('range')
-                    expect(page.locator('#range-start')).to_be_visible();page.keyboard.press('Escape')
+                    assert_inside(page,'.timeline-details');assert_inside(page,'#save-moment')
+                    expect(page.locator('#feedback-scope, #range-start, #range-end')).to_have_count(0);page.keyboard.press('Escape')
                     page.screenshot(path=str(out / ('reference-video-mobile.png' if width==390 else 'reference-video-desktop.png')))
                 control(page, '#timeline-next').click()
                 page.wait_for_function('__appearanceCheck.state.time > 0')
@@ -349,7 +349,7 @@ def main():
                 assert bounds(page,'#scene-stage')['height'] > 700
                 page.evaluate('__appearanceCheck.setReferenceClip(null)')
                 expect(page.locator('.workspace > #timeline-panel')).to_have_count(1)
-                print('PASS reference-owned video timeline, desktop/mobile controls and range menu, hidden-reference behavior, full scene height, uncropped hint and animation-only fallback',flush=True)
+                print('PASS reference-owned video timeline, desktop/mobile controls and video options without feedback range, hidden-reference behavior, full scene height, uncropped hint and animation-only fallback',flush=True)
                 assert not errors, errors
                 browser.close()
                 print('PASS reduced-motion transitions, preserved accumulated evidence and no browser errors', flush=True)

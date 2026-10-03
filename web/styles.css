@@ -188,8 +188,6 @@ input[type=range] { accent-color: #292925; }
 .timeline-options .popover-content { bottom: calc(100% + 8px); top: auto; }
 .timeline-details { min-width: 260px; }
 #timeline-source { color: var(--muted); line-height: 1.5; font-size: var(--text-caption); }
-#feedback-range { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-#feedback-range input { width: 73px; }
 #animation-choices { display: grid; gap: 9px; }
 #animation-choices:empty { display: none; }
 #animation-choices label { display: grid; gap: 5px; }
