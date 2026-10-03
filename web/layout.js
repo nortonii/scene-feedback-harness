@@ -125,7 +125,7 @@ export function setupMinimalLayout({getState}) {
     const details = event.target.closest('details.popover, details#more-tools');
     if (details && event.target.closest('summary')) closePopovers(details);
     if (details && details.dataset.keepOpen !== 'true' && event.target.closest('button, label.upload-button')) closePopovers();
-    if (event.target.closest('.tool-button, .reference-insert, [data-selection-level], #browse-button')) refresh();
+    if (event.target.closest('.tool-button, .reference-insert, [data-selection-level], #scene-live-card')) refresh();
   });
   document.addEventListener('pointerdown', (event) => {
     closePopovers(event.target.closest('details.popover, details#more-tools'));

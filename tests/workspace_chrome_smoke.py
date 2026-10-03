@@ -293,7 +293,7 @@ def main():
                 unobscured(page, 'button[data-tool="text"]')
                 page.keyboard.press('Escape')
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
-                control(page, '#browse-button').click()
+                control(page, '#scene-live-card').click()
                 expect(page.locator('#annotation-tool-panel')).to_be_hidden()
                 expect(page.locator('#scene-annotation-toggle')).to_be_hidden()
                 unobscured(page, '#viewport canvas')

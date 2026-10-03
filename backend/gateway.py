@@ -1590,8 +1590,12 @@ class WorkspaceGateway:
         if feedback.get("camera"):
             lines.append("冻结视角：" + json.dumps(feedback["camera"], ensure_ascii=False))
         if feedback.get("timeline"):
-            lines.append("动态反馈时间轴与适用范围：" + json.dumps(feedback["timeline"], ensure_ascii=False))
-            lines.append("以下每个冻结帧都保留自己的时间、相机、选择和场景版本；区间范围表示用户提示的适用时间，不是自动生成的运动约束。")
+            if "scope" in feedback["timeline"]:
+                lines.append("动态反馈时间轴与适用范围：" + json.dumps(feedback["timeline"], ensure_ascii=False))
+                lines.append("以下每个冻结帧都保留自己的时间、相机、选择和场景版本；区间范围表示用户提示的适用时间，不是自动生成的运动约束。")
+            else:
+                lines.append("动态截图采集时间，修改时段以用户提示为准：" + json.dumps(feedback["timeline"], ensure_ascii=False))
+                lines.append("以下每个冻结帧都保留自己的采集时间、相机、选择和场景版本；根据用户提示文字判断修改应适用的时段。")
         reference_names = {item["id"]: item["name"] for item in feedback.get("reference_images", [])}
         active_id = feedback.get("active_reference_id")
         aligned_id = feedback.get("aligned_reference_id")

@@ -305,8 +305,6 @@
 #references-dialog-button .references-label { display: none; }
 #references-dialog-button svg { width: 16px; height: 16px; }
 #references-dialog-button #annotation-count { font-size: 11px; }
-.scene-snapshots { left: auto; right: 66px; max-width: calc(100% - 190px); }
-.scene-stage:has(.selection-popover[hidden]) .scene-snapshots { max-width: calc(100% - 80px); }
 #scene-stage .selected-chip { top: 56px; bottom: auto; left: 12px; max-width: calc(100% - 24px); border-radius: 7px; }
 
 /* A narrow drawing dock opens beside the active image and does not resize it. */
@@ -479,7 +477,6 @@
 [data-layout=immersive] .selection-popover { top: var(--immersive-scene-top,76px); left: 20px; }
 [data-layout=immersive] #references-dialog-button { top: var(--immersive-content-top,128px); right: 20px; }
 [data-layout=immersive] #scene-stage .selected-chip { top: calc(var(--immersive-content-top,128px) + 52px); left: 20px; }
-[data-layout=immersive] .scene-snapshots { right: 76px; top: var(--immersive-content-top,128px); max-width: min(48vw,680px); }
 [data-layout=immersive] .reference-pane { top: var(--immersive-content-top,128px); }
 [data-layout=immersive] .reference-pane .pane-head { min-height: 34px; }
 [data-layout=immersive] .reference-pane #reference-title { max-width: none; }
@@ -512,16 +509,11 @@
   .scene-pane .pane-actions > .compact-button,
   .scene-pane .pane-actions > .appearance-button,
   .scene-pane .pane-actions > .popover > summary { min-height: 28px; padding: 4px 5px; font-size: 12px; }
-  .scene-mode-switch .compact-button { padding: 3px 6px; font-size: 12px; }
-  .scene-snapshots { right: 60px; max-width: calc(100% - 182px); }
-  .scene-stage:has(.selection-popover[hidden]) .scene-snapshots { max-width: calc(100% - 72px); }
   [data-layout=immersive] .topbar { left: 10px; right: 10px; top: 10px; padding: 6px 8px; }
   [data-layout=immersive] .scene-pane > .pane-head { left: 10px; right: 10px; max-width: none; width: auto; flex-wrap: wrap; padding: 5px 6px; gap: 3px; }
   [data-layout=immersive] .scene-pane .pane-actions { flex: 1; width: auto; }
   [data-layout=immersive] .selection-popover { top: var(--immersive-content-top,122px); left: 10px; }
   [data-layout=immersive] #references-dialog-button { right: 10px; }
-  [data-layout=immersive] .scene-snapshots { right: 64px; max-width: calc(100% - 190px); }
-  [data-layout=immersive] .scene-stage:has(.selection-popover[hidden]) .scene-snapshots { max-width: calc(100% - 76px); }
   [data-layout=immersive] #scene-stage .selected-chip { left: 10px; }
   [data-layout=immersive] .reference-pane { width: calc(100vw - 20px); }
   #annotation-tool-panel .popover-content { max-width: calc(100vw - 94px); }
@@ -710,8 +702,6 @@
 .selection-symbol { width: 15px; height: 15px; flex: none; }
 .selection-popover > summary > [aria-hidden]:last-child { font-size: 11px; opacity: .55; }
 .selection-popover .popover-content { left: 0; right: auto; top: calc(100% + 8px); }
-.scene-snapshots { max-width: calc(100% - 80px); }
-[data-layout=immersive] .scene-snapshots { max-width: min(48vw,680px); }
 [data-layout=immersive] .topbar {
   left: 20px; right: 20px; top: 16px;
   min-height: 42px;
@@ -756,7 +746,6 @@
   [data-layout=immersive] .scene-pane .pane-heading { gap: 3px; }
   .selection-popover > summary { padding: 5px; }
   #selection-level-label { display: none; }
-  .scene-snapshots, [data-layout=immersive] .scene-snapshots { max-width: calc(100% - 76px); }
 }
 @media (prefers-reduced-transparency: reduce) {
   [data-layout=immersive] .topbar .scene-meta, [data-layout=immersive] .workspace-global-actions { background: var(--paper); backdrop-filter: none; -webkit-backdrop-filter: none; }

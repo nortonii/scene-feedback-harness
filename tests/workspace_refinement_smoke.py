@@ -54,7 +54,7 @@ def main():
     assert page.evaluate('__appearanceCheck.state.annotations.length + __appearanceCheck.state.sceneSnapshots.length')==0
     page.keyboard.press('Control+z');page.wait_for_function('__appearanceCheck.state.annotations.length===3')
     print('PASS image-local clear, cancellation, preserved other-pane marks and snapshots, global scope and undo',flush=True)
-    control(page,'#browse-button').click();control(page,'#immersive-toggle').click();settle(page);control(page,'#immersive-reference-toggle').click();settle(page);choose_tool(page,'erase','reference')
+    control(page,'#scene-live-card').click();control(page,'#immersive-toggle').click();settle(page);control(page,'#immersive-reference-toggle').click();settle(page);choose_tool(page,'erase','reference')
     r=bounds(page,'#reference-annotations');page.mouse.move(r['x']+r['width']*.35,r['y']+r['height']*.4);page.mouse.down();page.keyboard.press('Escape');page.mouse.up()
     expect(page.locator('#reference-pane')).to_be_visible();assert page.evaluate('__appearanceCheck.state.annotations.length')==3
     page.keyboard.press('Escape');expect(page.locator('#reference-pane')).to_be_hidden()

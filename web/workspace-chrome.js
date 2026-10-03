@@ -98,7 +98,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     opened = false;
     if (resetTool && getState().mode !== 'select') setMode('select',target);
     render();
-    if (focus) (trigger.hidden ? byId('browse-button') : trigger).focus({preventScroll:true});
+    if (focus) (trigger.hidden ? byId('scene-live-card') : trigger).focus({preventScroll:true});
   }
   function syncState() {
     const state = getState();
@@ -121,7 +121,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   refButton.addEventListener('click', () => open('reference',{toggle:true}));
   sceneButton.addEventListener('click', () => open('scene',{toggle:true}));
   byId('annotation-tools-close').addEventListener('click', () => close({focus:true}));
-  byId('browse-button').addEventListener('click', () => close());
+  document.addEventListener('click', event => { if (event.target.closest('#scene-live-card')) close(); });
   // Context follows the actual clicked image, retaining cross-pane annotation.
   document.addEventListener('pointerdown', event => {
     const pane = event.target.closest('#reference-annotations') ? 'reference'

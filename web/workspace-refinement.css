@@ -1,4 +1,4 @@
-/* Consistent reading hierarchy, grouped scene controls and explicit feedback scope. */
+/* Consistent reading hierarchy and grouped scene controls. */
 :root { --text-control: 13px; --text-caption: 12px; --text-body: 14px; --surface-menu: #faf9f5f7; }
 :root[data-theme=dark] { --surface-menu: #292c30fa; }
 .topbar #scene-name { font-size: 14px; font-weight: 600; letter-spacing: 0; }
@@ -34,8 +34,6 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .scene-pane .pane-actions > #references-dialog-button:hover { background: var(--surface-hover); border-color: var(--line); }
 #annotation-count { font-size: 12px; color: var(--muted); min-width: 10px; text-align: center; }
 #references-dialog-button .action-icon { width: 16px; height: 16px; }
-.scene-snapshots, [data-layout=immersive] .scene-snapshots { right: 12px; max-width: calc(100% - 24px); }
-[data-layout=immersive] .scene-snapshots { max-width: min(48vw,680px); }
 .scene-pane { position: relative; }
 .snapshot-context { position: absolute; z-index: 15; left: 12px; bottom: 12px; padding: 5px 9px; border-radius: 8px; background: var(--surface-menu); color: var(--muted); font-size: 12px; pointer-events: none; }
 #snapshot-context:not([hidden]) ~ .scene-stage #scene-hint { bottom: 48px; }
@@ -57,7 +55,7 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .conversation-item { font-size: 14px; line-height: 1.7; }
 .chat-history { background: color-mix(in srgb,var(--surface) 68%,transparent); }
 #feedback-note { font-size: 14px; line-height: 1.65; }
-/* Two rows: transport plus time/scope, followed by an uninterrupted seek bar. */
+/* Two rows: transport, time and video options, followed by an uninterrupted seek bar. */
 .reference-timeline .timeline-controls { display: grid; grid-template-columns: 28px 58px 28px minmax(0,1fr) auto; gap: 4px; }
 .reference-timeline #timeline-prev { grid-area: 1/1; }
 .reference-timeline #timeline-play { grid-area: 1/2; gap: 4px; padding: 4px; }

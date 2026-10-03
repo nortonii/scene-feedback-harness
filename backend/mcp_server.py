@@ -132,6 +132,8 @@ def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) ->
     enriched = _feedback_with_local_paths(result, data_dir)
     content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(enriched, ensure_ascii=False))]
     for item in enriched.get("items", []):
+        if item.get("timeline") and "scope" not in item["timeline"]:
+            content.append(TextContent(type="text", text="Dynamic timestamps record screenshot capture times. Determine modification times from the user's prompt text."))
         if item.get('comparison') or any(frame.get('comparison') for frame in [*item.get('scene_snapshots', []), *item.get('dynamic_frames', [])]):
             content.append(TextContent(type='text', text='scene_comparison is an annotated reference/scene overlay, not new model geometry. Use comparison opacity, normalized_scene_image rect and camera metadata with the separate scene/reference originals; ghosting is not an extra object.'))
         for index, reference in enumerate(item.get("reference_images", []), 1):

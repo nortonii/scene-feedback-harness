@@ -297,14 +297,21 @@ def verify_clear_confirmation(page, screenshots):
 
 
 def verify_scene_modes(page, screenshots):
-    browse = page.locator("#browse-button")
-    annotate = page.locator("#snapshot-button")
+    browse = page.locator("#scene-live-card")
+    saved = page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")
+
+    def open_current():
+        remembered = draft(page).get("snapshot")
+        if remembered:
+            page.locator(f'.snapshot-open[data-snapshot-id="{remembered["id"]}"]').click()
+        else:
+            saved.last.click()
 
     def mode(snapshot):
         expect(browse).to_be_visible()
-        expect(annotate).to_be_visible()
+        expect(page.locator("#scene-snapshots")).to_be_visible()
         expect(browse).to_have_attribute("aria-pressed", str(not snapshot).lower())
-        expect(annotate).to_have_attribute("aria-pressed", str(snapshot).lower())
+        expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open[aria-pressed=true]")).to_have_count(1 if snapshot else 0)
         if snapshot:
             expect(page.locator("#scene-snapshot-media")).to_be_visible()
         else:
@@ -312,14 +319,13 @@ def verify_scene_modes(page, screenshots):
 
     mode(False)
     control(page, "#chat-collapse").click()
-    expect(annotate).to_have_text("截图库")
+    expect(page.locator("#snapshot-button,#browse-button")).to_have_count(0)
     empty = draft(page)
     expect(page.locator("#projects-dialog")).to_be_hidden()
-    annotate.click()
+    browse.click()
     mode(False)
-    expect(page.locator("#toast")).to_contain_text("当前还没有截图")
     assert draft(page) == empty
-    expect(page.locator(".snapshot-open")).to_have_count(0)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(0)
     control(page, "#capture-scene-button").click()
     mode(True)
     expect(page.locator("body")).to_have_attribute("data-tool", "rectangle")
@@ -348,10 +354,10 @@ def verify_scene_modes(page, screenshots):
     }""")
     page.reload()
     wait_ready(page)
-    expect(page.locator(".snapshot-open")).to_have_count(1)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(1)
     assert draft(page)["snapshot"] == original["snapshot"]
     assert draft(page)["annotations"] == original["annotations"]
-    annotate.click()
+    open_current()
     assert draft(page)["snapshot"] == original["snapshot"]
     browse.click()
     mode(False)
@@ -364,11 +370,11 @@ def verify_scene_modes(page, screenshots):
     page.wait_for_timeout(500)
     assert draft(page)["camera"] != original["snapshot"]["camera"]
     # Browsing returns to the last screenshot even after orbiting the live camera.
-    annotate.click()
+    open_current()
     mode(True)
     assert draft(page)["snapshot"] == original["snapshot"]
     assert draft(page)["camera"] != original["snapshot"]["camera"]
-    expect(page.locator(".snapshot-open")).to_have_count(1)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(1)
     expect(page.locator("body")).to_have_attribute("data-tool", "select")
     # Only the explicit capture action creates the new camera's screenshot.
     browse.click()
@@ -378,14 +384,14 @@ def verify_scene_modes(page, screenshots):
     assert current["snapshot"]["id"] != original["snapshot"]["id"]
     assert current["snapshot"]["camera"] != original["snapshot"]["camera"]
     assert current["annotations"] == original["annotations"]
-    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
     expect(page.locator("#timeline-panel")).to_be_hidden()
     for field in ("position", "target", "up", "fov"):
         assert current["snapshot"]["camera"][field] == current["camera"][field]
     browse.click()
-    annotate.click()
+    open_current()
     assert draft(page)["snapshot"] == current["snapshot"], "Browsing must reopen the last screenshot without recapturing"
-    page.locator(".snapshot-open").first.click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").first.click()
     assert draft(page)["snapshot"] == original["snapshot"]
     assert draft(page)["annotations"] == original["annotations"]
     # Draw another mark on the first view after browsing and capturing a second.
@@ -398,24 +404,24 @@ def verify_scene_modes(page, screenshots):
     page.reload()
     wait_ready(page)
     mode(False)
-    annotate.click()
+    open_current()
     mode(True)
-    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
     assert draft(page)["snapshot"] == original["snapshot"]
     expect(page.locator("#annotation-count")).to_have_text("2")
     page.locator(".snapshot-remove").first.click()
     mode(False)
-    expect(page.locator(".snapshot-open")).to_have_count(1)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(1)
     expect(page.locator("#annotation-count")).to_have_text("0")
-    annotate.click()
+    open_current()
     mode(True)
     assert draft(page)["snapshot"] == current["snapshot"], "Deleted active image falls back to a remaining screenshot"
-    expect(page.locator(".snapshot-open")).to_have_count(1)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(1)
     control(page, "#undo-annotation").click()
     mode(True)
-    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
     expect(page.locator("#annotation-count")).to_have_text("2")
-    page.locator(".snapshot-open").nth(1).click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").nth(1).click()
     assert draft(page)["snapshot"] == current["snapshot"]
     if screenshots:
         page.screenshot(path=str(screenshots / "scene-mode-multiple-views.png"))
@@ -423,15 +429,15 @@ def verify_scene_modes(page, screenshots):
     for _ in range(6):
         browse.click()
         control(page, "#capture-scene-button").click()
-    expect(page.locator(".snapshot-open")).to_have_count(8)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(8)
     browse.click()
     control(page, "#capture-scene-button").click()
     mode(False)
-    expect(page.locator(".snapshot-open")).to_have_count(8)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(8)
     expect(page.locator("#annotation-count")).to_have_text("2")
     for width, height in ((768, 900), (390, 844), (340, 844)):
         page.set_viewport_size({"width": width, "height": height})
-        last_view = page.locator(".snapshot-open").last
+        last_view = page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").last
         last_view.scroll_into_view_if_needed()
         last_view.click()
         expect(last_view).to_have_attribute("aria-pressed", "true")
@@ -446,10 +452,9 @@ def verify_scene_modes(page, screenshots):
     control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     expect(page.locator("#projects-dialog")).to_be_hidden()
-    annotate.click()
+    browse.click()
     mode(False)
-    expect(page.locator("#toast")).to_contain_text("当前还没有截图")
-    expect(page.locator(".snapshot-open")).to_have_count(0)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(0)
     browse.click()
     control(page, ".view-popover > summary").click()
     control(page, "#reset-button").click()
@@ -477,7 +482,7 @@ def verify_eraser(page, screenshots):
     before = draft(page)
     page.mouse.click(*position("#viewport", .6, .4))
     assert draft(page).get("snapshot") is None, "Erasing live 3D must not capture a screenshot"
-    expect(page.locator(".snapshot-open")).to_have_count(0)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(0)
     control(page, "#capture-scene-button").click()
     first = draft(page)["snapshot"]
     tool("line")
@@ -486,12 +491,12 @@ def verify_eraser(page, screenshots):
     stroke(scene, (.25, .55), (.5, .8))
     choose_tool(page, "point", "reference")
     page.mouse.click(*position("#reference-annotations", .5, .5))
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     control(page, "#capture-scene-button").click()
     second = draft(page)["snapshot"]
     tool("point")
     page.mouse.click(*position(scene, .55, .35))
-    page.locator(".snapshot-open").first.click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").first.click()
     original = draft(page)
     expect(page.locator("#annotation-count")).to_have_text("4")
     page.keyboard.press("8")
@@ -511,7 +516,7 @@ def verify_eraser(page, screenshots):
     assert any(mark["pane"] == "reference" for mark in remaining)
     assert any(mark.get("snapshot_id") == second["id"] for mark in remaining)
     assert draft(page)["snapshot"] == first
-    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
     control(page, "#undo-annotation").click()
     assert draft(page)["annotations"] == original["annotations"]
     control(page, "#redo-annotation").click()
@@ -544,12 +549,12 @@ def verify_eraser(page, screenshots):
     page.reload()
     wait_ready(page)
     expect(page.locator("#annotation-count")).to_have_text("3")
-    expect(page.locator(".snapshot-open")).to_have_count(2)
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
     assert draft(page)["snapshot"] == first
     control(page, "#reference-zoom-reset").click()
     control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     control(page, "#chat-launcher").click()
 
 
@@ -593,36 +598,9 @@ def verify_workspace_controls(page, screenshots):
     assert draft(page)["annotations"] == original["annotations"]
 
     before = geometry(page)
-    toggle = page.locator("#snapshot-strip-toggle")
-    assert "截图" not in toggle.inner_text(), "The gallery control should show only an arrow/count"
-    assert page.locator("#snapshot-strip-count").evaluate("el => getComputedStyle(el).opacity") == "0"
-    toggle.click()
-    expect(toggle).to_have_attribute("aria-expanded", "false")
-    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
-    assert geometry(page) == before, "Folding thumbnails must not resize the saved view"
-    expect(page.locator("#snapshot-strip-count")).to_have_text("1")
-    assert page.locator("#snapshot-strip-count").evaluate("el => getComputedStyle(el).opacity") == "1"
-    assert page.locator("#scene-snapshot-reveal").evaluate("el => el.inert")
-    # Reversing an unfinished transition must settle on the last requested state.
-    page.evaluate("""async () => {
-      const toggle = document.getElementById('snapshot-strip-toggle');
-      for (let i=0; i<4; i++) {
-        toggle.click(); await new Promise(resolve => setTimeout(resolve, 45));
-      }
-    }""")
-    expect(toggle).to_have_attribute("aria-expanded", "false")
-    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
-    page.emulate_media(reduced_motion="reduce")
-    toggle.click()
-    expect(page.locator(".snapshot-open")).to_be_visible()
-    assert page.locator("#scene-snapshot-reveal").evaluate("el => el.getAnimations().length") == 0
-    toggle.click()
-    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
-    page.emulate_media(reduced_motion="no-preference")
-    toggle.press("Enter")
-    expect(page.locator(".snapshot-open")).to_be_visible()
-    toggle.click()
-
+    expect(page.locator("#scene-snapshots")).to_be_visible()
+    expect(page.locator("#scene-live-card")).to_be_visible()
+    expect(page.locator("#snapshot-strip-toggle,#snapshot-strip-count,#scene-snapshot-reveal")).to_have_count(0)
     divider = page.locator("#workspace-divider")
     x, y = center("#workspace-divider")
     page.mouse.move(x, y); page.mouse.down(); page.mouse.move(x-180, y, steps=10); page.mouse.up()
@@ -656,8 +634,7 @@ def verify_workspace_controls(page, screenshots):
     page.reload(); wait_ready(page)
     expect(divider).to_have_attribute("aria-valuenow", "40")
     expect(page.locator("#eraser-size")).to_have_value("96")
-    expect(toggle).to_have_attribute("aria-expanded", "false")
-    expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
+    expect(page.locator("#scene-snapshot-strip")).to_be_visible()
     expect(page.locator("#annotation-count")).to_have_text("2")
     assert draft(page)["snapshot"] == original["snapshot"]
     if screenshots:
@@ -684,8 +661,7 @@ def verify_workspace_controls(page, screenshots):
     expect(divider).to_have_attribute("aria-valuenow", "40")
     divider.dblclick()
     expect(divider).to_have_attribute("aria-valuenow", "50")
-    toggle.click()
-    expect(page.locator(".snapshot-open")).to_be_visible()
+    expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_be_visible()
     eraser_size("Home")
     control(page, "#eraser-settings summary").click()
     for _ in range(6):
@@ -694,7 +670,7 @@ def verify_workspace_controls(page, screenshots):
     page.keyboard.press("Escape")
     control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     control(page, "#chat-launcher").click()
 
 
@@ -740,7 +716,7 @@ def verify_selection_panel(page, screenshots):
 
 def verify_overlay_toolbar(page, store, screenshots):
     # Live comparison preferences and each saved screenshot have independent settings.
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     toggle = page.locator("#compare-toggle")
     panel = page.locator("#compare-panel")
     slider = page.locator("#compare-opacity")
@@ -809,7 +785,7 @@ def verify_overlay_toolbar(page, store, screenshots):
       'astra-visual-compare:' + new URL(location.href).searchParams.get('session_id')) || '{}')""")
     assert preference["enabled"] is True and preference["opacity"] == 75
     control(page, 'button[data-tool="select"]').click()
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     expect(toggle).to_be_enabled()
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(overlay).to_be_visible()
@@ -844,12 +820,12 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(page.locator("#reference-title")).to_have_text("alternate-reference.png")
     expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(overlay).to_be_hidden()
-    control(page, "#snapshot-button").click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").last.click()
     expect(frozen_overlay).to_be_visible()
     assert draft(page)["snapshot"]["comparison"]["reference_id"] == frozen_before["comparison"]["reference_id"]
     assert frozen_overlay.get_attribute("src") == frozen_before["comparison"]["data_url"]
     expect(slider).to_have_value("25")
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     page.get_by_role("button", name="查看 reference.png", exact=True).click()
     expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(overlay).to_be_hidden()
@@ -1096,11 +1072,11 @@ def main():
                     browser.close()
                     return
                 verify_scene_modes(page, screenshots)
-                passed("snapshot browsing restores the last operated view across camera changes and reload, reports empty state and retains explicit capture, independent marks, deletion fallback/undo, capacity, narrow screens and clear confirmation")
+                passed("snapshot browsing restores the last operated view across camera changes and reload, keeps the live card when empty and retains explicit capture, independent marks, deletion fallback/undo, capacity, narrow screens and clear confirmation")
                 verify_eraser(page, screenshots)
                 passed("eraser sweeps only visible marks, preserves other screenshots, batches undo/redo, cancels previews and works after reference zoom and reload")
                 verify_workspace_controls(page, screenshots)
-                passed("eraser size changes real hit radius; gallery collapse, split dragging, keyboard and reload preserve screenshots and marks across desktop and mobile")
+                passed("eraser size changes real hit radius; permanent gallery, split dragging, keyboard and reload preserve screenshots and marks across desktop and mobile")
                 from annotation_selection_checks import verify_annotation_selection
                 verify_annotation_selection(page, screenshots)
                 passed("named marks remain selectable on screenshots, delete only selection, drag into chat and keep stable names across screenshots and reload")
@@ -1173,8 +1149,8 @@ def main():
                 page.mouse.move(stage["x"] + stage["width"] * .50, stage["y"] + stage["height"] * .55, steps=8)
                 page.mouse.up()
                 expect(page.locator("#annotation-count")).to_have_text("1")
-                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
-                expect(page.locator("#browse-button")).to_have_attribute("aria-pressed", "false")
+                expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open[aria-pressed=true]")).to_have_count(1)
+                expect(page.locator("#scene-live-card")).to_have_attribute("aria-pressed", "false")
                 annotated = draft(page)
                 assert annotated["snapshot"]
                 control(page, "#chat-launcher").click()
@@ -1188,7 +1164,7 @@ def main():
                 assert "[[annotation:" in canonical_note(page)
                 control(page, 'button[data-tool="select"]').click()
                 expect(page.locator("#scene-snapshot-media")).to_be_visible()
-                control(page, "#browse-button").click()
+                control(page, "#scene-live-card").click()
                 expect(page.locator("#scene-snapshot-media")).to_be_hidden()
                 assert draft(page)["sceneView"] == "live"
                 viewport = page.locator("#viewport").bounding_box()
@@ -1292,20 +1268,20 @@ def main():
                 passed("IME composition and keyCode 229 block Ctrl/Cmd Enter; plain Enter only inserts a newline")
 
                 first_view = draft(page)["snapshot"]
-                control(page, "#snapshot-button").click()
+                page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").last.click()
                 control(page, "#drag-scene-image").click()
                 expect(page.locator("#prompt-image-refs .prompt-image-chip")).to_have_count(1)
                 note = composer.input_value()
                 assert "【图" in note and "[[" not in note
                 canonical = canonical_note(page)
                 assert "[[image:" in canonical
-                control(page, "#browse-button").click()
+                control(page, "#scene-live-card").click()
                 control(page, "#capture-scene-button").click()
                 control(page, 'button[data-tool="point"]').click()
                 scene_box = page.locator("#scene-snapshot-image").bounding_box()
                 page.mouse.click(scene_box["x"] + scene_box["width"] * .72, scene_box["y"] + scene_box["height"] * .3)
                 expect(page.locator("#annotation-count")).to_have_text("2")
-                expect(page.locator(".snapshot-open")).to_have_count(2)
+                expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
                 before_submit = draft(page)
                 # The app's textarea listener runs first. A second listener clicks
                 # Send in the same key event, avoiding timing-dependent retries.
@@ -1344,9 +1320,9 @@ def main():
 
                 expect(page.locator("#annotation-count")).to_have_text("0")
                 expect(page.locator("#undo-annotation")).to_be_disabled()
-                expect(page.locator("#snapshot-button")).to_be_visible()
-                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "false")
-                expect(page.locator("#browse-button")).to_have_attribute("aria-pressed", "true")
+                expect(page.locator("#scene-snapshots")).to_be_visible()
+                expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open[aria-pressed=true]")).to_have_count(0)
+                expect(page.locator("#scene-live-card")).to_have_attribute("aria-pressed", "true")
                 fresh = draft(page)
                 assert fresh["annotations"] == [] and fresh["snapshot"] is None
                 assert fresh["selectedId"] is None and fresh["sceneView"] == "live"
@@ -1356,7 +1332,7 @@ def main():
                 assert len(packet["annotations"]) == 2 and packet["scene_original_url"]
                 assert len(packet["scene_snapshots"]) == 2
                 assert len(packet["image_refs"]) == 1
-                expect(page.locator("#scene-snapshot-strip")).to_be_hidden()
+                expect(page.locator("#scene-snapshot-strip")).to_be_visible()
                 page.reload()
                 wait_ready(page)
                 expect(page.locator("#annotation-count")).to_have_text("0")
@@ -1399,29 +1375,28 @@ def main():
                 expect(page.locator("#timeline-panel")).to_be_visible()
                 control(page, "#chat-collapse").click()
                 control(page, ".timeline-options summary").click()
-                expect(page.locator("#feedback-scope")).to_be_visible()
-                page.locator("#feedback-scope").select_option("range")
-                expect(page.locator("#range-start")).to_be_visible()
+                expect(page.locator("#save-moment")).to_be_visible()
+                expect(page.locator("#feedback-scope, #range-start, #range-end")).to_have_count(0)
                 page.keyboard.press("Escape")
                 control(page, "#timeline-next").click()
                 expect(page.locator("#timeline-time")).not_to_have_text("0.000 s")
-                passed("dynamic timeline, frame navigation and range popover remain operable")
+                passed("dynamic timeline, frame navigation and video options remain operable without a separate feedback range")
                 control(page, "#capture-scene-button").click()
-                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
+                expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open[aria-pressed=true]")).to_have_count(1)
                 moment = draft(page)["snapshot"]
                 control(page, 'button[data-tool="point"]').click()
                 r = page.locator("#scene-annotations").bounding_box()
                 page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 saved_time = page.locator("#timeline-seek").input_value()
-                control(page, "#browse-button").click()
+                control(page, "#scene-live-card").click()
                 control(page, "#timeline-prev").click()
                 expect(page.locator("#timeline-seek")).not_to_have_value(saved_time)
                 current_time = page.locator("#timeline-seek").input_value()
-                control(page, "#snapshot-button").click()
+                page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").last.click()
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
                 assert draft(page)["snapshot"] == moment
                 expect(page.locator(".snapshot-card[data-kind=moment]")).to_have_count(1)
-                control(page, "#browse-button").click()
+                control(page, "#scene-live-card").click()
                 control(page, "#timeline-prev").click()
                 control(page, "#capture-scene-button").click()
                 expect(page.locator("#timeline-seek")).to_have_value(current_time)
@@ -1433,7 +1408,7 @@ def main():
                 expect(page.locator("#annotation-count")).to_have_text("2")
                 page.locator(".snapshot-card[data-kind=moment] .snapshot-open").first.click()
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
-                expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
+                expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open[aria-pressed=true]")).to_have_count(1)
                 assert draft(page)["snapshot"] == moment
                 control(page, 'button[data-tool="erase"]').click()
                 r = page.locator("#scene-annotations").bounding_box()
@@ -1442,7 +1417,7 @@ def main():
                 assert draft(page)["annotations"][0]["frame_id"] == other_moment
                 expect(page.locator(".snapshot-card[data-kind=moment]")).to_have_count(2)
                 passed("eraser removes only the active dynamic frame's marks and preserves both evidence frames")
-                control(page, "#browse-button").click()
+                control(page, "#scene-live-card").click()
                 control(page, "#clear-round").click()
                 control(page, "#confirm-clear-annotations").click()
                 passed("explicit capture saves the current dynamic frame; snapshot browsing restores the last operated moment without creating another")
@@ -1470,7 +1445,7 @@ def main():
                     page.set_viewport_size({"width": width, "height": height})
                     page.wait_for_timeout(350)
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
-                    for selector in ("#browse-button", "#snapshot-button"):
+                    for selector in ("#scene-live-card",):
                         ui_control = page.locator(selector)
                         ui_control.scroll_into_view_if_needed()
                         expect(ui_control).to_be_visible()

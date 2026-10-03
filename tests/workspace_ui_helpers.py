@@ -7,7 +7,7 @@ def open_annotation_tools(page, context=None):
     if not panel.count():
         return
     if context is None:
-        context = 'scene' if page.locator('#snapshot-button').get_attribute('aria-pressed') == 'true' else 'reference'
+        context = 'scene' if page.locator('#scene-live-card').get_attribute('aria-pressed') == 'false' and page.locator('#scene-snapshot-media').is_visible() else 'reference'
     if panel.is_visible() and (context is None or panel.get_attribute('data-context') == context):
         return
     if context == 'scene':

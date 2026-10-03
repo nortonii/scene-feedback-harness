@@ -1,5 +1,6 @@
 // Keep native textarea selection and IME behavior for the visible short names.
-// This menu replaces the active @ query; its caller owns source validation/capture.
+// One menu replaces either an @ reference or a / time query. The caller owns
+// source validation and inserts through the textarea's usual editing path.
 export function findPromptMentionRange(text, start, end=start) {
   if (start !== end || !Number.isInteger(start)) return null;
   const at=text.lastIndexOf('@',start-1);
@@ -11,13 +12,32 @@ export function findPromptMentionRange(text, start, end=start) {
   return {start:at,end:start,query,text:text.slice(at,start)};
 }
 
+export function findPromptTimeRange(text, start, end=start) {
+  if (start !== end || !Number.isInteger(start)) return null;
+  const slash=text.lastIndexOf('/',start-1);
+  // Avoid opening for URLs, paths, ratios or a slash inside a short reference.
+  if (slash < 0 || slash >= start || /[A-Za-z0-9._%+/:\\\-]/.test(text[slash-1] || '')) return null;
+  const query=text.slice(slash+1,start);
+  if (/[\s/@\[\]【】]/.test(query)) return null;
+  const open=text.lastIndexOf('[[',slash), close=text.lastIndexOf(']]',slash);
+  if (open > close) return null;
+  if (text.lastIndexOf('【',slash) > text.lastIndexOf('】',slash)) return null;
+  return {start:slash,end:start,query,text:text.slice(slash,start),trigger:'/'};
+}
+
+export function findPromptQueryRange(text, start, end=start) {
+  const mention=findPromptMentionRange(text,start,end), time=findPromptTimeRange(text,start,end);
+  if (time && (!mention || time.start > mention.start)) return time;
+  return mention ? {...mention,trigger:'@'} : null;
+}
+
 export function filterPromptMentions(candidates, query) {
   const normalize=(value) => String(value || '').normalize('NFKC').toLocaleLowerCase().replace(/\s+/g,'');
   const search=normalize(query);
   return candidates.filter((item) => !search || normalize([item.label,item.detail,item.kind,item.search].join(' ')).includes(search));
 }
 
-export function createPromptMentions({input,menu,list,status,getCandidates,onSelect,isEnabled,onError}) {
+export function createPromptMentions({input,menu,list,status,getCandidates,onSelect,isEnabled,onError,getEmptyMessage}) {
   // The chat dock is transformed and scrollable. Mount the fixed popup outside
   // it so viewport coordinates and mobile keyboard bounds stay correct.
   document.body.append(menu);
@@ -67,10 +87,10 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
   }
   function refresh() {
     if (selecting) return;
-    const next=findPromptMentionRange(input.value,input.selectionStart,input.selectionEnd);
+    const next=findPromptQueryRange(input.value,input.selectionStart,input.selectionEnd);
     if (composing || document.activeElement !== input || !isEnabled() || !next || identity(next) === dismissed) { close(); return; }
     range={...next,value:input.value};
-    const available=getCandidates();
+    const available=getCandidates(range);
     const all=filterPromptMentions(available,range.query);
     candidates=all.slice(0,80);
     if (!candidates.some((item) => item.key === activeKey && !item.disabled)) activeKey=candidates.find((item) => !item.disabled)?.key || null;
@@ -89,14 +109,17 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
       button.addEventListener('click',() => choose(item));
       list.append(button);
     });
-    status.textContent=!available.length && !range.query ? '先选中物体或添加标记'
-      : !all.length ? '没有匹配的引用' : all.length+' 个引用'+(all.length > 80 ? '，请继续输入名称缩小范围' : ' · ↑↓ 选择，Enter 插入，Esc 关闭');
+    const timeQuery=range.trigger === '/';
+    list.setAttribute('aria-label',timeQuery ? '选择片段时间' : '选择提示引用');
+    status.textContent=!available.length ? (getEmptyMessage?.(range) || (timeQuery ? '当前没有可引用的片段时间' : '先选中物体或添加标记'))
+      : !all.length ? (timeQuery ? '没有匹配的时间，可输入秒数、机位或标记名' : '没有匹配的引用')
+        : all.length+(timeQuery ? ' 个时间' : ' 个引用')+(all.length > 80 ? '，请继续输入名称缩小范围' : ' · ↑↓ 选择，Enter 插入，Esc 关闭');
     menu.classList.remove('hidden'); input.setAttribute('aria-expanded','true');
     paintActive(); list.scrollTop=previousScroll; position();
   }
   function choose(item) {
     if (!range || selecting || isComposing() || item.disabled) return false;
-    const current=findPromptMentionRange(input.value,input.selectionStart,input.selectionEnd);
+    const current=findPromptQueryRange(input.value,input.selectionStart,input.selectionEnd);
     if (!current || identity(current) !== identity(range) || !isEnabled()) { close(); return false; }
     const note=input.value, start=input.selectionStart, end=input.selectionEnd;
     selecting=true;
