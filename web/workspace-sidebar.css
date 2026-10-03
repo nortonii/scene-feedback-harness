@@ -20,13 +20,15 @@ html:not([data-layout=immersive]) .scene-pane > .pane-head { min-height: 48px; }
   position: fixed; inset: 0; width: 100vw; height: 100dvh; max-width: none; max-height: none;
   margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent;
   color: var(--ink); box-shadow: none; overflow: hidden;
+  overscroll-behavior: contain;
 }
 #projects-dialog.workspace-sidebar::backdrop { background: transparent; backdrop-filter: none; }
-.sidebar-shade { position: absolute; inset: 0; background: #17171521; }
+.sidebar-shade { position: absolute; inset: 0; background: #17171521; will-change: opacity; }
 [data-theme=dark] .sidebar-shade { background: #00000040; }
 .sidebar-panel {
   position: absolute; left: 12px; top: 12px; bottom: 12px; width: 320px; max-width: calc(100vw - 24px);
   display: flex; flex-direction: column; overflow: hidden; min-height: 0;
+  will-change: transform; backface-visibility: hidden;
   border: 1px solid var(--surface-border); border-radius: 22px;
   background: color-mix(in srgb,var(--paper) 90%,transparent);
   box-shadow: 0 18px 64px #00000024, inset 0 1px 0 #ffffff16;

@@ -26,6 +26,9 @@ def main():
      launch.click();page.wait_for_function("document.querySelector('#projects-dialog').dataset.phase==='open'")
     def close_sidebar():
      close.click();expect(dialog).not_to_be_visible()
+    if '--motion-only' in sys.argv:
+     from sidebar_motion_checks import verify_sidebar_motion
+     verify_sidebar_motion(page,out);assert not errors,errors;browser.close();return
     scene=bounds(page,'#scene-stage');pose=page.evaluate('__appearanceCheck.pose()');assert scene['y']<80,scene
     assert page.locator('.topbar button:visible').count()==1
     open_sidebar();assert bounds(page,'#scene-stage')==scene;assert page.evaluate('__appearanceCheck.pose()')==pose

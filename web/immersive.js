@@ -63,8 +63,9 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
   function setLayout(value) {
     if (immersive === value && !transition) return;
     const request = ++layoutRequest;
-    transition?.skipTransition(); fallback?.cancel(); referenceAnimation?.cancel();
+    // Read the currently displayed rectangle before cancelling an interrupted FLIP.
     const before = stage.getBoundingClientRect();
+    transition?.skipTransition(); fallback?.cancel(); referenceAnimation?.cancel();
     const update = () => {
       if (request !== layoutRequest) return;
       immersive = value;
@@ -73,7 +74,9 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
       refresh();
       try { localStorage.setItem('astra-workspace-layout', value ? 'immersive' : 'compare'); } catch { /* Optional storage. */ }
     };
-    if (!reduced.matches && document.startViewTransition) {
+    // A document transition paints above native dialogs and captures the drawer
+    // into the root snapshot. Keep the modal live and animate only the scene.
+    if (!reduced.matches && document.startViewTransition && !document.querySelector('dialog[open]')) {
       const current = document.startViewTransition(update);
       transition = current;
       current.finished.catch(() => {}).finally(() => { if (transition === current) transition = null; });
