@@ -63,7 +63,7 @@ export function createPromptImageStore(openDatabase) {
           request.onsuccess = () => resolve(request.result);
           request.onerror = () => reject(request.error);
         });
-        return Array.isArray(images) ? images.filter(validImageReference).slice(0, 8) : [];
+        return Array.isArray(images) ? images.filter(validImageReference).slice(0, 16) : [];
       } finally { db.close(); }
     }
   };

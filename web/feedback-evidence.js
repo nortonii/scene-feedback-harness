@@ -1,4 +1,5 @@
 // Read-only evidence views: no new capture, no queue actions, no changes to payloads.
+import { compactReferenceMessage, savedReferenceDisplayMetadata } from './prompt-reference-display.js';
 function element(tag,text,className) {
   const node=document.createElement(tag);if(text!==undefined) node.textContent=text;if(className) node.className=className;return node;
 }
@@ -84,7 +85,7 @@ export function setupFeedbackEvidence({getDraft,api,resourceURL}) {
       if(generation!==request || !dialog.open) return;
       rememberSaved(feedback);const evidence=savedEvidence(feedback);
       status.textContent=`已保存 · ${evidence.summary} · v${feedback.scene_revision}`;
-      byId('feedback-preview-note').textContent=feedback.note || '本轮未填写文字说明';
+      byId('feedback-preview-note').textContent=compactReferenceMessage(feedback.note,savedReferenceDisplayMetadata(feedback)) || '本轮未填写文字说明';
       renderRows(media,evidence.rows);
     } catch(error) {
       if(generation!==request || !dialog.open) return;

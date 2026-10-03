@@ -14,7 +14,7 @@ from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 def verify_annotation_selection(page, screenshots):
     # Import lazily so the smoke suite can import this helper itself.
-    from focus_workspace_smoke import draft, wait_ready
+    from focus_workspace_smoke import draft, wait_ready, canonical_note
 
     scene = "#scene-annotations"
     reference = "#reference-annotations"
@@ -161,12 +161,15 @@ def verify_annotation_selection(page, screenshots):
     collapse_chat()
     drag_to_chat(scene, scene_point_at, "#feedback-note", expect_auto_open=True)
     expect(note).to_have_value(re.compile(re.escape(first_point["name"])))
-    expect(note).to_have_value(re.compile(re.escape(f'[[annotation:{first_point["id"]}]]')))
+    assert "[[" not in note.input_value()
+    assert f'[[annotation:{first_point["id"]}]]' in canonical_note(page)
     assert marks() == original_marks, "Referencing a mark must not move or mutate it"
     snapshot_is(first_snapshot)
-    drag_to_chat(reference, reference_point_at, "#chat-dock")
+    collapse_chat()
+    drag_to_chat(reference, reference_point_at, "#chat-dock", expect_auto_open=True)
     expect(note).to_have_value(re.compile(re.escape(reference_point["name"])))
-    expect(note).to_have_value(re.compile(re.escape(f'[[annotation:{reference_point["id"]}]]')))
+    assert "[[" not in note.input_value()
+    assert f'[[annotation:{reference_point["id"]}]]' in canonical_note(page)
     assert marks() == original_marks
     if screenshots:
         page.screenshot(path=str(screenshots / "dragged-annotation-references.png"))

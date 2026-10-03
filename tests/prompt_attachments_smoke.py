@@ -25,17 +25,17 @@ def main():
     plus.click();page.locator('#prompt-attach-saved').click();expect(page.locator('.attachment-empty')).to_be_visible();page.keyboard.press('Escape');expect(plus).to_be_focused();expect(menu).to_be_hidden()
     control(page,'#drag-reference-image').click();expect(menu).to_be_hidden();expect(page.locator('.prompt-input .prompt-image-chip')).to_have_count(1);expect(page.locator('#feedback-note')).to_be_focused()
     page.locator('.prompt-image-preview').click();expect(page.locator('#prompt-image-preview-dialog')).to_be_visible();page.keyboard.press('Escape')
-    page.locator('.prompt-image-remove').click();expect(page.locator('.prompt-image-chip')).to_have_count(0);assert not page.evaluate('__appearanceCheck.state.imageRefs.length')
+    page.locator('.prompt-image-remove').click();expect(page.locator('.prompt-image-chip')).to_have_count(0);assert not page.evaluate('__appearanceCheck.citedImages().length')
     print('PASS clean canvas, empty library, reference capture, inline thumbnail preview/removal and keyboard dismissal',flush=True)
     control(page,'#capture-scene-button').click();shot=page.evaluate('__appearanceCheck.state.snapshot.id');choose_tool(page,'point','scene');point(page,'#scene-annotations',.5,.4)
     snapshot=page.evaluate('__appearanceCheck.state.snapshot');control(page,'#annotation-tools-close').click();control(page,'#browse-button').click()
     original_pose=page.evaluate('__appearanceCheck.pose()');original_state=page.evaluate('({view:__appearanceCheck.state.sceneView,time:__appearanceCheck.state.time,snapshot:__appearanceCheck.state.snapshot?.id})')
     plus.click();page.locator('#prompt-attach-saved').click();page.locator(f'[data-attachment-id="{shot}"]').click();expect(menu).to_be_hidden();expect(page.locator('.prompt-image-chip')).to_have_count(1)
-    image=page.evaluate('__appearanceCheck.state.imageRefs[0]');assert image['original_data_url']==snapshot['data_url'];assert image['camera']==snapshot['camera'];assert image.get('annotated_data_url');assert page.evaluate('__appearanceCheck.pose()')==original_pose
+    image=page.evaluate('__appearanceCheck.citedImages()[0]');assert image['original_data_url']==snapshot['data_url'];assert image['camera']==snapshot['camera'];assert image.get('annotated_data_url');assert page.evaluate('__appearanceCheck.pose()')==original_pose
     assert page.evaluate('({view:__appearanceCheck.state.sceneView,time:__appearanceCheck.state.time,snapshot:__appearanceCheck.state.snapshot?.id})')==original_state
     control(page,'#snapshot-button').click();plus.click();expect(page.locator('#drag-scene-image')).to_have_text('引用这张截图');page.keyboard.press('Escape')
     page.reload();page.wait_for_function('window.__appearanceCheck?.state.workspaceReady && !__appearanceCheck.state.sceneLoading');settle(page);expect(page.locator('.prompt-image-chip')).to_have_count(1)
-    assert page.evaluate('__appearanceCheck.state.imageRefs[0].original_data_url')==image['original_data_url']
+    assert page.evaluate('__appearanceCheck.citedImages()[0].original_data_url')==image['original_data_url']
     print('PASS saved screenshot freezes original, camera, annotations and overlay without changing active view; references survive reload',flush=True)
     data='data:image/png;base64,'+base64.b64encode((ROOT/'examples/room_demo/reference.png').read_bytes()).decode()
     store.set_reference_clip(session['session_id'],{'name':'引用视频','fps':2,'frames':[{'name':f'frame-{n}','data_url':data,'time_sec':n*.5} for n in range(3)]});page.reload();page.wait_for_function('window.__appearanceCheck?.state.referenceClip && !__appearanceCheck.state.sceneLoading');settle(page)
@@ -57,9 +57,9 @@ def main():
       expect(page.locator('#scene-hint')).to_be_visible();page.keyboard.press('Escape');control(page,'#chat-launcher').click();settle(page)
     print('PASS desktop and narrow-screen day/night menus fit above composer; camera instructions are available only in the camera menu',flush=True)
     page.set_viewport_size({'width':1440,'height':960});control(page,'#comparison-layout-button').click();settle(page)
-    refs=page.evaluate('__appearanceCheck.state.imageRefs');assert len(refs)==3
+    refs=page.evaluate('__appearanceCheck.citedImages()');assert len(refs)==3
     for _ in range(5):control(page,'#drag-reference-image').click();expect(menu).to_be_hidden()
-    control(page,'#drag-reference-image').click();expect(page.locator('#toast')).to_contain_text('最多引用 8 张');assert page.evaluate('__appearanceCheck.state.imageRefs.length')==8;page.keyboard.press('Escape')
+    control(page,'#drag-reference-image').click();expect(page.locator('#toast')).to_contain_text('最多引用 8 张');assert page.evaluate('__appearanceCheck.citedImages().length')==8;page.keyboard.press('Escape')
     for _ in range(5):page.locator('.prompt-image-remove').last.click()
     page.locator('#feedback-note').fill('核对引用图文 '+page.locator('#feedback-note').input_value())
     page.locator('#submit-button').click();page.wait_for_function('__appearanceCheck.state.feedbackCount===1 && !__appearanceCheck.state.submitting',timeout=30000)

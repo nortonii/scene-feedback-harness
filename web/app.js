@@ -22,6 +22,8 @@ import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel
   handJointIndices, handJointLabel, poseEditToken, validPoseEdit, collectPoseEdits, correctedPoseFrame } from './human-pose.js';
 import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
 import { createPromptMentions } from './prompt-mentions.js';
+import { createPromptReferenceText } from './prompt-reference-text.js';
+import { compactReferenceMessage } from './prompt-reference-display.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -153,6 +155,7 @@ const frameImages = {
 let minimalLayout = null;
 let promptMentions = null;
 let promptAttachments = null;
+const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference});
 let mentionSceneCache = null;
 let workspaceControls = null;
 let immersiveWorkspace = null;
@@ -281,7 +284,7 @@ function saveDraft() {
       humanOverlayChoice:state.humanOverlayChoice,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
-      activeReferenceId:state.activeReferenceId, note:ui.note.value,
+      activeReferenceId:state.activeReferenceId, note:promptText(), promptReferenceLabels:promptReferenceText.exportRecords(),
       groundAxis:state.groundAxis, worldUpAxis:controls.worldUp.y === 1 ? 'y' : 'z',
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
@@ -325,7 +328,7 @@ function restoreDraft() {
     state.poseEdits = Array.isArray(draft.poseEdits) ? draft.poseEdits.filter(validPoseEdit).slice(0,8) : [];
     state.poseEditor = draft.poseEditor && /^[0-9a-f]{32}$/.test(draft.poseEditor.jobId || '') && /^[0-9a-f]{32}$/.test(draft.poseEditor.referenceId || '')
       ? {...draft.poseEditor,hand:draft.poseEditor.hand === 'right' ? 'right' : 'left',visibility:['visible','occluded','missing'].includes(draft.poseEditor.visibility) ? draft.poseEditor.visibility : 'visible'} : null;
-    state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,8) : [];
+    state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,16) : [];
     state.humanOverlayChoice = ['latest','hidden'].includes(draft.humanOverlayChoice) || /^[0-9a-f]{32}$/.test(draft.humanOverlayChoice || '')
       ? draft.humanOverlayChoice : 'latest';
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
@@ -357,7 +360,10 @@ function restoreDraft() {
     // Preserve drafts from the former two-field composer as one freeform prompt.
     const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
     const currentNote = typeof draft.note === 'string' ? draft.note : '';
-    ui.note.value = [oldPrompts, currentNote].filter(Boolean).join('\n\n');
+    promptReferenceText.reset(draft.promptReferenceLabels);
+    const originalPrompt=[oldPrompts,currentNote].filter(Boolean).join('\n\n');
+    ui.note.value=promptReferenceText.compact(originalPrompt);
+    state.legacyPromptMigration=!Array.isArray(draft.promptReferenceLabels)?{original:originalPrompt,display:ui.note.value}:null;
     state.groundAxis = ['y','z'].includes(draft.groundAxis) ? draft.groundAxis : 'auto';
     state.restoredUpAxis = ['y','z'].includes(draft.worldUpAxis) ? draft.worldUpAxis : null;
     applyGroundAxis(state.groundAxis === 'auto' ? state.restoredUpAxis || 'z' : state.groundAxis);
@@ -443,7 +449,7 @@ function setSession(session) {
   if (state.sessionId !== session.session_id) {
     annotationHistory.clear(); promptDrag = null;
     state.annotationNameCounters = {}; state.selectedAnnotationId = null;
-    promptMentions?.close();promptAttachments?.close();
+    promptMentions?.close();promptAttachments?.close();promptReferenceText.reset();
     state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
   }
   state.sessionId = session.session_id;
@@ -1846,7 +1852,7 @@ function addConversation(type, message, time, {historical=false,feedbackId=null}
   const label = document.createElement('small');
   label.textContent = (type === 'user' ? '你' : type === 'assistant' ? 'Codex' : '执行状态') + (time ? ' · ' + new Date(time).toLocaleTimeString('zh-CN',{hour12:false}) : '');
   const content = document.createElement('div');
-  content.textContent = String(message).slice(0, 4000);
+  content.textContent = compactReferenceMessage(String(message)).slice(0, 4000);
   card.append(label, content);
   if (feedbackId) feedbackEvidence?.attachReceipt(card,feedbackId);
   ui.conversation.append(card);
@@ -3018,7 +3024,7 @@ function updatePoseJoint(visibility,position=null) {
 function referencePoseEdit(sample,{focus=true}={}) {
   if (!editable() || !sample?.edits.length || !state.poseCorrectionsSupported) return;
   const token=poseEditToken(sample.id);
-  if (ui.note.value.includes(token)) { if (focus) { minimalLayout?.openChat(); ui.note.focus(); } return; }
+  if (promptText().includes(token)) { if (focus) { minimalLayout?.openChat(); ui.note.focus(); } return; }
   insertNoteText('手部修正（' + sample.label + '） ' + token,{replaceSelection:false,focus});
 }
 async function downloadPoseEdit(sample) {
@@ -3078,7 +3084,8 @@ function bindPoseEditEvents() {
     const sample=context.sample; sample.edits=sample.edits.filter((point) => point.name !== context.editor.jointName);
     if (!sample.edits.length) {
       state.poseEdits=state.poseEdits.filter((item) => item.id !== sample.id);
-      ui.note.value=ui.note.value.split(poseEditToken(sample.id)).join('');
+      ui.note.value=promptReferenceText.remove(ui.note.value,poseEditToken(sample.id));
+      renderPromptImageReferences();
     }
     context.editor.visibility='visible'; drawOverlays(); saveDraft();
   });
@@ -3170,7 +3177,7 @@ function insertHumanPoseReference(job, frame) {
   if (!token) return false;
   const existing=state.poseRefs.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id);
   try {
-    const cited=collectPoseReferences(ui.note.value,state.poseRefs);
+    const cited=collectPoseReferences(promptText(),state.poseRefs);
     if (!cited.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id) && cited.length >= 8) {
       announce('每轮最多引用 8 个人体结果。',true); return false;
     }
@@ -3648,10 +3655,10 @@ function feedbackEvidenceData() {
   const selected=snapshotForFeedback();
   if(!selected) rows.push({name:'当前场景视角',detail:'发送时另行保存当前视角和相机'});
   if(dynamicEnabled() && !state.dynamicSnapshots.length) rows.push({name:'当前视频时刻',url:activeReference()?.url,detail:'发送时保留当前参考帧与场景'});
-  const imageRefs=state.imageRefs.filter(image=>ui.note.value.includes(`[[image:${image.id}]]`));
+  const imageRefs=state.imageRefs.filter(image=>promptText().includes(`[[image:${image.id}]]`));
   for(const image of imageRefs) rows.push({name:image.label || '额外图片引用',url:image.original_data_url || image.data_url,detail:'在修改说明中引用的固定图片'});
-  const poses=state.poseRefs.filter(pose=>ui.note.value.includes(poseToken(pose.job_id,pose.reference_id)));
-  const edits=state.poseEdits.filter(pose=>ui.note.value.includes(`[[pose_edit:${pose.id}]]`));
+  const poses=state.poseRefs.filter(pose=>promptText().includes(poseToken(pose.job_id,pose.reference_id)));
+  const edits=state.poseEdits.filter(pose=>promptText().includes(`[[pose_edit:${pose.id}]]`));
   if(poses.length || edits.length) rows.push({name:'人体姿态证据',detail:`${poses.length} 份姿态引用 · ${edits.length} 份关键点修正`});
   const overlay=views.some(view=>view.comparison?.enabled && view.comparison.opacity>0) || (selected ? selected.comparison?.enabled && selected.comparison.opacity>0 : comparePreferences.enabled && comparePreferences.opacity>0 && !!activeReference());
   const parts=[state.references.length ? `${state.references.length} 张参考图` : null,state.sceneSnapshots.length ? `${state.sceneSnapshots.length} 张截图` : null,
@@ -4767,13 +4774,15 @@ function addPromptImageReference(entry) {
   if (!editable()) return false;
   if (!state.imageReferencesSupported) { announce('服务尚不支持图片引用，请更新服务并刷新页面。',true); return false; }
   let cited;
-  try { cited = collectImageReferences(ui.note.value,state.imageRefs); }
+  try { cited = collectImageReferences(promptText(),state.imageRefs); }
   catch (error) { announce(error.message,true); return false; }
   if (cited.length >= 8 && !cited.some((item) => item.id === entry.id)) {
     announce('一条提示最多引用 8 张图片，请先移除不需要的图片。',true); return false;
   }
   const previous = state.imageRefs;
-  state.imageRefs = [...cited.filter((item) => item.id !== entry.id),entry];
+  const citedIds=new Set(cited.map(item=>item.id));
+  const dormant=state.imageRefs.filter(item=>!citedIds.has(item.id) && item.id!==entry.id).slice(-8);
+  state.imageRefs = [...dormant,...cited.filter(item=>item.id!==entry.id),entry];
   if (!insertNoteReference(entry.label,imageToken(entry.id))) { state.imageRefs = previous; return false; }
   renderPromptImageReferences();
   return true;
@@ -4787,32 +4796,85 @@ function previewPromptImage(entry) {
   ui.imagePreviewToggle.dataset.original = 'false';
   ui.imagePreview.showModal();
 }
+function promptText() { return promptReferenceText.expand(ui.note.value); }
+function resolvePromptReference(token, fallback='') {
+  const match=/^\[\[(object|node|annotation|image|pose|pose_edit):(.+)\]\]$/.exec(token);
+  if(!match) return null;
+  const [,kind,key]=match;
+  let name=fallback,label=fallback,title=fallback,missing=false;
+  if(kind==='image') {
+    const entry=state.imageRefs.find(item=>item.id===key);
+    label=entry?.label || fallback;name='图';title=label;missing=!entry;
+  } else if(kind==='annotation') {
+    const mark=state.annotations.find(item=>item.id===key);
+    name=mark?.name || fallback.split('（')[0] || '标记';label=mark?annotationReferenceLabel(mark):fallback;
+    const snapshot=[...state.sceneSnapshots,...state.dynamicSnapshots].find(item=>item.id===(mark?.frame_id || mark?.snapshot_id));
+    title=[mark?.pane==='reference'?'参考图':'场景截图',snapshot?.name,label,mark?.text].filter(Boolean).join(' · ');missing=!mark;
+  } else if(kind==='object') {
+    const item=sceneObject(key);name=item?.name || fallback || '物体';label=item?.name || fallback;title='物体 · '+label;missing=!item;
+  } else if(kind==='node') {
+    const node=state.referencedSceneNodes.find(item=>item.parent_object_id+':'+item.node_path.join('/')===key);
+    name=node?.node_name || fallback || '部件';label=node?.node_name || fallback;title='部件 · '+label;missing=!node;
+  } else if(kind==='pose') {
+    const job=state.humanJobs.find(item=>key.startsWith(item.job_id+':'));
+    name=job?humanJobName(job):'人体结果';title=fallback;missing=!state.poseRefs.some(item=>poseToken(item.job_id,item.reference_id)===token);
+  } else {
+    const item=state.poseEdits.find(item=>item.id===key);
+    name='手部修正';label=item?'手部修正（'+item.label+'）':fallback;title=label;missing=!item;
+  }
+  return {kind,name,label,title,missing};
+}
+function removePromptReference(token) {
+  if(!editable()) return;
+  // Retain source bytes until the draft is submitted, so native text undo can
+  // restore a removed image reference with the same immutable evidence.
+  const text=promptReferenceText.remove(ui.note.value,token);
+  replacePromptText(text);
+}
+function replacePromptText(text) {
+  const start=ui.note.selectionStart,end=ui.note.selectionEnd;
+  ui.note.focus({preventScroll:true});ui.note.select();
+  // insertText participates in the browser's native textarea undo history.
+  const replaced=document.execCommand('insertText',false,text);
+  if(!replaced) ui.note.value=text;
+  ui.note.setSelectionRange(Math.min(start,text.length),Math.min(end,text.length));
+  renderPromptImageReferences();saveDraft();
+}
+function previewPromptReference(entry) {
+  const meta=resolvePromptReference(entry.token,entry.label);
+  id('prompt-reference-title').textContent=entry.alias.slice(1,-1);
+  id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
+  id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
+  const locate=id('prompt-reference-locate');
+  const mark=entry.kind==='annotation'?state.annotations.find(item=>`[[annotation:${item.id}]]`===entry.token):null;
+  locate.hidden=!mark;locate.onclick=()=>{id('prompt-reference-dialog').close();revealAnnotation(mark);};
+  id('prompt-reference-dialog').showModal();
+}
 function renderPromptImageReferences() {
   feedbackEvidence?.refresh();
   ui.imageRefs.replaceChildren();
-  const ids = new Set([...ui.note.value.matchAll(/\[\[image:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
-  const entries = state.imageRefs.filter((item) => ids.has(item.id));
+  const entries=promptReferenceText.entries(ui.note.value);
   ui.imageRefs.classList.toggle('hidden',!entries.length);
-  for (const entry of entries) {
-    const chip = document.createElement('div'); chip.className = 'prompt-image-chip'; chip.dataset.imageRefId = entry.id;
-    const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'prompt-image-preview';
-    preview.title = '预览引用时固定的图片'; preview.dataset.imageRefId = entry.id;
-    const image = document.createElement('img'); image.src = entry.annotated_data_url || entry.original_data_url; image.alt = '';
-    const label = document.createElement('span'); label.textContent = entry.label;
-    preview.append(image,label); preview.addEventListener('click',() => previewPromptImage(entry));
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'prompt-image-remove';
-    remove.dataset.imageRefId = entry.id; remove.textContent = '×'; remove.title = '移除图片引用';
-    remove.setAttribute('aria-label','移除 ' + entry.label); remove.disabled = !editable();
-    remove.addEventListener('click',() => {
-      if (!editable()) return;
-      const token = imageToken(entry.id);
-      ui.note.value = ui.note.value.split(entry.label+' '+token).join('').split(token).join('');
-      state.imageRefs = state.imageRefs.filter((item) => item.id !== entry.id);
-      renderPromptImageReferences(); saveDraft(); ui.note.focus();
-    });
-    chip.append(preview,remove); ui.imageRefs.append(chip);
+  for(const entry of entries) {
+    const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
+    const chip=document.createElement('div');chip.className=image?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
+    const preview=document.createElement('button');preview.type='button';preview.className=image?'prompt-image-preview':'prompt-reference-preview';
+    preview.title=resolvePromptReference(entry.token,entry.label)?.title || entry.title || entry.label;
+    if(image) {
+      chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;
+      const thumbnail=document.createElement('img');thumbnail.src=image.annotated_data_url || image.original_data_url;thumbnail.alt='';preview.append(thumbnail);
+    } else {
+      const kind=document.createElement('span');kind.className='prompt-reference-kind';kind.textContent=({object:'物体',node:'部件',annotation:'标记',pose:'人体',pose_edit:'修正',image:'图片'})[entry.kind];preview.append(kind);
+    }
+    const label=document.createElement('span');label.textContent=entry.alias.slice(1,-1)+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
+    preview.addEventListener('click',()=>image?previewPromptImage(image):previewPromptReference(entry));
+    const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
+    if(image) remove.dataset.imageRefId=image.id;
+    remove.textContent='×';remove.title='移除引用';remove.setAttribute('aria-label','移除 '+entry.alias.slice(1,-1));remove.disabled=!editable();
+    remove.addEventListener('click',()=>removePromptReference(entry.token));chip.append(preview,remove);ui.imageRefs.append(chip);
   }
 }
+
 function selectedPromptReference() {
   const item = sceneObject(state.selectedId);
   if (!item) return null;
@@ -4900,7 +4962,7 @@ function getPromptMentionCandidates() {
         search:'图片 图像 截图 image photo screenshot '+(pane === 'reference' ? '左图 参考 reference '+(ref?.name || '')+' '+(ref?.id || '') : '右图 场景 scene 渲染'),
         disabled:reason,descriptor:{kind:'capture-image',pane,source:promptMentionImageSource(pane)}});
     }
-    state.imageRefs.forEach((entry,index) => add({key:'saved-image:'+entry.id,kind:'saved-image',label:entry.label,
+    state.imageRefs.filter(entry=>promptText().includes(imageToken(entry.id))).forEach((entry,index) => add({key:'saved-image:'+entry.id,kind:'saved-image',label:entry.label,
       detail:'已保存图片 '+(index+1)+' · 固定截图',search:'图片 图像 已保存 image photo screenshot '+entry.id+' '+(index+1),
       descriptor:{kind:'saved-image',imageId:entry.id}}));
   }
@@ -4942,7 +5004,7 @@ function insertPromptMention(candidate) {
     if (!state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面。');
     const sample=state.poseEdits.find((item) => item.id === descriptor.editId);
     if (!validPoseEdit(sample) || sample.job_id !== descriptor.jobId || sample.reference_id !== descriptor.referenceId || sample.image_sha256 !== descriptor.imageSha256) throw new Error('这份修正草稿已失效，请重新选择。');
-    collectPoseEdits(ui.note.value,state.poseEdits);
+    collectPoseEdits(promptText(),state.poseEdits);
     return insertNoteReference('手部修正（'+sample.label+'）',poseEditToken(sample.id));
   }
   if (descriptor.kind === 'node' && !resolveSceneNode(descriptor.node)) throw new Error('这处部件已失效，请重新选择。');
@@ -5021,43 +5083,91 @@ function bindPromptReferenceEvents() {
     ui.imagePreviewImage.src = original ? imagePreviewReference.original_data_url : imagePreviewReference.annotated_data_url;
   });
 }
+function promptInsertionRange(from,to) {
+  let start=from,end=to;
+  for(const entry of promptReferenceText.entries(ui.note.value)) {
+    let at=ui.note.value.indexOf(entry.alias);
+    while(at>=0) {
+      const after=at+entry.alias.length;
+      if(start===end && start>at && start<after) start=end=after;
+      else if(start<after && end>at) {start=Math.min(start,at);end=Math.max(end,after);}
+      at=ui.note.value.indexOf(entry.alias,after);
+    }
+  }
+  return [start,end];
+}
+function bindCompactReferenceEditing() {
+  for(const event of ['focus','pointerdown']) ui.note.addEventListener(event,()=>workspaceChrome?.close({resetTool:false}));
+  ui.note.addEventListener('compositionstart',()=>{
+    const [start,end]=promptInsertionRange(ui.note.selectionStart,ui.note.selectionEnd);
+    ui.note.setSelectionRange(start,end);
+  });
+  id('prompt-reference-close').addEventListener('click',()=>id('prompt-reference-dialog').close());
+  ui.note.addEventListener('beforeinput',event=>{
+    if(event.isComposing || !editable() || !/^(delete|insert)/.test(event.inputType)) return;
+    const text=ui.note.value,start=ui.note.selectionStart,end=ui.note.selectionEnd;
+    let from=start,to=end;
+    for(const entry of promptReferenceText.entries(text)) {
+      let at=text.indexOf(entry.alias);
+      while(at>=0) {
+        const after=at+entry.alias.length;
+        const touched=start===end ? (event.inputType.endsWith('Backward')?start>at && (start<=after || event.inputType==='deleteWordBackward' && /^[ \t]*$/.test(text.slice(after,start))):
+          event.inputType.endsWith('Forward')?start<after && (start>=at || event.inputType==='deleteWordForward' && /^[ \t]*$/.test(text.slice(start,at))):start>at && start<after) : start<after && end>at;
+        if(touched) {from=Math.min(from,at);to=Math.max(to,after);}
+        at=text.indexOf(entry.alias,after);
+      }
+    }
+    if(from===start && to===end) return;
+    if(event.inputType.startsWith('delete')) {
+      event.preventDefault();ui.note.setSelectionRange(from,to);
+      if(!document.execCommand('delete')) {ui.note.setRangeText('',from,to,'end');ui.note.dispatchEvent(new Event('input',{bubbles:true}));}
+    } else {
+      // A caret in a short reference continues after it; a selection replaces
+      // the whole reference instead of leaving an unresolvable fragment.
+      ui.note.setSelectionRange(start===end?to:from,to);
+    }
+  });
+}
 function insertNoteText(text, {replaceSelection=true,focus=true}={}) {
   if (!editable()) return false;
-  const start = replaceSelection ? ui.note.selectionStart : ui.note.selectionEnd;
-  const end = ui.note.selectionEnd;
+  const [start,end]=promptInsertionRange(replaceSelection?ui.note.selectionStart:ui.note.selectionEnd,ui.note.selectionEnd);
   const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
   const after = end < ui.note.value.length && !/\s/.test(ui.note.value[end]) ? ' ' : '';
-  const insertion = before + text + after;
-  if (ui.note.value.length - (end - start) + insertion.length > 10000) {
+  const insertion = before + promptReferenceText.compact(text) + after;
+  const next=ui.note.value.slice(0,start)+insertion+ui.note.value.slice(end);
+  if (promptReferenceText.expand(next).length > 10000) {
     announce('加入引用会超过提示的 10000 字上限，请先精简提示或逐条引用。', true);
     return false;
   }
+  const previousFocus=document.activeElement;
   minimalLayout?.closeReferences();
   minimalLayout?.openChat();
-  ui.note.setRangeText(insertion, start, end, 'end');
+  ui.note.focus({preventScroll:true});ui.note.setSelectionRange(start,end);
+  if(!document.execCommand('insertText',false,insertion)) ui.note.setRangeText(insertion,start,end,'end');
   // Selecting or quoting a mark preserves the current screenshot.
   setMode('select');
   if (focus) ui.note.focus();
+  else if(previousFocus?.isConnected) previousFocus.focus({preventScroll:true});
   renderPromptImageReferences();
   saveDraft();
   return true;
 }
 function insertNoteReference(label, token) {
-  return insertNoteText(label + ' ' + token);
+  return insertNoteText(promptReferenceText.remember(label,token).alias);
 }
 function insertAllAnnotationReferences() {
   if (!editable() || !state.annotations.length) return;
-  const existing = new Set([...ui.note.value.matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
+  const existing = new Set([...promptText().matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
   const references = state.annotations.flatMap((annotation, index) => {
     if (existing.has(annotation.id)) return [];
-    return [annotationReferenceLabel(annotation) + ` [[annotation:${annotation.id}]]`];
+    return [promptReferenceText.remember(annotationReferenceLabel(annotation),`[[annotation:${annotation.id}]]`).alias];
   });
   if (!references.length) {
     minimalLayout?.closeReferences(); minimalLayout?.openChat({focus:true});
     announce('全部标记已在提示中引用。');
     return;
   }
-  if (insertNoteText(references.join('\n'), {replaceSelection:false})) {
+  if (insertNoteText(references.join(' '), {replaceSelection:false})) {
     announce('已引用 ' + references.length + ' 条标记，可继续补充提示。');
   }
 }
@@ -5073,7 +5183,7 @@ function insertSceneNodeReference(node, label, source=null) {
   saveDraft();
   return true;
 }
-function promptReferences(note=ui.note.value) {
+function promptReferences(note=promptText()) {
   if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
   if (/\[\[image:/.test(note) && !state.imageReferencesSupported) throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
   collectImageReferences(note,state.imageRefs);
@@ -5122,10 +5232,11 @@ function clearSubmittedPrompt(submission) {
   const submittedDraft = submission.draftNote;
   const submittedNote = submission.payload.note;
   const unchanged = typeof submittedDraft === 'string'
-    ? ui.note.value === submittedDraft
-    : ui.note.value.trim() === String(submittedNote || '').trim();
+    ? ui.note.value === promptReferenceText.compact(submittedDraft)
+    : ui.note.value.trim() === promptReferenceText.compact(String(submittedNote || '')).trim();
   if (!unchanged) return false;
   ui.note.value = '';
+  promptReferenceText.reset();
   state.referencedSceneNodes = [];
   state.poseRefs = [];
   state.poseEdits = []; state.poseEditor=null; state.poseEditDrag=null;
@@ -5217,7 +5328,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
 }
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject) return;
-  const promptText = ui.note.value;
+  const promptText = promptReferenceText.expand(ui.note.value);
   if (!state.poseCorrectionsSupported && (/\[\[pose_edit:/.test(promptText) || state.pendingSubmission?.payload?.pose_edits?.length)) {
     announce('服务尚不支持关键点修正，请更新服务并刷新页面后发送。',true); return;
   }
@@ -5609,6 +5720,7 @@ function bindEvents() {
     canvas.tabIndex = 0;
     canvas.addEventListener('lostpointercapture', () => finishAnnotationReferenceDrag());
   }
+  bindCompactReferenceEditing();
   ui.note.addEventListener('input',() => { renderPromptImageReferences(); saveDraft(); });
   ui.note.addEventListener('keydown', (event) => {
     if (promptMentions.isComposing(event) || promptMentions.handleKeydown(event)) return;
@@ -5815,6 +5927,11 @@ animate();
 try {
   await ensureSession();
   await loadScene();
+  if(state.legacyPromptMigration && ui.note.value===state.legacyPromptMigration.display) {
+    ui.note.value=promptReferenceText.compact(state.legacyPromptMigration.original);
+    renderPromptImageReferences();saveDraft();
+  }
+  state.legacyPromptMigration=null;
   updateMode();
   renderAnnotations();
   drawOverlays();

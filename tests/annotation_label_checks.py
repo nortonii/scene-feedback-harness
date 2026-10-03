@@ -9,7 +9,7 @@ from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 
 def verify_annotation_label_visibility(page, screenshots):
-    from focus_workspace_smoke import draft, wait_ready
+    from focus_workspace_smoke import draft, wait_ready, canonical_note
 
     scene = "#scene-annotations"
     reference = "#reference-annotations"
@@ -133,7 +133,8 @@ def verify_annotation_label_visibility(page, screenshots):
     page.mouse.move(*position("#feedback-note", .5, .5), steps=12)
     page.mouse.up()
     expect(note).to_have_value(re.compile(re.escape(scene_mark["name"])))
-    expect(note).to_have_value(re.compile(re.escape(f'[[annotation:{scene_mark["id"]}]]')))
+    assert "[[" not in note.input_value()
+    assert f'[[annotation:{scene_mark["id"]}]]' in canonical_note(page)
     assert marks() == original
     note.fill("")
     control(page, "#chat-collapse").click()

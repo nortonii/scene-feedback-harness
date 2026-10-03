@@ -21,7 +21,8 @@ from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 HOOK = '''
 window.__appearanceCheck = {
-  state, camera, controls, refreshWorkspace, setReferenceClip,
+  state, camera, controls, refreshWorkspace, setReferenceClip, promptText,
+  citedImages: () => collectImageReferences(promptText(),state.imageRefs),
   background: () => threeScene.background.getHexString(),
   model: () => JSON.stringify([...state.objectNodes.values()].flatMap(root => {
     const rows = [];

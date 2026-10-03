@@ -1,11 +1,11 @@
-// A textarea keeps the model-facing reference tokens as plain text. This menu
-// only replaces the active @ query; its caller owns source validation/capture.
+// Keep native textarea selection and IME behavior for the visible short names.
+// This menu replaces the active @ query; its caller owns source validation/capture.
 export function findPromptMentionRange(text, start, end=start) {
   if (start !== end || !Number.isInteger(start)) return null;
   const at=text.lastIndexOf('@',start-1);
   if (at < 0 || at >= start || /[A-Za-z0-9._%+\-]/.test(text[at-1] || '')) return null;
   const query=text.slice(at+1,start);
-  if (/[\s@\[\]]/.test(query)) return null;
+  if (/[\s@\[\]【】]/.test(query)) return null;
   const open=text.lastIndexOf('[[',at), close=text.lastIndexOf(']]',at);
   if (open > close) return null;
   return {start:at,end:start,query,text:text.slice(at,start)};

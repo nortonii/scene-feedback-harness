@@ -35,3 +35,15 @@
 [data-theme=dark] .prompt-input { background: #181b1f64; }
 [data-theme=dark] .prompt-input:focus-within { box-shadow: 0 0 0 2px #dce5eb20; }
 @media (prefers-reduced-motion: reduce) { .prompt-attach-button svg,.prompt-input { transition: none; } }
+
+/* Short source cards accompany the same compact names used in the sentence. */
+.prompt-reference-chip { display: inline-flex; align-items: center; min-width: 0; max-width: min(230px,100%); border: 1px solid var(--line); border-radius: 10px; background: var(--surface-glass); }
+.prompt-reference-preview { display: inline-flex; align-items: center; gap: 7px; min-width: 0; padding: 8px; font-size: 12px; }
+.prompt-reference-preview > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-reference-kind { flex: none; font-size: 10px; padding: 2px 5px; border-radius: 5px; background: var(--surface-hover); color: var(--muted); }
+.prompt-reference-remove { min-width: 28px; align-self: stretch; border-radius: 0 10px 10px 0; color: var(--muted); padding: 0 6px; }
+.prompt-reference-preview:hover,.prompt-reference-remove:hover { background: var(--surface-hover); }
+.prompt-reference-dialog { width: min(420px,calc(100vw - 32px)); }
+.prompt-reference-dialog p { line-height: 1.75; overflow-wrap: anywhere; font-size: 13px; }
+#prompt-reference-status { color: var(--muted); }
+#prompt-reference-status:empty { display: none; }

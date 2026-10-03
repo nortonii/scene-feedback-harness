@@ -251,7 +251,9 @@ def main():
                 assert page.evaluate('__appearanceCheck.state.referenceZoom') == 1
                 control(page, '#drag-reference-image').click()
                 expect(page.locator('#prompt-image-refs .prompt-image-chip')).to_have_count(1)
-                assert '[[image:' in page.locator('#feedback-note').input_value()
+                assert '【图' in page.locator('#feedback-note').input_value()
+                assert '[[' not in page.locator('#feedback-note').input_value()
+                assert '[[image:' in page.evaluate('__appearanceCheck.promptText()')
                 control(page, '.prompt-image-remove').click()
                 expect(page.locator('#prompt-image-refs .prompt-image-chip')).to_have_count(0)
                 control(page, '#chat-collapse').click()

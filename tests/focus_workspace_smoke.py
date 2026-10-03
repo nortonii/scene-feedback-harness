@@ -32,6 +32,10 @@ from playwright.sync_api import expect, sync_playwright  # noqa: E402
 from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 
+def canonical_note(page):
+    return page.evaluate("window.__referenceCheck.promptText()")
+
+
 def draft(page):
     return page.evaluate("""() => {
       const session = new URL(location.href).searchParams.get('session_id');
@@ -117,6 +121,7 @@ def verify_chat_resize(page, store, submissions, screenshots):
     initial = dock.bounding_box()
     initial_history = conversation.evaluate("el => el.clientHeight")
     original = draft(page)
+    original_display = page.locator("#feedback-note").input_value()
     original_geometry = geometry(page)
     original_submissions = len(submissions)
     handle_box = handle.bounding_box()
@@ -196,7 +201,8 @@ def verify_chat_resize(page, store, submissions, screenshots):
     control(page, "#chat-launcher").click()
     page.wait_for_timeout(100)
     assert abs(dock.bounding_box()["height"] - enlarged["height"]) < 2
-    expect(page.locator("#feedback-note")).to_have_value(original["note"])
+    expect(page.locator("#feedback-note")).to_have_value(original_display)
+    assert canonical_note(page) == original["note"]
     assert draft(page)["annotations"] == original["annotations"]
     assert draft(page)["snapshot"] == original["snapshot"]
 
@@ -715,7 +721,8 @@ def verify_selection_panel(page, screenshots):
     control(page, ".selected-reference-insert").click()
     expect(page.locator("#references-dialog")).to_be_hidden()
     expect(page.locator("#feedback-note")).to_be_focused()
-    assert "[[node:" in page.locator("#feedback-note").input_value()
+    assert "[[" not in page.locator("#feedback-note").input_value()
+    assert "[[node:" in canonical_note(page)
     assert draft(page)["referencedSceneNodes"]
     control(page, "#references-dialog-button").click()
     control(page, "#clear-selection").click()
@@ -1045,6 +1052,8 @@ def main():
                 page.on("request", lambda request: submissions.append(request.post_data_json)
                         if request.method == "POST" and "/api/sessions/" in request.url
                         and request.url.endswith("/feedback") else None)
+                page.route("**/app.js", lambda route: route.fulfill(status=200, content_type="text/javascript",
+                    body=(ROOT / "web/app.js").read_text() + "\nwindow.__referenceCheck={promptText};"))
                 page.goto(url)
                 wait_ready(page)
                 if args.baseline:
@@ -1167,7 +1176,8 @@ def main():
                 expect(page.locator("#references-dialog")).to_be_hidden()
                 expect(page.locator("#feedback-note")).to_be_focused()
                 note = page.locator("#feedback-note").input_value()
-                assert "保留草稿" in note and "[[annotation:" in note
+                assert "保留草稿" in note and "【" in note and "[[" not in note
+                assert "[[annotation:" in canonical_note(page)
                 control(page, 'button[data-tool="select"]').click()
                 expect(page.locator("#scene-snapshot-media")).to_be_visible()
                 control(page, "#browse-button").click()
@@ -1276,7 +1286,9 @@ def main():
                 control(page, "#drag-scene-image").click()
                 expect(page.locator("#prompt-image-refs .prompt-image-chip")).to_have_count(1)
                 note = composer.input_value()
-                assert "[[image:" in note
+                assert "【图" in note and "[[" not in note
+                canonical = canonical_note(page)
+                assert "[[image:" in canonical
                 control(page, "#browse-button").click()
                 control(page, "#capture-scene-button").click()
                 control(page, 'button[data-tool="point"]').click()
@@ -1302,7 +1314,7 @@ def main():
                 page.wait_for_function("document.getElementById('feedback-count-label').textContent.includes('1 条')")
                 assert len(submissions) == 1, len(submissions)
                 sent = submissions[0]
-                assert sent["note"] == note
+                assert sent["note"] == canonical
                 assert len(sent["annotations"]) == 2
                 assert len(sent["scene_snapshots"]) == 2
                 assert len(sent["image_refs"]) == 1
