@@ -14,13 +14,16 @@ from workspace_ui_helpers import control,choose_tool
 
 def assert_gallery_contract(page, layout, expected_order=None):
     gallery=page.locator('#scene-snapshots');expect(gallery).to_be_visible()
+    page.mouse.move(2,page.viewport_size['height']-2)
+    page.evaluate("document.activeElement?.closest('.snapshot-card') && document.activeElement.blur()")
+    page.wait_for_timeout(300)
     cards=page.locator('#scene-snapshot-strip .snapshot-card')
     expect(cards.first).to_have_attribute('data-kind','live')
     expect(cards.first.locator('#scene-live-card')).to_have_count(1)
     expect(cards.first.locator('.snapshot-remove')).to_have_count(0)
     expect(page.locator('#browse-button,#snapshot-button,#snapshot-strip-toggle,#snapshot-strip-count,#scene-snapshot-reveal')).to_have_count(0)
     for thumb in cards.locator('.snapshot-thumb').all():
-        size=thumb.bounding_box();assert size and abs(size['width']-160)<1 and abs(size['height']-90)<1,size
+        size=thumb.bounding_box();assert size and abs(size['width']-112)<1 and abs(size['height']-63)<1,size
     placement=gallery.evaluate("el=>({parent:el.parentElement.tagName,compareParent:el.parentElement.matches('.scene-pane'),position:getComputedStyle(el).position,beforeStage:el.nextElementSibling?.id==='scene-stage'})")
     if layout=='immersive':assert placement['parent']=='BODY' and placement['position']=='fixed',placement
     else:assert placement['compareParent'] and placement['beforeStage'] and placement['position'] not in ('absolute','fixed'),placement

@@ -17,6 +17,24 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
   const preview=document.createElement('div');preview.className='snapshot-preview';preview.hidden=true;
   preview.id='snapshot-gallery-preview';preview.setAttribute('role','group');preview.setAttribute('aria-label','选择此时刻的截图');document.body.append(preview);
   let signature='',tickSignature='',activeKey=null,anchor=null;
+  function keepExpandedCardVisible(card) {
+    if (!card.isConnected || card.dataset.kind === 'live') return;
+    const bounds=strip.getBoundingClientRect(),rect=card.getBoundingClientRect(),live=strip.firstElementChild;
+    const left=getComputedStyle(live).position === 'sticky' ? live.getBoundingClientRect().right+8 : bounds.left+1;
+    const right=bounds.left+strip.clientWidth-8;
+    if (rect.left<left) strip.scrollLeft+=rect.left-left;
+    else if (rect.right>right) strip.scrollLeft+=rect.right-right;
+  }
+  // Keep the expanding card inside the row throughout its size transition.
+  // Moving only the strip preserves the pointer's target and the scene below.
+  const cardWidths=new WeakMap();
+  const cardSizes=new ResizeObserver(entries=>{
+    for (const {target,contentRect} of entries) {
+      const prior=cardWidths.get(target);cardWidths.set(target,contentRect.width);
+      if (contentRect.width>124 && (prior===undefined || contentRect.width>prior) &&
+          target.matches(':hover, :has(:focus-visible)')) keepExpandedCardVisible(target);
+    }
+  });
   function el(tag,text,cls) {const node=document.createElement(tag);if(text) node.textContent=text;if(cls) node.className=cls;return node;}
   function liveItem() {
     const live=getLive() || {};
@@ -71,7 +89,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
       signature=next;hide();
       const focused=document.activeElement?.closest('.snapshot-card');const focusedId=focused?.dataset.galleryKey, wasRemove=document.activeElement?.classList.contains('snapshot-remove');
       const focusedIndex=[...strip.children].indexOf(focused);
-      const scroll=strip.scrollLeft;strip.replaceChildren();
+      const scroll=strip.scrollLeft;cardSizes.disconnect();strip.replaceChildren();
       for(const item of cards) {
         const card=el('div',null,'snapshot-card');card.dataset.kind=item.live?'live':item.dynamic?'moment':'static';card.dataset.galleryKey=item.id;
         if(!item.live) card.dataset.snapshotId=item.id;
@@ -94,7 +112,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
           const remove=el('button','×','snapshot-remove');remove.type='button';remove.disabled=item.disabled;remove.title='删除'+item.name+'及其标记，可撤销';remove.setAttribute('aria-label',remove.title);
           remove.addEventListener('click',()=>{hide();onRemove(item.id);});card.append(remove);
         }
-        strip.append(card);
+        strip.append(card);cardSizes.observe(card);
       }
       strip.scrollLeft=scroll;
       if(focusedId) {
