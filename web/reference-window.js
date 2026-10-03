@@ -15,7 +15,9 @@ export function setupReferenceWindow({onChange=()=>{}}={}) {
   } catch { /* Optional browser preference. */ }
   function limits() {
     const margin = 10;
-    const top = Math.min(innerHeight - 100, document.querySelector('.topbar').getBoundingClientRect().bottom + 10);
+    let top = Math.min(innerHeight - 100, document.querySelector('.topbar').getBoundingClientRect().bottom + 10);
+    const gallery=document.getElementById('scene-snapshots');
+    if(immersive() && innerWidth<=640 && !gallery.classList.contains('hidden')) top=Math.min(innerHeight-100,Math.max(top,gallery.getBoundingClientRect().bottom+10));
     const maxWidth = Math.max(100, innerWidth - margin * 2);
     const maxHeight = Math.max(80, innerHeight - top - margin);
     const px = value => parseFloat(value) || 0;
@@ -121,7 +123,7 @@ export function setupReferenceWindow({onChange=()=>{}}={}) {
   window.addEventListener('resize', () => { if (gesture) finish(true); refresh(); });
   // Video controls, saved moments and pose editors may appear after resizing.
   const contents = new ResizeObserver(() => refresh());
-  for (const child of [header,pane.querySelector('.reference-navigation'),document.getElementById('pose-edit-panel'),document.getElementById('timeline-panel')]) {
+  for (const child of [header,pane.querySelector('.reference-navigation'),document.getElementById('pose-edit-panel'),document.getElementById('timeline-panel'),document.getElementById('scene-snapshots')]) {
     if (child) contents.observe(child);
   }
   refresh();

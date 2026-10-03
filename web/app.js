@@ -5,6 +5,7 @@ import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMo
 import { setupMinimalLayout } from './layout.js';
 import { setupImmersive } from './immersive.js';
 import { setupTheme } from './theme.js';
+import {setupSnapshotGallery} from './snapshot-gallery.js';
 import { setupFeedbackEvidence, savedEvidence } from './feedback-evidence.js';
 import { setupActionIcons, setActionIcon } from './action-icons.js';
 import { setupWorkspaceChrome } from './workspace-chrome.js';
@@ -64,7 +65,7 @@ const ui = {
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
   viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
-  timelineSource:id('timeline-source'), moments:id('moment-strip'), animationChoices:id('animation-choices'),
+  timelineSource:id('timeline-source'), animationChoices:id('animation-choices'),
   scope:id('feedback-scope'), range:id('feedback-range'), rangeStart:id('range-start'), rangeEnd:id('range-end'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
@@ -155,6 +156,7 @@ let workspaceControls = null;
 let immersiveWorkspace = null;
 let workspaceChrome = null;
 let feedbackEvidence = null;
+let snapshotGallery = null;
 let clearRequest = null;
 let backgroundTransition = null;
 let annotationReferenceDrag = null;
@@ -2400,34 +2402,35 @@ function openSceneSnapshot(snapshotId) {
   state.snapshot = snapshot; state.sceneView = 'snapshot';
   renderSceneView(); renderAnnotations();
 }
+function galleryItems() {
+  return [...state.sceneSnapshots,...state.dynamicSnapshots].map(snapshot => {
+    const dynamic=Number.isFinite(snapshot.time_sec);
+    const count=state.annotations.filter(mark=>dynamic ? markMatchesMoment(mark,snapshot) : mark.pane==='scene' && mark.snapshot_id===snapshot.id).length;
+    const name=dynamic ? shortTime(snapshot.time_sec) : snapshot.name;
+    const viewId=snapshot.view_id || (dynamic ? referenceViewForMoment(snapshot)?.clip_id : null);
+    const title=[name,dynamic ? (snapshot.view_name || referenceViewForMoment(snapshot)?.name || '场景动画') : null,
+      dynamic && momentFrameIndex(snapshot)!==null ? '第 '+(momentFrameIndex(snapshot)+1)+' 帧' : null,'场景版本 '+snapshot.scene_revision,count+' 个标记'].filter(Boolean).join(' · ');
+    return {id:snapshot.id,dynamic,time:snapshot.time_sec,viewId,name,title,count,disabled:!editable(),
+      active:state.sceneView==='snapshot' && state.snapshot?.id===snapshot.id,
+      cover:dynamic && snapshot.reference_url || snapshot.data_url,reference:dynamic ? snapshot.reference_url : null,scene:snapshot.data_url};
+  });
+}
+function removeSavedSnapshot(snapshotId) {
+  if(!editable()) return;
+  const moment=state.dynamicSnapshots.find(entry=>entry.id===snapshotId);
+  const snapshot=moment || state.sceneSnapshots.find(entry=>entry.id===snapshotId);
+  if(!snapshot) return;
+  const before=annotationEditState();
+  pauseTimeline(); hideTextEditor(); state.drag=null;
+  state.annotations=state.annotations.filter(mark=>moment ? !markMatchesMoment(mark,moment) : mark.pane!=='scene' || mark.snapshot_id!==snapshotId);
+  state.sceneSnapshots=state.sceneSnapshots.filter(entry=>entry.id!==snapshotId);
+  state.dynamicSnapshots=state.dynamicSnapshots.filter(entry=>entry.id!==snapshotId);
+  if(state.snapshot?.id===snapshotId) {state.snapshot=null;state.sceneView='live';state.paneModes.scene='select';state.mode=toolMode(state.toolPane);}
+  recordAnnotationEdit(before);renderSceneView();renderAnnotations();renderTimeline();saveDraft();
+  announce('已删除截图及其标记，可撤销恢复。');
+}
 function renderSceneSnapshots() {
-  ui.snapshotStrip.replaceChildren();
-  for (const snapshot of state.sceneSnapshots) {
-    const card = document.createElement('div'); card.className = 'snapshot-card';
-    const open = document.createElement('button'); open.type = 'button'; open.className = 'snapshot-open';
-    open.dataset.snapshotId = snapshot.id;
-    open.disabled = !editable();
-    open.setAttribute('aria-pressed', String(state.sceneView === 'snapshot' && state.snapshot?.id === snapshot.id));
-    const count = state.annotations.filter(mark => mark.pane === 'scene' && mark.snapshot_id === snapshot.id).length;
-    open.title = snapshot.name + ' · 场景版本 ' + snapshot.scene_revision + ' · ' + count + ' 个标记';
-    const image = document.createElement('img'); image.src = snapshot.data_url; image.alt = '';
-    const label = document.createElement('span'); label.textContent = snapshot.name + (count ? ' · ' + count : '');
-    open.append(image, label); open.addEventListener('click', () => openSceneSnapshot(snapshot.id));
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'snapshot-remove'; remove.textContent = '×';
-    remove.title = '删除' + snapshot.name + '及其标记，可撤销'; remove.setAttribute('aria-label', remove.title);
-    remove.disabled = !editable();
-    remove.addEventListener('click', () => {
-      if (!editable()) return;
-      const before = annotationEditState();
-      hideTextEditor(); state.drag = null;
-      state.sceneSnapshots = state.sceneSnapshots.filter(entry => entry.id !== snapshot.id);
-      state.annotations = state.annotations.filter(mark => mark.pane !== 'scene' || mark.snapshot_id !== snapshot.id);
-      if (state.snapshot?.id === snapshot.id) { state.snapshot = null; state.sceneView = 'live'; state.paneModes.scene = 'select'; state.mode = toolMode(state.toolPane); }
-      recordAnnotationEdit(before); renderSceneView(); renderAnnotations(); saveDraft();
-      announce('已删除' + snapshot.name + '，可撤销恢复。');
-    });
-    card.append(open, remove); ui.snapshotStrip.append(card);
-  }
+  snapshotGallery?.render();
   workspaceControls?.refresh();
 }
 function updateSnapshotGeometry() {
@@ -3485,7 +3488,7 @@ function pauseTimeline() {
   state.seekGeneration++; state.seeking = false;
   if (state.scrubRequest !== null) cancelAnimationFrame(state.scrubRequest);
   state.scrubRequest = null; state.timelineTarget = null; state.pendingViewId = null;
-  ui.play.textContent = '播放';
+  setActionIcon(ui.play,'play','播放');
 }
 function timelineOverlayUrl(ref, {forceAlign=false}={}) {
   const willAlign = referenceCamera(ref) && (forceAlign || state.alignmentExact || !state.alignedReferenceId);
@@ -3546,7 +3549,7 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=timel
   const imagesReady = !ref || (imageReadyAtUrl(ui.referenceImage, ref.url) &&
     imageReadyAtUrl(ui.compareImage, overlayUrl));
   if (playback && Math.abs(state.time - next) < 1e-7 && imagesReady &&
-      state.sceneView === 'live' && (!ref || state.clipEnabled)) return true;
+      (!ref || state.clipEnabled)) return true;
   if (!playback) {
     state.timelineTarget = next;
     state.pendingViewId = switchingView ? view.clip_id : null;
@@ -3572,16 +3575,15 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=timel
     if (resumedReference) state.clipEnabled = true;
     const previousTime = state.time;
     const changed = Math.abs(state.time - next) > 1e-7;
-    const leavingSnapshot = state.sceneView === 'snapshot';
     state.time = next;
     if (view) state.activeViewId = view.clip_id;
     if (changed || forcePose) applyAnimationTime(next);
     syncTimelineReference({forceAlign:switchingView});
     if (resumedReference || switchingView) renderReferenceStrip();
-    if (leavingSnapshot) { state.sceneView = 'live'; renderSceneView({persist:false}); }
     if (changed || !playback) updateReferenceGeometry();
     state.timelineTarget = null; state.pendingViewId = null;
-    renderTimeline({moments:leavingSnapshot});
+    renderTimeline({moments:switchingView});
+    updateAnnotationHistory();
     if (!playback) scheduleTimelineDraft();
     if (changed || !playback) prefetchTimelineFrames(next, next < previousTime ? -1 : 1);
     return true;
@@ -3678,31 +3680,7 @@ function renderTimeline({moments=true}={}) {
   renderReferenceViews();
   if (!moments) return;
   feedbackEvidence?.refresh();
-  ui.moments.replaceChildren();
-  if (!state.dynamicSnapshots.length) {
-    const hint = document.createElement('span'); hint.className = 'muted';
-    hint.textContent = '圈画时自动保留时刻；也可先点「保留此刻」。最多 8 个。'; ui.moments.append(hint);
-  }
-  for (const moment of state.dynamicSnapshots) {
-    const card = document.createElement('div');
-    card.className = 'moment-card' + (state.snapshot?.id === moment.id && state.sceneView === 'snapshot' ? ' active' : '');
-    const button = document.createElement('button'); button.type = 'button';
-    const count = state.annotations.filter((mark) => markMatchesMoment(mark, moment)).length;
-    button.textContent = frameTimeLabel(moment.time_sec, momentFrameIndex(moment), moment.view_name || referenceViewForMoment(moment)?.name || '') + ' · v' + moment.scene_revision + ' · ' + count + ' 标记';
-    button.addEventListener('click', () => openMoment(moment.id));
-    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×';
-    remove.title = '移除此刻和它的标记'; remove.disabled = !editable();
-    remove.addEventListener('click', () => {
-      if (!editable()) return;
-      const before = annotationEditState();
-      state.annotations = state.annotations.filter((mark) => !markMatchesMoment(mark, moment));
-      state.dynamicSnapshots = state.dynamicSnapshots.filter((entry) => entry.id !== moment.id);
-      if (state.snapshot?.id === moment.id) { state.snapshot = null; state.sceneView = 'live'; }
-      recordAnnotationEdit(before);
-      renderSceneView(); renderAnnotations(); renderTimeline(); saveDraft();
-    });
-    card.append(button, remove); ui.moments.append(card);
-  }
+  renderSceneSnapshots();
 }
 function referencePixelsReady() {
   const ref = activeReference();
@@ -3713,7 +3691,8 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   if (state.seeking || state.pendingViewId) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
   pauseTimeline();
   if (!referencePixelsReady()) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
-  const matching = state.dynamicSnapshots.find((entry) => entry.id === state.snapshot?.id &&
+  const candidates=[state.snapshot,...state.dynamicSnapshots.filter(entry=>entry.id!==state.snapshot?.id)].filter(Boolean);
+  const matching = candidates.find((entry) => Number.isFinite(entry.time_sec) &&
     entry.clip_id === (state.referenceClip?.clip_id || null) && entry.reference_id === (activeReference()?.id || null) &&
     Math.abs(entry.time_sec - state.time) < 1e-6 &&
     (state.sceneView === 'snapshot' || (entry.scene_revision === state.sceneRevision && comparisonMatchesLive(entry) &&
@@ -3721,6 +3700,7 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
       JSON.stringify(entry.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []) &&
       JSON.stringify(entry.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []))));
   if (matching) {
+    if (showSnapshot || state.sceneView!=='snapshot') state.snapshot=matching;
     if (showSnapshot) { state.sceneView = 'snapshot'; renderSceneView(); }
     return matching;
   }
@@ -3750,7 +3730,8 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   }
   const frameIndex = momentFrameIndex(moment);
   if (frameIndex !== null) moment.frame_index = frameIndex;
-  state.dynamicSnapshots.push(moment); state.snapshot = moment;
+  state.dynamicSnapshots.push(moment);
+  if(showSnapshot || state.sceneView!=='snapshot') state.snapshot = moment;
   if (showSnapshot) state.sceneView = 'snapshot';
   renderSceneView(); renderTimeline(); saveDraft();
   return moment;
@@ -4002,7 +3983,7 @@ function updateMode() {
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
   const context = id('snapshot-context');
   context.hidden = state.sceneView !== 'snapshot';
-  context.textContent = state.sceneView === 'snapshot' ? `${state.snapshot?.name || '保留时刻'} · 固定视角` : '';
+  context.textContent = state.sceneView === 'snapshot' ? (state.snapshot?.time_sec!==undefined ? `固定截图 · ${shortTime(state.snapshot.time_sec)}` : `${state.snapshot?.name || '截图'} · 固定视角`) : '';
   renderSceneSnapshots();
   document.body.dataset.tool = state.mode;
   ui.referenceCanvas.dataset.tool = toolMode('reference'); ui.sceneCanvas.dataset.tool = toolMode('scene');
@@ -4085,6 +4066,7 @@ function pointFromPointer(event, canvas) {
 }
 function addAnnotation(annotation) {
   const before = annotationEditState();
+  const moment=annotation.pane==='reference' ? referenceMoment() : state.snapshot;
   const item = {
     id:newId(), pane:annotation.pane, type:annotation.type,
     coordinates:annotation.coordinates
@@ -4100,16 +4082,16 @@ function addAnnotation(annotation) {
   }
   if (annotation.text) item.text = annotation.text;
   if (annotation.points) item.points = annotation.points;
-  if (dynamicEnabled() && state.snapshot?.time_sec !== undefined) {
-    item.frame_id = state.snapshot.id;
-    item.time_sec = state.snapshot.time_sec;
-    item.clip_id = state.snapshot.clip_id;
-    if (state.snapshot.view_id) {
-      item.view_id = state.snapshot.view_id;
-      item.view_name = state.snapshot.view_name;
+  if (dynamicEnabled() && moment?.time_sec !== undefined) {
+    item.frame_id = moment.id;
+    item.time_sec = moment.time_sec;
+    item.clip_id = moment.clip_id;
+    if (moment.view_id) {
+      item.view_id = moment.view_id;
+      item.view_name = moment.view_name;
     }
-    item.scene_revision = state.snapshot.scene_revision;
-    const frameIndex = momentFrameIndex(state.snapshot);
+    item.scene_revision = moment.scene_revision;
+    const frameIndex = momentFrameIndex(moment);
     if (frameIndex !== null) item.frame_index = frameIndex;
   }
   state.annotations.push(item);
@@ -4133,11 +4115,15 @@ function prepareSceneAnnotation() {
   freezeScene();
   return state.sceneView === 'snapshot' && !!state.snapshot;
 }
+function referenceMoment() {
+  const matches=entry=>entry?.time_sec!==undefined && entry.reference_id===state.activeReferenceId && Math.abs(entry.time_sec-state.time)<1e-6;
+  return matches(state.snapshot) ? state.snapshot : state.dynamicSnapshots.findLast(matches);
+}
 function annotationVisibleInPane(annotation, pane) {
   if (annotation.pane !== pane) return false;
   if (pane === 'scene') return state.sceneView === 'snapshot' && annotation.snapshot_id === state.snapshot?.id;
   if (annotation.reference_image_id !== state.activeReferenceId) return false;
-  return !annotation.frame_id || (!state.playing && annotation.frame_id === state.snapshot?.id && Math.abs(annotation.time_sec - state.time) < 1e-6);
+  return !annotation.frame_id || (!state.playing && state.dynamicSnapshots.some(entry=>entry.id===annotation.frame_id) && Math.abs(annotation.time_sec - state.time) < 1e-6);
 }
 function selectedAnnotation() {
   const mark = state.annotations.find(mark => mark.id === state.selectedAnnotationId);
@@ -4260,6 +4246,7 @@ function annotationPointerDown(event, pane) {
   const mode = toolMode(pane);
   if (mode === 'select') { selectAnnotationFromPointer(event,pane); return; }
   if (pane === 'reference' && !activeReference()) return;
+  pauseTimeline();
   const canvas = event.currentTarget;
   // Preserve the clicked pixel before saving a moment can resize the timeline.
   const point = pointFromPointer(event, canvas);
@@ -5465,6 +5452,10 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
+  snapshotGallery=setupSnapshotGallery({getItems:galleryItems,
+    getTimeline:()=>({duration:timelineDuration(),viewId:state.referenceClip ? referenceView()?.clip_id : null}),
+    onOpen:id=>state.dynamicSnapshots.some(entry=>entry.id===id) ? openMoment(id) : openSceneSnapshot(id),
+    onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   minimalLayout = setupMinimalLayout({getState:() => state});
   setupTheme({onChange:applyTheme});

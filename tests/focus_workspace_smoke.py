@@ -1394,7 +1394,7 @@ def main():
                 control(page, "#snapshot-button").click()
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
                 assert draft(page)["snapshot"] == moment
-                expect(page.locator(".moment-card")).to_have_count(1)
+                expect(page.locator(".snapshot-card[data-kind=moment]")).to_have_count(1)
                 control(page, "#browse-button").click()
                 control(page, "#timeline-prev").click()
                 control(page, "#capture-scene-button").click()
@@ -1405,7 +1405,7 @@ def main():
                 r = page.locator("#scene-annotations").bounding_box()
                 page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 expect(page.locator("#annotation-count")).to_have_text("2")
-                page.locator(".moment-card button").first.click()
+                page.locator(".snapshot-card[data-kind=moment] .snapshot-open").first.click()
                 expect(page.locator("#timeline-seek")).to_have_value(saved_time)
                 expect(page.locator("#snapshot-button")).to_have_attribute("aria-pressed", "true")
                 assert draft(page)["snapshot"] == moment
@@ -1414,7 +1414,7 @@ def main():
                 page.mouse.click(r["x"] + r["width"] * .65, r["y"] + r["height"] * .4)
                 expect(page.locator("#annotation-count")).to_have_text("1")
                 assert draft(page)["annotations"][0]["frame_id"] == other_moment
-                expect(page.locator(".moment-card")).to_have_count(2)
+                expect(page.locator(".snapshot-card[data-kind=moment]")).to_have_count(2)
                 passed("eraser removes only the active dynamic frame's marks and preserves both evidence frames")
                 control(page, "#browse-button").click()
                 control(page, "#clear-round").click()

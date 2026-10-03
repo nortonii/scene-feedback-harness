@@ -76,7 +76,7 @@ html.theme-transitioning :where(body, .topbar, .tool-panel, .pane-head, .stage,
 [data-theme="dark"] input[type="range"] { accent-color: #c9ccc8; }
 [data-theme="dark"] ::selection { background: #c6d4d435; color: var(--ink); }
 [data-theme="dark"] :where(.conversation, #chat-dock-body, .chat-approvals, dialog,
-  .reference-strip, .scene-snapshot-strip, .moment-strip) { scrollbar-color: #747a8266 transparent; }
+  .reference-strip, .scene-snapshot-strip) { scrollbar-color: #747a8266 transparent; }
 [data-theme="dark"] :where(.popover-content, .prompt-mentions, .toast, .text-editor) {
   background: var(--surface);
   border-color: var(--line);
