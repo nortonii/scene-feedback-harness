@@ -156,7 +156,6 @@ let minimalLayout = null;
 let promptMentions = null;
 let promptAttachments = null;
 const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference});
-let mentionSceneCache = null;
 let workspaceControls = null;
 let immersiveWorkspace = null;
 let workspaceChrome = null;
@@ -2233,6 +2232,7 @@ function renderSelection() {
   }
   renderObjectList();
   ui.frame.disabled = !editable() || !state.selectedId;
+  promptMentions?.refresh();
 }
 function renderObjectList() {
   ui.objectList.replaceChildren();
@@ -4467,6 +4467,7 @@ function drawOverlays() {
 }
 function renderAnnotations() {
   ensureAnnotationNames();
+  promptMentions?.refresh();
   updateSubmitLabel();
   ui.annotationList.replaceChildren();
   ui.annotationCount.textContent = String(state.annotations.length);
@@ -4884,130 +4885,46 @@ function selectedPromptReference() {
       model_url:item.url || null,scene_revision:state.sceneRevision}
     : {kind:'object',objectId:item.id,label:item.name || item.id};
 }
-function promptMentionImageSource(pane) {
-  const snapshot=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot : null;
-  return JSON.stringify(pane === 'reference'
-    ? [state.sessionId,activeReference()?.id,activeReference()?.url,referenceView()?.clip_id]
-    : [state.sessionId,state.sceneRevision,state.sceneView,snapshot?.id,snapshot?.scene_revision,
-      dynamicEnabled() ? state.time : null,clipReference()?.id,referenceView()?.clip_id]);
-}
-function mentionSceneNodes() {
-  const roots=state.sceneObjects.map((item) => state.objectNodes.get(item.id)?.userData.gltfRoot || null);
-  if (mentionSceneCache?.revision === state.sceneRevision && mentionSceneCache.roots.length === roots.length &&
-      roots.every((root,index) => root === mentionSceneCache.roots[index])) return mentionSceneCache.nodes;
-  const nodes=[];
-  // Traverse only when models change, never for each query character. Bound
-  // pathological imported trees while retaining named, addressable nodes.
-  let visited=0;
-  state.sceneObjects.forEach((item,index) => {
-    const root=roots[index];
-    if (!root) return;
-    const pending=[...root.children];
-    while (pending.length && visited < 20000 && nodes.length < 6000) {
-      const node=pending.pop(); visited++;
-      pending.push(...node.children);
-      if (!node.name?.trim() && !node.userData?.semantic_id && !node.userData?.stable_id) continue;
-      const reference=nodeReference(item.id,node,'part');
-      if (!reference?.node_path.length) continue;
-      nodes.push({reference,label:reference.node_name || reference.semantic_id || reference.stable_id || '节点 ' + reference.node_path.join('/'),
-        category:reference.node_path.length === 1 ? '物体' : '部件',modelName:item.name || item.id,
-        model_url:item.url || null,scene_revision:state.sceneRevision});
-    }
-  });
-  mentionSceneCache={revision:state.sceneRevision,roots,nodes};
-  return nodes;
-}
 function getPromptMentionCandidates() {
   if (!editable()) return [];
-  const sessionId=state.sessionId, candidates=[], keys=new Set();
-  const add=(item) => {
-    if (keys.has(item.key)) return;
-    keys.add(item.key); candidates.push({...item,sessionId});
-  };
-  const addNode=(node,label,source={},context='') => {
-    const item=sceneObject(node?.parent_object_id);
-    if (!item || !node.node_path?.length || !resolveSceneNode(node)) return;
-    const modelURL=source.model_url ?? item.url ?? null;
-    if (modelURL !== (item.url || null)) return;
-    const key=node.parent_object_id+':'+node.node_path.join('/');
-    add({key:'node:'+key,kind:'node',label:label || node.node_name || node.semantic_id || node.stable_id || key,
-      detail:(context || (node.node_path.length === 1 ? '物体' : '部件'))+' · '+(item.name || item.id)+' · '+node.node_path.join('/'),
-      search:['物品 对象 部件 节点 node part item',key,node.node_name,node.semantic_id,node.stable_id].join(' '),
-      descriptor:{kind:'node',node:structuredClone(node),label:label || node.node_name || key,
-        model_url:modelURL,scene_revision:source.scene_revision ?? state.sceneRevision}});
-  };
+  const sessionId=state.sessionId, candidates=[];
   const selection=selectedPromptReference();
-  if (selection?.kind === 'node') addNode(selection.node,selection.label,selection,'当前选中部件');
-  for (const node of state.referencedSceneNodes) addNode(node,node.node_name || node.semantic_id || node.stable_id,node,'已引用部件');
-  for (const item of state.sceneObjects) add({key:'object:'+item.id,kind:'object',label:item.name || item.id,
-    detail:'对象 · '+item.id,search:'物体 物品 对象 object item '+item.id,
-    descriptor:{kind:'object',objectId:item.id,label:item.name || item.id}});
-  for (const node of mentionSceneNodes()) addNode(node.reference,node.label,node,node.category);
+  const item=sceneObject(state.selectedId);
+  if (selection && item && (selection.kind !== 'node' || resolveSceneNode(selection.node))) {
+    const node=selection.kind === 'node' ? selection.node : null;
+    const key=node ? node.parent_object_id+':'+node.node_path.join('/') : selection.objectId;
+    const category=node ? state.selectionLevel === 'item' ? '物体' : '部件' : '物体';
+    candidates.push({key:selection.kind+':'+key,kind:selection.kind,sessionId,label:selection.label,
+      detail:'当前选中'+category+' · '+item.id+(node ? ' · '+node.node_path.join('/') : ''),
+      search:['当前选中 物体 物品 对象 部件 节点 object item node part',key,item.name,node?.node_name,node?.semantic_id,node?.stable_id].join(' '),
+      descriptor:{...selection,model_url:item.url || null}});
+  }
+  // Keep the whole unsent round, including marks in other source views/frames
+  // or saved screenshots. Source visibility never narrows these references.
   state.annotations.forEach((mark,index) => {
     const number=circled[Number(mark.group_id)] || String(index+1), time=annotationTimeLabel(mark);
     const label=mark.name || '标记'+number+' · '+(labels[mark.type] || '标记');
-    add({key:'annotation:'+mark.id,kind:'annotation',label,
+    candidates.push({key:'annotation:'+mark.id,kind:'annotation',sessionId,label,
       detail:(mark.pane === 'reference' ? '参考图' : '场景')+(time ? ' · '+time : '')+(mark.text ? ' · '+mark.text : ''),
       search:['标注 标记 提示 annotation mark',labels[mark.type],mark.name,index+1,mark.group_id,mark.id,mark.text,mark.object_id,mark.reference_image_id].join(' '),
       descriptor:{kind:'annotation',annotationId:mark.id,label:annotationReferenceLabel(mark)}});
   });
-  if (state.imageReferencesSupported) {
-    for (const pane of ['reference','scene']) {
-      const reason=promptImageUnavailable(pane), ref=activeReference();
-      const snapshot=pane === 'scene' && state.sceneView === 'snapshot' ? state.snapshot : null;
-      const time=pane === 'reference' ? ref?.time_sec : snapshot?.time_sec ?? (dynamicEnabled() ? state.time : null);
-      add({key:'current-image:'+pane,kind:'current-image',label:pane === 'reference' ? '左侧参考图' : '右侧渲染图',
-        detail:reason || (pane === 'reference' ? ref?.name || ref?.id || '当前参考图' : '版本 '+(snapshot?.scene_revision ?? state.sceneRevision))+
-          (Number.isFinite(time) ? ' · '+time.toFixed(3)+' s' : '')+' · 选中时固定截图',
-        search:'图片 图像 截图 image photo screenshot '+(pane === 'reference' ? '左图 参考 reference '+(ref?.name || '')+' '+(ref?.id || '') : '右图 场景 scene 渲染'),
-        disabled:reason,descriptor:{kind:'capture-image',pane,source:promptMentionImageSource(pane)}});
-    }
-    state.imageRefs.filter(entry=>promptText().includes(imageToken(entry.id))).forEach((entry,index) => add({key:'saved-image:'+entry.id,kind:'saved-image',label:entry.label,
-      detail:'已保存图片 '+(index+1)+' · 固定截图',search:'图片 图像 已保存 image photo screenshot '+entry.id+' '+(index+1),
-      descriptor:{kind:'saved-image',imageId:entry.id}}));
-  }
-  for (const job of state.humanJobs) {
-    const frame=humanCurrentFrame(job);
-    if (job.status !== 'completed' || job.session_id !== state.sessionId || !frame || frame.reference_id !== activeReference()?.id) continue;
-    add({key:'pose:'+job.job_id+':'+frame.reference_id,kind:'pose',label:humanJobName(job),
-      detail:poseEvidenceLabel(job)+' · '+poseFrameLabel(frame,job.reference_name),
-      search:'人体 骨架 关键点 人体证据 pose human skeleton '+humanJobNumber(job)+' '+job.job_id+' '+frame.reference_id,
-      descriptor:{kind:'pose',jobId:job.job_id,referenceId:frame.reference_id}});
-  }
-  if (state.poseCorrectionsSupported) for (const sample of state.poseEdits.filter(validPoseEdit)) {
-    add({key:'pose-edit:'+sample.id,kind:'pose-edit',label:'手部修正 · '+(sample.label || sample.reference_id),
-      detail:'人工二维修正 · '+sample.edits.length+' 点',
-      search:'手部 修正 关键点 草稿 pose_edit correction manual '+sample.id+' '+sample.job_id+' '+sample.reference_id+' '+sample.edits.map((edit) => edit.name).join(' '),
-      descriptor:{kind:'pose-edit',editId:sample.id,jobId:sample.job_id,referenceId:sample.reference_id,imageSha256:sample.image_sha256}});
-  }
   return candidates;
 }
 function insertPromptMention(candidate) {
   if (!editable() || candidate.sessionId !== state.sessionId || candidate.disabled) return false;
   const descriptor=candidate.descriptor;
-  if (descriptor.kind === 'capture-image') {
-    if (descriptor.source !== promptMentionImageSource(descriptor.pane)) throw new Error('画面已切换，请重新选择当前图片。');
-    return addPromptImageReference(capturePromptImage(descriptor.pane));
-  }
-  if (descriptor.kind === 'saved-image') {
-    const entry=state.imageRefs.find((item) => item.id === descriptor.imageId);
-    if (!entry) throw new Error('这张保存图片已移除，请重新引用图片。');
-    return addPromptImageReference(entry);
-  }
-  if (descriptor.kind === 'pose') {
-    const job=state.humanJobs.find((item) => item.job_id === descriptor.jobId && item.status === 'completed' && item.session_id === state.sessionId);
-    const frame=job && humanCurrentFrame(job);
-    if (frame?.reference_id !== descriptor.referenceId || activeReference()?.id !== descriptor.referenceId) throw new Error('人体来源帧已切换，请重新选择当前帧结果。');
-    return insertHumanPoseReference(job,frame);
-  }
-  if (descriptor.kind === 'pose-edit') {
-    if (!state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面。');
-    const sample=state.poseEdits.find((item) => item.id === descriptor.editId);
-    if (!validPoseEdit(sample) || sample.job_id !== descriptor.jobId || sample.reference_id !== descriptor.referenceId || sample.image_sha256 !== descriptor.imageSha256) throw new Error('这份修正草稿已失效，请重新选择。');
-    collectPoseEdits(promptText(),state.poseEdits);
-    return insertNoteReference('手部修正（'+sample.label+'）',poseEditToken(sample.id));
-  }
-  if (descriptor.kind === 'node' && !resolveSceneNode(descriptor.node)) throw new Error('这处部件已失效，请重新选择。');
+  if (descriptor.kind === 'annotation') return insertPromptDragReference(descriptor);
+  if (!['object','node'].includes(descriptor.kind)) return false;
+  const selection=selectedPromptReference();
+  const item=sceneObject(state.selectedId);
+  const sameTarget=selection?.kind === descriptor.kind && (descriptor.kind === 'object'
+    ? selection.objectId === descriptor.objectId
+    : selection.node.parent_object_id === descriptor.node.parent_object_id &&
+      JSON.stringify(selection.node.node_path) === JSON.stringify(descriptor.node.node_path) &&
+      selection.node.node_name === descriptor.node.node_name && selection.node.stable_id === descriptor.node.stable_id &&
+      selection.node.semantic_id === descriptor.node.semantic_id && !!resolveSceneNode(descriptor.node));
+  if (!sameTarget || !item || (item.url || null) !== descriptor.model_url) throw new Error('当前选择已变化，请重新选择要引用的物体或部件。');
   return insertPromptDragReference(descriptor);
 }
 function insertPromptDragReference(descriptor) {

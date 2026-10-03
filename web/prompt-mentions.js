@@ -70,7 +70,8 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
     const next=findPromptMentionRange(input.value,input.selectionStart,input.selectionEnd);
     if (composing || document.activeElement !== input || !isEnabled() || !next || identity(next) === dismissed) { close(); return; }
     range={...next,value:input.value};
-    const all=filterPromptMentions(getCandidates(),range.query);
+    const available=getCandidates();
+    const all=filterPromptMentions(available,range.query);
     candidates=all.slice(0,80);
     if (!candidates.some((item) => item.key === activeKey && !item.disabled)) activeKey=candidates.find((item) => !item.disabled)?.key || null;
     const previousScroll=list.scrollTop;
@@ -88,7 +89,8 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
       button.addEventListener('click',() => choose(item));
       list.append(button);
     });
-    status.textContent=!all.length ? '没有匹配的引用' : all.length+' 个引用'+(all.length > 80 ? '，请继续输入名称缩小范围' : ' · ↑↓ 选择，Enter 插入，Esc 关闭');
+    status.textContent=!available.length && !range.query ? '先选中物体或添加标记'
+      : !all.length ? '没有匹配的引用' : all.length+' 个引用'+(all.length > 80 ? '，请继续输入名称缩小范围' : ' · ↑↓ 选择，Enter 插入，Esc 关闭');
     menu.classList.remove('hidden'); input.setAttribute('aria-expanded','true');
     paintActive(); list.scrollTop=previousScroll; position();
   }

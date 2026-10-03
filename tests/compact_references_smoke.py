@@ -58,7 +58,16 @@ def main():
                 page.on('request', lambda request: submissions.append(request.post_data_json)
                     if request.method == 'POST' and request.url.endswith('/feedback') else None)
                 page.route('**/app.js', lambda route: route.fulfill(status=200,
-                    content_type='text/javascript', body=(ROOT / 'web/app.js').read_text() + HOOK))
+                    content_type='text/javascript', body=(ROOT / 'web/app.js').read_text() + HOOK + '''
+__appearanceCheck.selectMentionTarget = kind => {
+  const item=state.sceneObjects[0], root=state.objectNodes.get(item.id)?.userData.gltfRoot;
+  if (kind === 'object') { selectObject(item.id); return; }
+  const node=root?.children.find(child=>child.name);
+  if (!node) throw new Error('fixture has no named scene node');
+  state.selectionLevel='part';
+  selectObject(item.id,nodeReference(item.id,node,'part'),node);
+};
+'''))
                 page.goto(server.browser_url(session['session_id']))
                 wait_ready(page)
                 page.wait_for_function('window.__appearanceCheck?.state.workspaceReady && !__appearanceCheck.state.sceneLoading')
@@ -76,6 +85,8 @@ def main():
                     assert reference.name not in value, value
 
                 def mention(kind):
+                    if kind in ('object','node'):
+                        page.evaluate('__appearanceCheck.selectMentionTarget',kind)
                     note.focus()
                     note.press('Control+End')
                     note.press('End')
