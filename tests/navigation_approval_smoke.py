@@ -96,7 +96,7 @@ def main():
     page.evaluate('__navCheck.refreshWorkspace()')
     control(page, '#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
     def choose(view):
-      if not page.locator('.view-popover').get_attribute('open') == '': control(page, '.view-popover summary').click()
+      if not page.locator('.view-popover').get_attribute('open') == '': control(page, '.view-popover > summary').click()
       control(page, f'[data-camera-view="{view}"]').click()
     geometry=page.evaluate('__navCheck.geometry()')
     # Six precise directions and an opposite-side transition without crossing the pivot.
@@ -109,7 +109,7 @@ def main():
       d=page.evaluate('(()=>{const c=__navCheck;return c.camera.position.clone().sub(c.controls.target).normalize().toArray()})()')
       assert d[axis]*sign>.999,(view,d)
     choose('iso');page.wait_for_function('!__navCheck.controls.transition')
-    control(page, '.view-popover summary').click();control(page, '#frame-all').click();page.wait_for_function('!__navCheck.controls.transition')
+    control(page, '.view-popover > summary').click();control(page, '#frame-all').click();page.wait_for_function('!__navCheck.controls.transition')
     page.wait_for_timeout(150)
     # Pick an actual visible object with a real double click.
     xy=page.evaluate('''()=>{const c=document.querySelector('#viewport canvas'),r=c.getBoundingClientRect();for(let y=.35;y<.85;y+=.1)for(let x=.2;x<.8;x+=.1){const p={clientX:r.x+r.width*x,clientY:r.y+r.height*y};if(__navCheck.pickScene(p))return [p.clientX,p.clientY];}throw Error('No visible scene object');}''')
@@ -133,7 +133,7 @@ def main():
     assert max(abs(a-b) for key in ('p','t','up') for a,b in zip(after_typing[key],before_typing[key]))<.005,(before_typing,after_typing)
     control(page, '#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
     print('PASS six directions, smooth opposite view, double-click pivot, screen pan/zoom, typing guard and unchanged geometry',flush=True)
-    control(page, '.view-popover summary').click();control(page, '#free-rotation').click()
+    control(page, '.view-popover > summary').click();control(page, '#free-rotation').click()
     assert page.evaluate('__navCheck.controls.freeRotation')
     box=page.locator('#viewport canvas').bounding_box()
     x,y=box['x']+box['width']*.5,box['y']+box['height']*.45
@@ -145,7 +145,7 @@ def main():
     assert page.evaluate('__navCheck.controls.freeRotation')
     restored=page.evaluate('__navCheck.position()')
     assert max(abs(a-b) for a,b in zip(after['up'],restored['up']))<.005,(after,restored)
-    control(page, '.view-popover summary').click();control(page, '#upright-camera').click()
+    control(page, '.view-popover > summary').click();control(page, '#upright-camera').click()
     assert page.evaluate('__navCheck.position().up')==[0,0,1]
     assert not page.evaluate('__navCheck.controls.freeRotation')
     control(page, '#capture-scene-button').click()
@@ -158,7 +158,7 @@ def main():
     control(page, '#browse-button').click()
     page.set_viewport_size({'width':390,'height':844});page.wait_for_timeout(250)
     expect(page.locator('#camera-navigation')).to_be_hidden()
-    control(page, '.view-popover summary').click()
+    control(page, '.view-popover > summary').click()
     r=page.locator('.view-popover .popover-content').bounding_box()
     assert r['x']>=0 and r['x']+r['width']<=391
     assert page.locator('#scene-stage #camera-navigation').count()==0
@@ -185,12 +185,12 @@ def main():
     pose=page.evaluate('__navCheck.position()');delta=[a-b for a,b in zip(pose['p'],pose['t'])]
     assert delta[1]>0 and abs(delta[0])+abs(delta[2])<abs(delta[1])*.001,delta
     geometry=page.evaluate('__navCheck.geometry()')
-    control(page, '.view-popover summary').click();page.locator('#ground-axis').select_option('z')
+    control(page, '.view-popover > summary').click();page.locator('#ground-axis').select_option('z')
     page.wait_for_function('!__navCheck.controls.transition');assert page.evaluate('__navCheck.position().up')==[0,0,1]
     page.reload();page.wait_for_function('window.__navCheck && !__navCheck.state.sceneLoading')
     assert page.evaluate('__navCheck.position().up')==[0,0,1]
     assert page.evaluate('__navCheck.state.groundAxis')=='z'
-    control(page, '.view-popover summary').click();page.locator('#ground-axis').select_option('auto')
+    control(page, '.view-popover > summary').click();page.locator('#ground-axis').select_option('auto')
     page.wait_for_function('!__navCheck.controls.transition');assert page.evaluate('__navCheck.position().up')==[0,1,0]
     assert page.evaluate('__navCheck.geometry()')==geometry
     print('PASS standard Y-up GLB, legacy Z-up demo, axis override persistence and unchanged model transforms',flush=True)

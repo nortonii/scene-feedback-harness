@@ -40,6 +40,11 @@ def control(page, selector):
         if sidebar.get_attribute('data-phase') != 'closing':
             page.locator('#close-projects').click()
         expect(sidebar).not_to_be_visible()
+    if locator.evaluate("el => !!el.closest('#prompt-attach-menu')"):
+        if not page.locator('#chat-dock').is_visible():
+            page.locator('#chat-launcher').click()
+        if page.locator('#prompt-attach-button').get_attribute('aria-expanded') != 'true':
+            page.locator('#prompt-attach-button').click()
     if locator.evaluate("el => !!el.closest('#annotation-tool-panel')"):
         if not page.locator('#annotation-tool-panel').is_visible():
             open_annotation_tools(page)

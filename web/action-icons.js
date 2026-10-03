@@ -35,5 +35,4 @@ export function setupActionIcons() {
   }
   for(const element of document.querySelectorAll('[data-icon]')) element.replaceWith(actionIcon(element.dataset.icon));
   for(const element of document.querySelectorAll('[data-icon-before]')) element.prepend(actionIcon(element.dataset.iconBefore));
-  for(const id of ['drag-reference-image','drag-scene-image']) setActionIcon(document.getElementById(id),'attach','加入会话');
 }

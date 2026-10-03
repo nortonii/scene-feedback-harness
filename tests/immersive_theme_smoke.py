@@ -177,7 +177,7 @@ def main():
                 dark_background = page.evaluate('__appearanceCheck.background()')
                 assert dark_background != light_background
                 assert int(dark_background[0:2], 16) < int(light_background[0:2], 16)
-                for selector in ('#theme-toggle', '#immersive-toggle', '.view-popover summary'):
+                for selector in ('#theme-toggle', '#immersive-toggle', '.view-popover > summary'):
                     colors = contrast(page, selector)
                     assert colors['contrast'] >= 4.5, (selector, colors)
                     assert colors['bg'] < .15, (selector, colors)
@@ -248,16 +248,16 @@ def main():
                     assert_full_scene(page)
                     for selector in ('#projects-dialog-button',
                                      '#immersive-reference-toggle', '#browse-button',
-                                     '#capture-scene-button', '.view-popover summary', '#chat-launcher'):
+                                     '#capture-scene-button', '.view-popover > summary', '#chat-launcher'):
                         assert_inside(page, selector)
                     control(page, '#immersive-reference-toggle').click()
                     settle(page)
                     assert_inside(page, '.reference-pane')
                     page.screenshot(path=str(out / ('mobile-reference.png' if width == 390 else 'desktop-reference.png')))
                     control(page, '#immersive-reference-toggle').click()
-                    control(page, '.view-popover summary').click()
+                    control(page, '.view-popover > summary').click()
                     assert_inside(page, '.view-popover .popover-content')
-                    control(page, '.view-popover summary').click()
+                    control(page, '.view-popover > summary').click()
                 control(page, '#theme-toggle').click()
                 settle(page)
                 expect(page.locator('html')).to_have_attribute('data-theme', 'light')
@@ -333,11 +333,15 @@ def main():
                 page.set_viewport_size({'width':1440,'height':900});settle(page)
                 control(page, '#browse-button').click()
                 page.mouse.move(40,650);page.wait_for_timeout(200)
+                expect(page.locator('#scene-stage #scene-hint')).to_have_count(0)
+                control(page,'.view-popover > summary').click()
+                page.locator('.camera-help summary').click()
                 hint=bounds(page,'#scene-hint')
                 assert hint['x'] >= 0 and hint['x']+hint['width'] <= 1440
                 assert page.locator('#scene-hint').evaluate("el => getComputedStyle(el).transform === 'none'")
                 expect(page.locator('#scene-hint')).to_contain_text('左拖旋转')
-                page.screenshot(path=str(out/'scene-hint-uncropped.png'))
+                page.screenshot(path=str(out/'camera-help.png'))
+                page.keyboard.press('Escape')
                 control(page, '#comparison-layout-button').click();settle(page)
                 expect(page.locator('#reference-pane > #timeline-panel')).to_be_visible()
                 assert bounds(page,'#timeline-panel')['width'] < 740

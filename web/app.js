@@ -5,6 +5,7 @@ import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMo
 import { setupMinimalLayout } from './layout.js';
 import { setupImmersive } from './immersive.js';
 import { setupTheme } from './theme.js';
+import {setupPromptAttachments} from './prompt-attachments.js';
 import {setupWorkspaceSidebar} from './workspace-sidebar.js';
 import {setupSnapshotGallery} from './snapshot-gallery.js';
 import { setupFeedbackEvidence, savedEvidence } from './feedback-evidence.js';
@@ -90,7 +91,6 @@ const ui = {
   referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
   mentionMenu:id('prompt-mentions'), mentionList:id('prompt-mention-list'), mentionStatus:id('prompt-mention-status'),
-  dragReference:id('drag-reference-image'), dragScene:id('drag-scene-image'),
   imageRefs:id('prompt-image-refs'), imagePreview:id('prompt-image-preview-dialog'),
   imagePreviewTitle:id('prompt-image-preview-title'), imagePreviewImage:id('prompt-image-preview-image'),
   imagePreviewToggle:id('prompt-image-preview-toggle'),
@@ -152,6 +152,7 @@ const frameImages = {
 
 let minimalLayout = null;
 let promptMentions = null;
+let promptAttachments = null;
 let mentionSceneCache = null;
 let workspaceControls = null;
 let immersiveWorkspace = null;
@@ -442,7 +443,7 @@ function setSession(session) {
   if (state.sessionId !== session.session_id) {
     annotationHistory.clear(); promptDrag = null;
     state.annotationNameCounters = {}; state.selectedAnnotationId = null;
-    promptMentions?.close();
+    promptMentions?.close();promptAttachments?.close();
     state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
   }
   state.sessionId = session.session_id;
@@ -1100,7 +1101,7 @@ async function switchTask(threadId) {
 function renderWorkspace(workspace) {
   state.poseCorrectionsSupported = workspace.pose_corrections_supported === true;
   state.imageReferencesSupported = workspace.image_references_supported === true;
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   promptMentions?.refresh();
   state.networkError = null;
   state.projectId = workspace.project_id || state.projectId;
@@ -2442,7 +2443,7 @@ function renderSceneSnapshots() {
   workspaceControls?.refresh();
 }
 function updateSnapshotGeometry() {
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   if (!state.snapshot) return;
   // Size a new screenshot immediately. Its image can still be decoding when
   // the user's first drag starts, or the previous image can have another aspect.
@@ -3233,7 +3234,7 @@ function bindHumanPoseEvents() {
   },5000);
 }
 function updateReferenceGeometry() {
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   const image = ui.referenceImage;
   const stage = ui.referenceStage;
   if (!image.naturalWidth || !image.naturalHeight || !stage.clientWidth || !stage.clientHeight) return;
@@ -3661,7 +3662,7 @@ function feedbackEvidenceData() {
     description:`本轮所有保留图片和标记都会发送；引用用于说明具体目标，并不筛选其他附件。${scope}缩略图为原图预览，提交时附带标注图；发送后可从聊天记录查看保存的附件。`};
 }
 function renderTimeline({moments=true}={}) {
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   renderPoseEditor();
   const enabled = dynamicEnabled();
   ui.timeline.classList.toggle('hidden', !enabled);
@@ -3983,7 +3984,7 @@ function updateSceneHint() {
 function updateMode() {
   feedbackEvidence?.refresh();
   updateAnnotationHistory();
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   ui.frame.disabled = !editable() || !state.selectedId;
   ui.resetView.disabled = !editable();
   for (const button of [ui.savedSnapshot, ui.browse, ui.snapshotButton]) button.disabled = !editable();
@@ -4662,19 +4663,14 @@ function promptImageUnavailable(pane) {
   if (comparison?.enabled && comparison.opacity > 0 && !imageReadyAtUrl(ui.snapshotCompareImage,comparison.data_url)) return '截图的叠图参考正在加载，请稍后再引用。';
   return null;
 }
-function renderPromptDragControls() {
-  for (const [pane,button] of [['reference',ui.dragReference],['scene',ui.dragScene]]) {
-    if (!button) continue;
-    const reason = promptImageUnavailable(pane);
-    button.disabled = !!reason;
-    button.title = reason || '拖到提示，也可点击引用当前' + (pane === 'reference' ? '参考图' : '渲染图');
-  }
+function renderPromptReferenceControls() {
+  promptAttachments?.refresh();
   promptMentions?.refresh();
 }
-function capturePromptImage(pane) {
-  const reason = promptImageUnavailable(pane);
+function capturePromptImage(pane, saved=null) {
+  const reason = saved ? (!editable() || !state.imageReferencesSupported ? '当前暂时无法引用图片。' : null) : promptImageUnavailable(pane);
   if (reason) throw new Error(reason);
-  // Capture synchronously at dragstart. The pixels and metadata in this object
+  // Capture at selection time. The pixels and metadata in this object
   // never follow later camera movements, source seeks, or scene publications.
   pauseTimeline();
   const entry = {id:newId().replace(/-/g,''), pane};
@@ -4693,19 +4689,20 @@ function capturePromptImage(pane) {
       entry.label = promptImageLabel('参考图 · ' + frameTimeLabel(ref.time_sec,index,view.name || ''));
     }
     marks = state.annotations.filter((mark) => mark.pane === 'reference' && mark.reference_image_id === ref.id &&
-      (!mark.frame_id || mark.frame_id === state.snapshot?.id && Math.abs(mark.time_sec-state.time) <= 1e-6));
+      (!mark.frame_id || Math.abs(mark.time_sec-(ref.time_sec ?? state.time)) <= 1e-6));
   } else {
-    const snapshot = state.sceneView === 'snapshot' ? state.snapshot : null;
+    const snapshot = saved?.snapshot || (state.sceneView === 'snapshot' ? state.snapshot : null);
     entry.scene_revision = snapshot?.scene_revision ?? state.sceneRevision;
     entry.selected_object_ids = [...(snapshot?.selected_object_ids || (state.selectedId ? [state.selectedId] : []))];
     entry.selected_scene_nodes = structuredClone(snapshot?.selected_scene_nodes || (state.selectedSceneNode ? [state.selectedSceneNode] : []));
     entry.label = '场景 · 版本 ' + entry.scene_revision;
     if (snapshot) {
-      source = ui.snapshotImage;
+      source = saved?.source || ui.snapshotImage;
+      if(snapshot.name) entry.label=snapshot.name+' · 版本 '+entry.scene_revision;
       entry.original_data_url = snapshot.data_url;
       entry.camera = structuredClone(snapshot.camera);
       if (snapshot.comparison?.enabled && snapshot.comparison.opacity > 0) comparison=snapshot.comparison;
-      marks = state.annotations.filter((mark) => mark.pane === 'scene' && mark.snapshot_id === snapshot.id);
+      marks = saved?.marks || state.annotations.filter((mark) => mark.pane === 'scene' && mark.snapshot_id === snapshot.id);
       if (Number.isFinite(snapshot.time_sec)) {
         entry.time_sec = snapshot.time_sec;
         if (snapshot.clip_id) entry.clip_id = snapshot.clip_id;
@@ -4746,7 +4743,7 @@ function capturePromptImage(pane) {
   if (comparison) {
     const rect=comparison.rect;
     context.globalAlpha=comparison.opacity/100;
-    context.drawImage(ui.snapshotCompareImage,rect.x*canvas.width,rect.y*canvas.height,rect.width*canvas.width,rect.height*canvas.height);
+    context.drawImage(saved?.comparisonImage || ui.snapshotCompareImage,rect.x*canvas.width,rect.y*canvas.height,rect.width*canvas.width,rect.height*canvas.height);
     context.globalAlpha=1;
   }
   if (marks.length || comparison) {
@@ -4754,6 +4751,17 @@ function capturePromptImage(pane) {
     entry.annotated_data_url = canvas.toDataURL('image/jpeg',.88);
   }
   return entry;
+}
+async function addSavedPromptImage(snapshotId,isCurrent) {
+  const original=[...state.sceneSnapshots,...state.dynamicSnapshots].find(item=>item.id===snapshotId);
+  if(!original) throw new Error('这张截图已移除，请重新选择。');
+  const sessionId=state.sessionId,snapshot=structuredClone(original);
+  const marks=structuredClone(state.annotations.filter(mark=>mark.pane==='scene' && mark.snapshot_id===snapshotId));
+  const comparison=snapshot.comparison?.enabled && snapshot.comparison.opacity>0;
+  const [source,comparisonImage]=await Promise.all([loadImage(snapshot.data_url),comparison?loadImage(snapshot.comparison.data_url):null]);
+  if(!isCurrent() || state.sessionId!==sessionId) return false;
+  if(![...state.sceneSnapshots,...state.dynamicSnapshots].some(item=>item.id===snapshotId)) throw new Error('这张截图已移除，请重新选择。');
+  return addPromptImageReference(capturePromptImage('scene',{snapshot,source,comparisonImage,marks}));
 }
 function addPromptImageReference(entry) {
   if (!editable()) return false;
@@ -4798,7 +4806,7 @@ function renderPromptImageReferences() {
     remove.addEventListener('click',() => {
       if (!editable()) return;
       const token = imageToken(entry.id);
-      ui.note.value = ui.note.value.split(token).join('');
+      ui.note.value = ui.note.value.split(entry.label+' '+token).join('').split(token).join('');
       state.imageRefs = state.imageRefs.filter((item) => item.id !== entry.id);
       renderPromptImageReferences(); saveDraft(); ui.note.focus();
     });
@@ -4979,11 +4987,6 @@ function bindPromptDrag(element,getDescriptor,kind) {
   });
 }
 function bindPromptReferenceEvents() {
-  for (const [pane,button] of [['reference',ui.dragReference],['scene',ui.dragScene]]) {
-    const descriptor = () => ({kind:'image',image:capturePromptImage(pane)});
-    bindPromptDrag(button,descriptor,pane);
-    button.addEventListener('click',() => { try { insertPromptDragReference(descriptor()); } catch (error) { announce(error.message,true); } });
-  }
   bindPromptDrag(ui.selectedChip,selectedPromptReference,'selection');
   ui.selectedChip.tabIndex = 0; ui.selectedChip.setAttribute('role','button');
   ui.selectedChip.title = '拖到提示引用选中的物品或部件，也可点击引用';
@@ -5477,6 +5480,16 @@ function bindEvents() {
   promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
     getCandidates:getPromptMentionCandidates,onSelect:insertPromptMention,isEnabled:editable,
     onError:(message) => announce(message,true)});
+  promptAttachments=setupPromptAttachments({
+    isEnabled:()=>editable() && state.imageReferencesSupported,
+    getOptions:()=>({reference:{label:dynamicEnabled() && clipReference()?'引用当前视频帧':'引用当前参考图',disabled:promptImageUnavailable('reference')},
+      scene:{label:state.sceneView==='snapshot'?'引用这张截图':'引用当前场景画面',disabled:promptImageUnavailable('scene')}}),
+    getSaved:galleryItems,
+    onCapture:pane=>addPromptImageReference(capturePromptImage(pane)),
+    onSaved:addSavedPromptImage,
+    onBeforeOpen:()=>promptMentions?.close({dismiss:true}),
+    onError:message=>announce(message,true)
+  });
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);
   ui.refreshProjects.addEventListener('click', () => {
@@ -5570,7 +5583,7 @@ function bindEvents() {
   });
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
-  ui.snapshotCompareImage.addEventListener('load', renderPromptDragControls);
+  ui.snapshotCompareImage.addEventListener('load', renderPromptReferenceControls);
   ui.savedSnapshot.addEventListener('click', openSavedSnapshot);
   ui.captureScene.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', browseScene);
