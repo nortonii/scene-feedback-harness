@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 
 from playwright.sync_api import expect
+from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 
 def verify_annotation_label_visibility(page, screenshots):
-    from focus_workspace_smoke import draft, wait_ready
+    from focus_workspace_smoke import draft, wait_ready, canonical_note
 
     scene = "#scene-annotations"
     reference = "#reference-annotations"
@@ -19,9 +20,10 @@ def verify_annotation_label_visibility(page, screenshots):
         return draft(page)["annotations"]
 
     def tool(name):
+        open_annotation_tools(page, "scene")
         if name in ("text", "freehand") and not page.locator(f'button[data-tool="{name}"]').is_visible():
-            page.locator("#more-tools summary").click()
-        page.locator(f'button[data-tool="{name}"]').click()
+            control(page, "#more-tools summary").click()
+        control(page, f'button[data-tool="{name}"]').click()
 
     def position(selector, x, y):
         box = page.locator(selector).bounding_box()
@@ -62,21 +64,22 @@ def verify_annotation_label_visibility(page, screenshots):
     assert not marks(), "Label checks require an initially empty visual draft"
     expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(toggle).to_be_disabled()
-    page.locator("#chat-collapse").click()
+    control(page, "#chat-collapse").click()
     expect(page.locator("#chat-dock")).to_be_hidden()
-    page.locator("#capture-scene-button").click()
+    control(page, "#capture-scene-button").click()
     expect(toggle).to_be_enabled()
     first_snapshot = draft(page)["snapshot"]
     point_at = (.45, .43)
     tool("point")
     click(scene, *point_at)
     scene_mark = marks()[-1]
+    choose_tool(page, "point", "reference")
     click(reference, .5, .48)
     reference_mark = marks()[-1]
     tool("text")
     click(scene, .2, .7)
     page.locator("#annotation-text").fill("保留文字内容 KEEP THIS TEXT")
-    page.locator("#save-text").click()
+    control(page, "#save-text").click()
     text_mark = marks()[-1]
     original = marks()
     scene_box = label_box(scene, scene_mark)
@@ -114,7 +117,7 @@ def verify_annotation_label_visibility(page, screenshots):
     expect(page.locator(scene)).to_have_attribute("data-selected-annotation", scene_mark["id"])
     page.keyboard.press("Backspace")
     assert len(marks()) == 2 and all(mark["id"] != scene_mark["id"] for mark in marks())
-    page.locator("#undo-annotation").click()
+    control(page, "#undo-annotation").click()
     assert marks() == original
 
     # Dragging visible ink still inserts the readable name and stable token.
@@ -130,17 +133,18 @@ def verify_annotation_label_visibility(page, screenshots):
     page.mouse.move(*position("#feedback-note", .5, .5), steps=12)
     page.mouse.up()
     expect(note).to_have_value(re.compile(re.escape(scene_mark["name"])))
-    expect(note).to_have_value(re.compile(re.escape(f'[[annotation:{scene_mark["id"]}]]')))
+    assert "[[" not in note.input_value()
+    assert f'[[annotation:{scene_mark["id"]}]]' in canonical_note(page)
     assert marks() == original
     note.fill("")
-    page.locator("#chat-collapse").click()
+    control(page, "#chat-collapse").click()
     expect(page.locator("#chat-dock")).to_be_hidden()
 
     # The preference applies across snapshots and refresh, without rewriting
     # any name, coordinate, screenshot identity or user-written text.
-    page.locator("#browse-button").click()
+    control(page, "#browse-button").click()
     expect(toggle).to_be_disabled()
-    page.locator("#capture-scene-button").click()
+    control(page, "#capture-scene-button").click()
     tool("point")
     click(scene, *point_at)
     second_mark = marks()[-1]
@@ -162,10 +166,10 @@ def verify_annotation_label_visibility(page, screenshots):
     toggle.click()
     expect(toggle).to_have_attribute("aria-pressed", "true")
     assert any(pixels(scene, label_box(scene, scene_mark))[3::4]), "Names should reappear immediately"
-    page.locator("#clear-annotations").click()
-    page.locator("#confirm-clear-annotations").click()
+    control(page, "#clear-round").click()
+    control(page, "#confirm-clear-annotations").click()
     expect(page.locator("#annotation-count")).to_have_text("0")
-    page.locator("#browse-button").click()
-    page.locator("#chat-launcher").click()
+    control(page, "#browse-button").click()
+    control(page, "#chat-launcher").click()
     expect(note).to_be_visible()
     note.fill("")

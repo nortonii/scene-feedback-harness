@@ -21,14 +21,14 @@ export function collectImageReferences(note, references) {
   const matches = [...note.matchAll(/\[\[image:([A-Za-z0-9_-]{1,64})\]\]/g)];
   const starts = new Set(matches.map((match) => match.index));
   for (const match of note.matchAll(/\[\[image:/g)) {
-    if (!starts.has(match.index)) throw new Error('图片引用不完整，请重新拖入或点击引用图片。');
+    if (!starts.has(match.index)) throw new Error('图片引用不完整，请用输入框的 ＋ 重新添加图片。');
   }
   const ids = [...new Set(matches.map((match) => match[1]))];
   if (ids.length > 8) throw new Error('一条提示最多引用 8 张图片。');
   return ids.map((id) => {
     const items = references.filter((item) => item?.id === id);
     if (items.length !== 1 || !validImageReference(items[0])) {
-      throw new Error('提示引用的图片无法恢复，请移除这处引用并重新拖入图片。');
+      throw new Error('提示引用的图片无法恢复，请移除这处引用，再用输入框的 ＋ 重新添加。');
     }
     return items[0];
   });
@@ -63,7 +63,7 @@ export function createPromptImageStore(openDatabase) {
           request.onsuccess = () => resolve(request.result);
           request.onerror = () => reject(request.error);
         });
-        return Array.isArray(images) ? images.filter(validImageReference).slice(0, 8) : [];
+        return Array.isArray(images) ? images.filter(validImageReference).slice(0, 16) : [];
       } finally { db.close(); }
     }
   };

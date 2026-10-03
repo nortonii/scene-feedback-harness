@@ -11,16 +11,23 @@ import tempfile
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "scripts")]
+sys.path[:0] = [str(ROOT / "backend"), str(ROOT / "scripts"), str(ROOT / "tests")]
 from test_prompt_drag_browser import image_data, tiny_named_glb
 from test_wholebody_edit_browser import result_fixture
+from workspace_ui_helpers import control, choose_tool
 
 
 def ready(page):
     page.wait_for_function("window.__mentionCheck && __mentionCheck.state.workspaceReady && !__mentionCheck.state.sceneLoading && document.getElementById('reference-image').naturalWidth>0")
 
 
+def canonical(page):
+    return page.evaluate("__mentionCheck.promptText()")
+
+
 def query(page, text, *, note=None):
+    if not page.locator("#chat-dock").is_visible():
+        control(page, "#chat-launcher").click()
     field = page.locator("#feedback-note")
     if note is not None:
         field.fill(note)
@@ -46,7 +53,9 @@ def select_model(page, level):
 
 
 def draw_mark(page, pane, tool):
-    page.locator(f'[data-tool="{tool}"]').click()
+    if page.locator("#chat-dock").is_visible():
+        control(page, "#chat-collapse").click()
+    choose_tool(page, tool, pane)
     bounds=page.locator(f'#{pane}-annotations').bounding_box(); assert bounds
     count=page.evaluate('__mentionCheck.state.annotations.length')
     page.mouse.move(bounds['x']+bounds['width']*.2,bounds['y']+bounds['height']*.2); page.mouse.down()
@@ -98,7 +107,7 @@ def main():
                     **({"executable_path":args.browser_executable} if args.browser_executable else {}),
                     args=["--no-sandbox","--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"])
                 context = browser.new_context(viewport={"width":1440,"height":950})
-                hook = "\nwindow.__mentionCheck={state,ui,camera,cameraData,renderAnnotations,renderSelection,humanCurrentFrame,getPromptMentionCandidates,insertPromptMention,promptMentions,selectObject,nodeReference,removeAnnotation,undoAnnotationEdit};"
+                hook = "\nwindow.__mentionCheck={state,ui,camera,cameraData,renderAnnotations,renderSelection,humanCurrentFrame,getPromptMentionCandidates,insertPromptMention,promptMentions,promptText,selectObject,nodeReference,removeAnnotation,undoAnnotationEdit};"
                 context.route("**/app.js", lambda route: route.fulfill(status=200,content_type="application/javascript",body=(ROOT/"web/app.js").read_text()+hook))
                 page = context.new_page(); page.on("pageerror",lambda error:errors.append(str(error)))
                 page.goto(base+"/"); ready(page)
@@ -120,7 +129,8 @@ def main():
                 query(page,"standalone")
                 assert page.locator('.prompt-mention-option[data-mention-kind="object"]').count() == 1
                 field.press("ArrowDown"); field.press("ArrowUp"); field.press("Enter")
-                assert "[[object:standalone_box]]" in field.input_value()
+                assert "[[object:standalone_box]]" in canonical(page)
+                assert "【独立箱子】" in field.input_value() and "[[" not in field.input_value()
                 assert field.input_value().startswith("把") and field.input_value().endswith("  放在这里")
                 assert not store.state["feedback"], "Enter selection must not send"
                 assert page.evaluate("__mentionCheck.getPromptMentionCandidates().map(c=>c.kind)")==['object']
@@ -146,7 +156,8 @@ def main():
                 query(page,"Cabinet",note=object_draft+' '); choose(page,"node","Cabinet")
                 select_model(page,'part')
                 query(page,"Door"); choose(page,"node","Door")
-                assert field.input_value().count("[[node:fixture_model:") == 2
+                assert canonical(page).count("[[node:fixture_model:") == 2
+                assert "【Cabinet】" in field.input_value() and "【Door】" in field.input_value()
                 assert len(page.evaluate("__mentionCheck.state.referencedSceneNodes")) == 2
                 candidates=page.evaluate('__mentionCheck.getPromptMentionCandidates()')
                 assert len(candidates)==1 and candidates[0]['kind']=='node' and candidates[0]['label']=='Door'
@@ -154,12 +165,14 @@ def main():
                 print("PASS: a selected GLB part has one candidate; its parent, wrapper and prior references are excluded",flush=True)
 
                 mark=draw_mark(page,'reference','rectangle')
+                mark_candidate=next(c for c in page.evaluate('__mentionCheck.getPromptMentionCandidates()') if c['kind']=='annotation' and c['descriptor']['annotationId']==mark['id'])
+                assert "正面" in mark_candidate['descriptor']['label'] and "帧" in mark_candidate['descriptor']['label']
                 query(page,"框"); choose(page,"annotation")
-                assert f"[[annotation:{mark['id']}]]" in field.input_value()
+                assert f"[[annotation:{mark['id']}]]" in canonical(page)
                 query(page,mark['name']); choose(page,"annotation",mark['name'])
-                assert field.input_value().count(f"[[annotation:{mark['id']}]]") == 2
-                assert "正面" in field.input_value() and "帧" in field.input_value()
-                page.locator('#drag-reference-image').click()
+                assert canonical(page).count(f"[[annotation:{mark['id']}]]") == 2
+                assert f"【{mark['name']}】" in field.input_value()
+                control(page, '#drag-reference-image').click()
                 left = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[0])")
                 assert left["reference_id"] == first["frames"][0]["id"]
                 assert left.get("annotated_data_url") != left["original_data_url"]
@@ -168,7 +181,7 @@ def main():
                 page.locator('#timeline-seek').focus(); page.locator('#timeline-seek').press('End')
                 page.wait_for_function('(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking',arg=second['frames'][-1]['id'])
                 side_mark=draw_mark(page,'reference','line')
-                page.locator('#capture-scene-button').click()
+                control(page, '#capture-scene-button').click()
                 page.wait_for_function("__mentionCheck.state.sceneView==='snapshot' && !!__mentionCheck.state.snapshot")
                 scene_mark=draw_mark(page,'scene','arrow')
                 page.evaluate("__mentionCheck.state.selectedId=null;__mentionCheck.state.selectedSceneNode=null;__mentionCheck.renderSelection()")
@@ -177,8 +190,9 @@ def main():
                 assert set(c['kind'] for c in candidates)<= {'node','object','annotation'}
                 for m in (side_mark,scene_mark):
                     query(page,m['name']); choose(page,'annotation',m['name'])
-                    assert f"[[annotation:{m['id']}]]" in field.input_value()
-                assert '侧面' in field.input_value()
+                    assert f"[[annotation:{m['id']}]]" in canonical(page)
+                    assert f"【{m['name']}】" in field.input_value()
+                assert any('侧面' in c['descriptor']['label'] for c in candidates if c['kind']=='annotation' and c['descriptor']['annotationId']==side_mark['id'])
                 print('PASS: all unsent marks across reference views, frames and a frozen scene screenshot remain selectable in this round',flush=True)
 
                 old_mark=next(c for c in candidates if c['kind']=='annotation' and c['descriptor']['annotationId']==mark['id'])
@@ -192,12 +206,14 @@ def main():
                 choose(page,'annotation',mark['name'])
                 print('PASS: deleting a mark immediately removes its candidate; undo restores it and stale insertion fails safely',flush=True)
 
-                page.locator('#drag-scene-image').click()
+                control(page, '#drag-scene-image').click()
                 right = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[1])")
                 page.evaluate("__mentionCheck.camera.position.x += .2")
                 assert page.evaluate("structuredClone(__mentionCheck.state.imageRefs[1])") == right
                 assert page.evaluate("(id)=>structuredClone(__mentionCheck.state.imageRefs.find(image=>image.id===id))", left["id"]) == left
                 draft=field.input_value()
+                draft_note=canonical(page)
+                assert "[[" not in draft
                 page.evaluate("""()=>{const m=__mentionCheck,j=m.state.humanJobs[0],f=m.humanCurrentFrame(j);
                     const e={id:'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',job_id:j.job_id,reference_id:f.reference_id,
                      image_sha256:f.image_sha256,image_orientation:f.image_orientation,keypoint_profile:j.keypoint_profile,
@@ -221,11 +237,11 @@ def main():
                 field.fill(""); query(page,"standalone")
                 page.dispatch_event("#feedback-note","compositionstart")
                 page.dispatch_event("#feedback-note","keydown",{"key":"Enter","code":"Enter","isComposing":True,"keyCode":229,"ctrlKey":True})
-                assert "[[object:" not in field.input_value() and not store.state["feedback"]
+                assert "[[object:" not in canonical(page) and not store.state["feedback"]
                 page.dispatch_event("#feedback-note","compositionend",{"data":"箱子"})
                 field.press("Escape")
                 field.fill(""); query(page,"standalone"); field.press("Control+Enter")
-                assert "[[object:standalone_box]]" in field.input_value() and not store.state["feedback"]
+                assert "[[object:standalone_box]]" in canonical(page) and not store.state["feedback"]
                 print("PASS: literal email, no results, Escape, Chinese IME and Ctrl+Enter do not accidentally send",flush=True)
 
                 select_model(page,'part')
@@ -255,6 +271,7 @@ def main():
                 page.reload(); ready(page)
                 page.wait_for_function("__mentionCheck.state.imageRefs.length===2 && __mentionCheck.state.poseEdits.length===1")
                 assert field.input_value() == draft
+                assert canonical(page) == draft_note
                 assert {c['descriptor']['annotationId'] for c in page.evaluate('__mentionCheck.getPromptMentionCandidates()') if c['kind']=='annotation'}=={mark['id'],side_mark['id'],scene_mark['id']}
                 print("PASS: 390/340px popup stays in bounds; reload restores the prompt, selected part and this round’s cross-view marks",flush=True)
 
@@ -265,12 +282,13 @@ def main():
                 page.route("**/api/sessions/*/feedback",reject)
                 page.locator("#submit-button").click()
                 page.wait_for_function("!__mentionCheck.state.submitting")
-                assert failures and field.input_value() == draft and not store.state["feedback"]
+                assert failures and field.input_value() == draft and canonical(page) == draft_note and not store.state["feedback"]
+                assert failures[0]["note"] == draft_note.strip()
                 page.unroute("**/api/sessions/*/feedback",reject)
                 page.locator("#submit-button").click()
                 page.wait_for_function("__mentionCheck.state.feedbackCount===1 && !__mentionCheck.state.submitting")
                 packet = store.state["feedback"][0]
-                assert packet["note"] == draft
+                assert packet["note"] == draft_note.strip()
                 assert len(packet['image_refs'])==2
                 assert {m['id'] for m in packet['annotations']}=={mark['id'],side_mark['id'],scene_mark['id']}
                 result = _visual_tool_result({"items":[copy.deepcopy(packet)]},store.data_dir)
@@ -293,7 +311,7 @@ def main():
                 store.import_model(str(replacement),object_id="fixture_model",name="新模型")
                 page.wait_for_function("(r)=>__mentionCheck.state.sceneRevision>r && !__mentionCheck.state.sceneLoading",arg=prior)
                 field.press("Enter")
-                assert "[[node:" not in field.input_value()
+                assert "[[node:" not in canonical(page)
                 assert "@Door" in field.input_value()
                 assert not page.evaluate("__mentionCheck.state.referencedSceneNodes")
                 assert reject_old_candidate(page,old_candidate)

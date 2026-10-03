@@ -1,0 +1,49 @@
+/* Images and attachment actions belong to the composer, not the scene canvas. */
+.prompt-input { border: 1px solid var(--surface-border); border-radius: 16px; background: #faf9f570; box-shadow: inset 0 1px 3px #17171505; transition: background 180ms,box-shadow 180ms; }
+.prompt-input:focus-within { box-shadow: 0 0 0 2px #17171520,inset 0 1px 0 #ffffff60; }
+.prompt-input #feedback-note { height: 72px; min-height: 72px; padding: 12px 14px 10px; border: 0; border-radius: 16px; background: transparent; box-shadow: none; }
+.prompt-input #feedback-note:focus { outline: none; background: transparent; box-shadow: none; }
+.prompt-input-actions { display: flex; align-items: center; justify-content: space-between; min-height: 43px; padding: 0 10px 9px; }
+.prompt-input-actions .submit-button { position: static; flex: none; margin: 0; }
+.prompt-attach-button { position: static; flex: none; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 1px solid transparent; border-radius: 50%; color: var(--muted); transition: background 180ms,color 180ms; }
+.prompt-attach-button:hover:not(:disabled),.prompt-attach-button[aria-expanded=true] { color: var(--ink); background: var(--surface-hover); border-color: var(--line); }
+.prompt-attach-button svg { transition: transform 200ms cubic-bezier(.22,1,.36,1); }
+.prompt-attach-button[aria-expanded=true] svg { transform: rotate(45deg); }
+.prompt-input .prompt-image-refs { padding: 10px 12px 0; max-height: 118px; }
+.prompt-input .prompt-image-chip { max-width: min(230px,100%); border-radius: 10px; background: var(--surface-glass); }
+.prompt-input .prompt-image-preview { padding: 5px; gap: 8px; }
+.prompt-input .prompt-image-preview img { width: 42px; height: 32px; border-radius: 6px; }
+.prompt-input .prompt-image-remove { min-width: 28px; align-self: stretch; border-radius: 0 10px 10px 0; }
+.prompt-attach-menu { position: fixed; z-index: 100; width: 304px; padding: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; border: 1px solid var(--surface-border); border-radius: 16px; background: color-mix(in srgb,var(--paper) 94%,transparent); color: var(--ink); backdrop-filter: blur(24px) saturate(1.1); box-shadow: var(--surface-shadow); }
+.prompt-attach-menu[hidden],.prompt-attach-menu [hidden] { display: none !important; }
+/* Override former on-canvas styles while retaining stable reference action IDs. */
+#prompt-attach-menu .attachment-option { position: static; display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-width: 0; height: auto; min-height: 40px; padding: 10px 12px; border: 0; border-radius: 10px; background: transparent; box-shadow: none; opacity: 1; color: var(--ink); font-size: 13px; font-weight: 400; text-align: left; }
+#prompt-attach-menu button:hover:not(:disabled),#prompt-attach-menu button:focus-visible { background: var(--surface-hover); }
+#prompt-attach-saved { margin-top: 4px; }
+.attachment-library-heading { display: flex; align-items: center; justify-content: space-between; padding: 3px 6px 8px; font-size: 12px; color: var(--muted); }
+.attachment-library-heading button { padding: 6px; border-radius: 8px; }
+.attachment-library-list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; }
+.attachment-saved { min-width: 0; padding: 6px; border: 1px solid var(--line); border-radius: 10px; text-align: left; }
+.attachment-saved img { display: block; width: 100%; aspect-ratio: 16/10; object-fit: contain; background: var(--stage); border-radius: 6px; }
+.attachment-saved span { display: block; margin-top: 5px; font-size: 12px; }
+.attachment-saved small { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+.attachment-empty { grid-column: 1/-1; padding: 10px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.7; }
+#prompt-attach-status { padding: 6px 10px; margin: 0; font-size: 12px; line-height: 1.6; }
+.camera-help { border-top: 1px solid var(--line); padding-top: 8px; }
+.camera-help summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
+.view-popover #scene-hint { display: block; position: static; inset: auto; transform: none; max-width: none; padding: 6px 0 0; border: 0; background: none; box-shadow: none; color: var(--muted); font-size: 12px; line-height: 1.7; text-align: left; white-space: normal; }
+[data-theme=dark] .prompt-input { background: #181b1f64; }
+[data-theme=dark] .prompt-input:focus-within { box-shadow: 0 0 0 2px #dce5eb20; }
+@media (prefers-reduced-motion: reduce) { .prompt-attach-button svg,.prompt-input { transition: none; } }
+
+/* Short source cards accompany the same compact names used in the sentence. */
+.prompt-reference-chip { display: inline-flex; align-items: center; min-width: 0; max-width: min(230px,100%); border: 1px solid var(--line); border-radius: 10px; background: var(--surface-glass); }
+.prompt-reference-preview { display: inline-flex; align-items: center; gap: 7px; min-width: 0; padding: 8px; font-size: 12px; }
+.prompt-reference-preview > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-reference-kind { flex: none; font-size: 10px; padding: 2px 5px; border-radius: 5px; background: var(--surface-hover); color: var(--muted); }
+.prompt-reference-remove { min-width: 28px; align-self: stretch; border-radius: 0 10px 10px 0; color: var(--muted); padding: 0 6px; }
+.prompt-reference-preview:hover,.prompt-reference-remove:hover { background: var(--surface-hover); }
+.prompt-reference-dialog { width: min(420px,calc(100vw - 32px)); }
+.prompt-reference-dialog p { line-height: 1.75; overflow-wrap: anywhere; font-size: 13px; }
+#prompt-reference-status { color: var(--muted); }
+#prompt-reference-status:empty { display: none; }

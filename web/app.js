@@ -1,8 +1,16 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { SceneNavigation } from './scene-navigation.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
+import { setupImmersive } from './immersive.js';
+import { setupTheme } from './theme.js';
+import {setupPromptAttachments} from './prompt-attachments.js';
+import {setupWorkspaceSidebar} from './workspace-sidebar.js';
+import {setupSnapshotGallery} from './snapshot-gallery.js';
+import { setupFeedbackEvidence, savedEvidence } from './feedback-evidence.js';
+import { setupActionIcons, setActionIcon } from './action-icons.js';
+import { setupWorkspaceChrome } from './workspace-chrome.js';
 import { setupWorkspaceControls } from './workspace-controls.js';
 import { createAnnotationHistory } from './annotation-history.js';
 import { eraserHitsAnnotation } from './eraser.js';
@@ -14,6 +22,8 @@ import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel
   handJointIndices, handJointLabel, poseEditToken, validPoseEdit, collectPoseEdits, correctedPoseFrame } from './human-pose.js';
 import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
 import { createPromptMentions } from './prompt-mentions.js';
+import { createPromptReferenceText } from './prompt-reference-text.js';
+import { compactReferenceMessage } from './prompt-reference-display.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -59,7 +69,7 @@ const ui = {
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
   viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
-  timelineSource:id('timeline-source'), moments:id('moment-strip'), animationChoices:id('animation-choices'),
+  timelineSource:id('timeline-source'), animationChoices:id('animation-choices'),
   scope:id('feedback-scope'), range:id('feedback-range'), rangeStart:id('range-start'), rangeEnd:id('range-end'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
@@ -83,7 +93,6 @@ const ui = {
   referenceAllAnnotations:id('reference-all-annotations'),
   note:id('feedback-note'),
   mentionMenu:id('prompt-mentions'), mentionList:id('prompt-mention-list'), mentionStatus:id('prompt-mention-status'),
-  dragReference:id('drag-reference-image'), dragScene:id('drag-scene-image'),
   imageRefs:id('prompt-image-refs'), imagePreview:id('prompt-image-preview-dialog'),
   imagePreviewTitle:id('prompt-image-preview-title'), imagePreviewImage:id('prompt-image-preview-image'),
   imagePreviewToggle:id('prompt-image-preview-toggle'),
@@ -96,7 +105,7 @@ const ui = {
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
   feedbackIntro:id('feedback-intro'),
-  approvals:id('approval-list'), queue:id('queue-list'), conversation:id('conversation')
+  approvals:id('approval-list'), pendingQueue:id('chat-pending-queue'), queue:id('queue-list'), conversation:id('conversation')
 };
 const comparePreferences = {sessionId:null, enabled:true, opacity:45, lastPositive:45};
 const state = {
@@ -123,10 +132,11 @@ const state = {
   humanError:null, humanJobsSignature:null,
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
-  annotations:[], annotationNameCounters:{}, selectedAnnotationId:null, mode:'select', groupId:'', drag:null, textPending:null,
+  annotations:[], annotationNameCounters:{}, selectedAnnotationId:null, mode:'select', toolPane:'scene', paneModes:{reference:'select',scene:'select'}, groupId:'', drag:null, textPending:null,
   sceneSnapshots:[], snapshot:null, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
   referencePanning:null, spacePan:false,
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
+  groundAxis:'auto', detectedUpAxis:'z', restoredUpAxis:null,
   restoredSceneRevision:null, restoredModelUrl:null
 };
 Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
@@ -144,7 +154,16 @@ const frameImages = {
 
 let minimalLayout = null;
 let promptMentions = null;
+let promptAttachments = null;
+const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference});
 let workspaceControls = null;
+let immersiveWorkspace = null;
+let workspaceChrome = null;
+let feedbackEvidence = null;
+let snapshotGallery = null;
+let workspaceSidebar = null;
+let clearRequest = null;
+let backgroundTransition = null;
 let annotationReferenceDrag = null;
 const annotationDragGhost = document.createElement('div');
 annotationDragGhost.className = 'annotation-drag-ghost hidden';
@@ -169,15 +188,16 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.65;
 renderer.domElement.tabIndex = 0;
 ui.viewport.appendChild(renderer.domElement);
-const controls = new OrbitControls(camera, renderer.domElement);
+const controls = new SceneNavigation(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.target.set(0, 0, 0.65);
 controls.minDistance = 0.3;
 controls.maxDistance = 250;
-controls.screenSpacePanning = false;
+controls.screenSpacePanning = true;
 controls.update();
-threeScene.add(new THREE.HemisphereLight(0xdcefff, 0x7e8a93, 2.3));
+const hemisphereLight = new THREE.HemisphereLight(0xdcefff, 0x7e8a93, 2.3);
+threeScene.add(hemisphereLight);
 const keyLight = new THREE.DirectionalLight(0xffedda, 3.5);
 keyLight.position.set(5, -4, 10);
 threeScene.add(keyLight);
@@ -247,11 +267,12 @@ function ensureAnnotationNames() {
   }
 }
 function saveDraft() {
+  feedbackEvidence?.refresh();
   clearTimeout(state.timelineSaveTimer); state.timelineSaveTimer = null;
   if (!state.sessionId || state.sceneRevision === null || state.playing) return;
   try {
     localStorage.setItem(storageKey(), JSON.stringify({
-      annotations:state.annotations, annotationNameCounters:state.annotationNameCounters, annotationMode:state.mode, selectedId:state.selectedId,
+      annotations:state.annotations, annotationNameCounters:state.annotationNameCounters, annotationMode:state.mode, paneModes:state.paneModes, toolPane:state.toolPane, selectedId:state.selectedId,
       selectedSceneNode:state.selectedSceneNode,
       lastPickedDetailNode:state.lastPickedDetailNode,
       selectionLevel:state.selectionLevel,
@@ -262,10 +283,11 @@ function saveDraft() {
       humanOverlayChoice:state.humanOverlayChoice,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
-      activeReferenceId:state.activeReferenceId, note:ui.note.value,
+      activeReferenceId:state.activeReferenceId, note:promptText(), promptReferenceLabels:promptReferenceText.exportRecords(),
+      groundAxis:state.groundAxis, worldUpAxis:controls.worldUp.y === 1 ? 'y' : 'z',
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
-        alignmentExact:state.alignmentExact,
+        alignmentExact:state.alignmentExact, freeRotation:controls.freeRotation,
         referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
       snapshot:state.snapshot, sceneView:state.sceneView, sceneSnapshotIds:state.sceneSnapshots.map(entry => entry.id),
       dynamicTime:state.time, activeViewId:state.activeViewId, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
@@ -305,7 +327,7 @@ function restoreDraft() {
     state.poseEdits = Array.isArray(draft.poseEdits) ? draft.poseEdits.filter(validPoseEdit).slice(0,8) : [];
     state.poseEditor = draft.poseEditor && /^[0-9a-f]{32}$/.test(draft.poseEditor.jobId || '') && /^[0-9a-f]{32}$/.test(draft.poseEditor.referenceId || '')
       ? {...draft.poseEditor,hand:draft.poseEditor.hand === 'right' ? 'right' : 'left',visibility:['visible','occluded','missing'].includes(draft.poseEditor.visibility) ? draft.poseEditor.visibility : 'visible'} : null;
-    state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,8) : [];
+    state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,16) : [];
     state.humanOverlayChoice = ['latest','hidden'].includes(draft.humanOverlayChoice) || /^[0-9a-f]{32}$/.test(draft.humanOverlayChoice || '')
       ? draft.humanOverlayChoice : 'latest';
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
@@ -320,6 +342,9 @@ function restoreDraft() {
       // Old drafts had scene marks without a fixed image; they cannot be mapped reliably.
       state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
     }
+    state.paneModes = {reference:validTool(draft.paneModes?.reference), scene:state.sceneView === 'live' ? 'select' : validTool(draft.paneModes?.scene || draft.annotationMode)};
+    state.toolPane = draft.toolPane === 'reference' ? 'reference' : 'scene';
+    state.mode = toolMode(state.toolPane);
     state.time = Number.isFinite(draft.dynamicTime) ? Math.max(0, draft.dynamicTime) : 0;
     state.activeViewId = typeof draft.activeViewId === 'string' ? draft.activeViewId : null;
     state.clipEnabled = draft.clipEnabled !== false;
@@ -334,8 +359,15 @@ function restoreDraft() {
     // Preserve drafts from the former two-field composer as one freeform prompt.
     const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
     const currentNote = typeof draft.note === 'string' ? draft.note : '';
-    ui.note.value = [oldPrompts, currentNote].filter(Boolean).join('\n\n');
+    promptReferenceText.reset(draft.promptReferenceLabels);
+    const originalPrompt=[oldPrompts,currentNote].filter(Boolean).join('\n\n');
+    ui.note.value=promptReferenceText.compact(originalPrompt);
+    state.legacyPromptMigration=!Array.isArray(draft.promptReferenceLabels)?{original:originalPrompt,display:ui.note.value}:null;
+    state.groundAxis = ['y','z'].includes(draft.groundAxis) ? draft.groundAxis : 'auto';
+    state.restoredUpAxis = ['y','z'].includes(draft.worldUpAxis) ? draft.worldUpAxis : null;
+    applyGroundAxis(state.groundAxis === 'auto' ? state.restoredUpAxis || 'z' : state.groundAxis);
     if (draft.camera?.position?.length === 3 && draft.camera?.target?.length === 3) {
+      controls.setFree(draft.camera.freeRotation === true, {notify:false});
       camera.position.set(...draft.camera.position);
       if (draft.camera.up?.length === 3) camera.up.set(...draft.camera.up);
       if (Number.isFinite(draft.camera.fov) && draft.camera.fov > 1 && draft.camera.fov < 179) camera.fov = draft.camera.fov;
@@ -355,10 +387,12 @@ function editable() { return state.workspaceReady && Number.isInteger(state.scen
 function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
-  ui.clearAnnotations.disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length && !state.sceneSnapshots.length && !state.snapshot);
-  ui.confirmClear.disabled = ui.clearAnnotations.disabled;
+  ui.clearAnnotations.disabled = !editable() || !state.annotations.some(mark => annotationVisibleInPane(mark,state.toolPane));
+  id('clear-round').disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length && !state.sceneSnapshots.length && !state.snapshot);
+  ui.confirmClear.disabled = !editable();
   ui.referenceAllAnnotations.disabled = !editable() || !state.annotations.length;
 }
+
 function annotationEditState() {
   return {annotations:[...state.annotations], sceneSnapshots:[...state.sceneSnapshots], dynamicSnapshots:[...state.dynamicSnapshots],
     snapshot:state.snapshot, sceneView:state.sceneView};
@@ -414,7 +448,7 @@ function setSession(session) {
   if (state.sessionId !== session.session_id) {
     annotationHistory.clear(); promptDrag = null;
     state.annotationNameCounters = {}; state.selectedAnnotationId = null;
-    promptMentions?.close();
+    promptMentions?.close();promptAttachments?.close();promptReferenceText.reset();
     state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
   }
   state.sessionId = session.session_id;
@@ -611,7 +645,7 @@ function updateProjectTitle() {
   const name = catalogName || state.projectName || state.sceneDisplayName || '当前场景';
   ui.sceneName.textContent = name;
   ui.projectsButton.title = name + ' · 切换或新建场景';
-  ui.projectsButton.setAttribute('aria-label', '场景：' + name + '，切换或新建场景');
+  ui.projectsButton.setAttribute('aria-label', '展开工作台侧栏，当前场景：' + name);
 }
 function projectBusyReason({allowCreation=false}={}) {
   if (state.submitting) return '正在保存反馈，请稍后切换场景。';
@@ -663,6 +697,7 @@ function rememberCreatedProject(project, error=null) {
 function renderProjectPicker() {
   updateProjectTitle();
   ui.createProjectPanel.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  id('sidebar-new-project').hidden=state.feedbackTransport==='mcp_events';
   if (!ui.projectsDialog.open) return;
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const busy = projectBusyReason();
@@ -677,7 +712,9 @@ function renderProjectPicker() {
       const name = document.createElement('strong'); name.textContent = project.name || '未命名场景';
       const current = project.project_id === state.projectId;
       const unavailable = project.creation_status === 'unavailable';
-      const label = document.createElement('span'); label.textContent = unavailable ? '不可用' : current ? '当前' : '打开 ↗';
+      button.classList.toggle('is-current',current);
+      if(current) button.setAttribute('aria-current','page');
+      const label = document.createElement('span'); label.textContent = unavailable ? '不可用' : current ? '当前' : '';
       heading.append(name, label);
       const detail = document.createElement('div'); detail.className = 'project-detail';
       detail.textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
@@ -772,6 +809,7 @@ function renderCreateProject() {
   else if (!state.projectCreationSupported) ui.createProjectHelp.textContent = '当前服务未启用场景创建，请启用 Codex CLI 或连接 Codex Desktop。';
   else if (!state.canSetPermissions) ui.createProjectHelp.textContent = '正在读取创建任务所需的模型和权限选项。';
   else ui.createProjectHelp.textContent = '创建空白场景和独立的 Codex 任务，然后进入新场景。';
+  id('project-options-summary').textContent='更多设置 · '+(ui.projectEffort.selectedOptions[0]?.textContent || '模型默认')+' · '+ui.projectPermissions.selectedOptions[0].textContent.split(' · ')[0];
 }
 async function loadProjects() {
   if (state.loadingProjects) return;
@@ -847,12 +885,14 @@ async function createSceneProject() {
   } finally { state.creatingProject = false; renderProjectPicker(); updateSubmitLabel(); updateMode(); renderTimeline(); }
 }
 function openProjectsDialog() {
-  for (const dialog of document.querySelectorAll('dialog[open]')) if (dialog !== ui.projectsDialog) dialog.close();
-  if (!ui.projectsDialog.open) ui.projectsDialog.showModal();
-  ui.projectsButton.setAttribute('aria-expanded', 'true'); renderProjectPicker();
+  workspaceSidebar.toggle();
+}
+function loadSidebarProjects() {
+  renderProjectPicker();
   loadProjects().catch(() => {});
   if (state.feedbackTransport !== 'mcp_events') loadModels({forProjects:true}).catch(() => {});
 }
+
 function renderCreateTarget() {
   const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
   if (!models.some((item) => item.model === state.modelChoice)) {
@@ -1066,7 +1106,7 @@ async function switchTask(threadId) {
 function renderWorkspace(workspace) {
   state.poseCorrectionsSupported = workspace.pose_corrections_supported === true;
   state.imageReferencesSupported = workspace.image_references_supported === true;
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   promptMentions?.refresh();
   state.networkError = null;
   state.projectId = workspace.project_id || state.projectId;
@@ -1087,7 +1127,7 @@ function renderWorkspace(workspace) {
   ui.eventDeliveryStatusHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
   ui.directDeliveryHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
   ui.eventDeliveryHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
-  if (state.feedbackTransport === 'mcp_events' && ui.tasksDialog.open) ui.tasksDialog.close();
+  if (state.feedbackTransport === 'mcp_events' && workspaceSidebar?.page==='tasks') workspaceSidebar.showPage('home');
   renderProjectPicker();
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
@@ -1258,11 +1298,20 @@ function renderExternalDelivery() {
 }
 function renderQueue({boundExternal=false}={}) {
   ui.queue.replaceChildren();
+  const pendingIds = new Set();
   const latest = state.queue.at(-1);
   for (const item of state.queue) {
     if (!item || ((item.status === 'completed' || item.status === 'discarded') && (!boundExternal || item !== latest))) continue;
     const oldTarget = boundExternal && !!item.target_thread_id && item.target_thread_id !== state.boundThreadId;
     const retryableFailed = item.status === 'failed' && !item.turn_id;
+    const manual = !!item.feedback_id && (['blocked_stale','delivery_uncertain'].includes(item.status) || retryableFailed);
+    const signature = JSON.stringify([item, state.sceneRevision, boundExternal, state.boundThreadId]);
+    if (manual) {
+      pendingIds.add(item.feedback_id);
+      const saved = [...ui.pendingQueue.children].find(node => node.dataset.feedbackId === item.feedback_id);
+      if (saved?.dataset.signature === signature) continue;
+      saved?.remove();
+    }
     const card = document.createElement('div');
     card.className = 'queue-card' + (item.status === 'queued' && item.error ? ' retrying'
       : item.status === 'delivery_uncertain' ? ' uncertain'
@@ -1311,12 +1360,12 @@ function renderQueue({boundExternal=false}={}) {
       confirm.type = 'button';
       confirm.textContent = '确认按旧截图发送';
       confirm.addEventListener('click', async () => {
-        confirm.disabled = true;
+        actions.querySelectorAll('button').forEach(button => button.disabled = true);
         try {
           await api('/api/workspace/queue/' + encodeURIComponent(item.feedback_id) + '/confirm', {method:'POST', body:{confirm:true}});
           announce('已确认；Codex 空闲后会处理这条消息。');
           await refreshWorkspace();
-        } catch (error) { announce('确认失败：' + error.message, true); confirm.disabled = false; }
+        } catch (error) { announce('确认失败：' + error.message, true); actions.querySelectorAll('button').forEach(button => button.disabled = false); }
       });
       actions.append(confirm);
       const discard = document.createElement('button');
@@ -1382,8 +1431,14 @@ function renderQueue({boundExternal=false}={}) {
       actions.append(retry);
       card.append(actions);
     }
-    ui.queue.append(card);
+    if (manual) {
+      card.dataset.feedbackId = item.feedback_id;
+      card.dataset.signature = signature;
+      card.tabIndex = -1;
+      ui.pendingQueue.append(card);
+    } else ui.queue.append(card);
   }
+  for (const card of [...ui.pendingQueue.children]) if (!pendingIds.has(card.dataset.feedbackId)) card.remove();
 }
 function approvalDetails(approval) {
   if (approval.details && typeof approval.details === 'object' && !Array.isArray(approval.details)) return approval.details;
@@ -1614,15 +1669,18 @@ function approvalButton(actions, label, makePayload, approval, card) {
   button.addEventListener('click', async () => {
     let payload;
     try { payload = makePayload(); }
-    catch (error) { announce(error.message, true); return; }
+    catch (error) { card.querySelector('.approval-error').textContent = error.message; return; }
+    card.querySelector('.approval-error').textContent = '';
     actions.querySelectorAll('button').forEach((node) => node.disabled = true);
     try {
       await api('/api/workspace/approvals/' + encodeURIComponent(approval.approval_id) + '/respond', {method:'POST', body:payload});
+      state.approvals = state.approvals.filter(item => item.approval_id !== approval.approval_id);
       card.remove();
+      minimalLayout?.refresh();
       try { await refreshWorkspace(); }
       catch { announce('审批已送达，工作台状态会稍后刷新。'); }
     } catch (error) {
-      announce('审批响应失败：' + error.message, true);
+      card.querySelector('.approval-error').textContent = '发送失败：' + error.message + '。请重试。';
       actions.querySelectorAll('button').forEach((node) => node.disabled = false);
     }
   });
@@ -1634,6 +1692,9 @@ function createApprovalCard(approval) {
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.dataset.approvalId = approval.approval_id;
+  card.tabIndex = -1;
+  const error = document.createElement('p'); error.className = 'approval-error'; error.setAttribute('role', 'alert');
+  card.append(error);
   const title = document.createElement('strong');
   const body = document.createElement('div');
   body.className = 'approval-detail';
@@ -1750,8 +1811,13 @@ function createApprovalCard(approval) {
   } else if (kind === 'item/commandExecution/requestApproval' || kind === 'item/fileChange/requestApproval') {
     title.textContent = kind.includes('fileChange') ? 'Codex 请求修改文件' : 'Codex 请求执行命令';
     approvalText(body, details.reason || details.message);
-    if (details.command) approvalText(body, details.command, 'approval-raw');
-    else if (details.changes) approvalText(body, JSON.stringify(details.changes, null, 2), 'approval-raw');
+    if (details.command || details.changes) {
+      const disclosure = document.createElement('details');
+      const summary = document.createElement('summary'); summary.textContent = details.command ? '命令 · ' + String(details.command).split('\n')[0].slice(0, 96) : '查看文件修改';
+      disclosure.append(summary);
+      approvalText(disclosure, details.command || JSON.stringify(details.changes, null, 2), 'approval-raw');
+      body.append(disclosure);
+    }
     else if (!body.textContent) approvalText(body, approval.prompt || kind);
     addDecision('accept', '允许');
     addDecision('decline', '拒绝');
@@ -1776,17 +1842,18 @@ function renderApprovals() {
     if (!rendered.has(approval.approval_id)) ui.approvals.append(createApprovalCard(approval));
   }
 }
-function addConversation(type, message, time, {historical=false}={}) {
+function addConversation(type, message, time, {historical=false,feedbackId=null}={}) {
   if (!message) return;
   const previous = minimalLayout?.beforeConversationAppend();
   if (ui.conversation.firstElementChild?.classList.contains('muted')) ui.conversation.replaceChildren();
   const card = document.createElement('div');
   card.className = 'conversation-item' + (type === 'user' ? ' user' : type === 'error' ? ' error' : '');
   const label = document.createElement('small');
-  label.textContent = (type === 'user' ? '你' : type === 'assistant' ? 'Codex' : '执行状态') + (time ? ' · ' + new Date(time).toLocaleTimeString() : '');
+  label.textContent = (type === 'user' ? '你' : type === 'assistant' ? 'Codex' : '执行状态') + (time ? ' · ' + new Date(time).toLocaleTimeString('zh-CN',{hour12:false}) : '');
   const content = document.createElement('div');
-  content.textContent = String(message).slice(0, 4000);
+  content.textContent = compactReferenceMessage(String(message)).slice(0, 4000);
   card.append(label, content);
+  if (feedbackId) feedbackEvidence?.attachReceipt(card,feedbackId);
   ui.conversation.append(card);
   while (ui.conversation.childElementCount > 100) ui.conversation.firstElementChild.remove();
   minimalLayout?.conversationAppended(previous, {historical});
@@ -1798,7 +1865,7 @@ function feedbackEventText(payload) {
 async function fetchEvents(initial=false) {
   const events = await api('/api/workspace/events?after=' + (initial ? 0 : state.eventCursor));
   const items = Array.isArray(events.items) ? events.items : [];
-  const appendConversation = (type, message, time) => addConversation(type, message, time, {historical:initial});
+  const appendConversation = (type, message, time, feedbackId=null) => addConversation(type, message, time, {historical:initial,feedbackId});
   for (const event of items) {
     if (!event || state.seenEventIds.has(event.id)) continue;
     state.seenEventIds.add(event.id);
@@ -1806,7 +1873,7 @@ async function fetchEvents(initial=false) {
     const message = payload.text || payload.message || payload.summary || payload.prompt;
     if (state.feedbackTransport === 'mcp_events') {
       if (['feedback_queued','feedback_submitted','external_feedback_submitted','feedback_event_submitted'].includes(event.type)) {
-        appendConversation('user',feedbackEventText(payload),event.at);
+        appendConversation('user',feedbackEventText(payload),event.at,payload.feedback_id);
       } else if (['feedback_event_delivered','event_feedback_delivered'].includes(event.type)) {
         appendConversation('status','视觉反馈事件已送达订阅插件；模型处理状态请在插件所在宿主查看。',event.at);
       } else if (['feedback_event_failed','event_feedback_failed'].includes(event.type)) {
@@ -1820,7 +1887,7 @@ async function fetchEvents(initial=false) {
     }
     if (state.deliveryMode === 'external' && !state.boundThreadId) {
       if (event.type === 'feedback_queued' || event.type === 'external_feedback_submitted' || event.type === 'feedback_submitted') {
-        appendConversation('user', feedbackEventText(payload), event.at);
+        appendConversation('user', feedbackEventText(payload), event.at, payload.feedback_id);
       } else if (event.type === 'feedback_returned_to_mcp' || event.type === 'mcp_feedback_returned') {
         appendConversation('status', 'MCP 已读取视觉反馈；请在原 Codex 任务中查看后续。', event.at);
       } else if (event.type === 'scene_published') {
@@ -1833,7 +1900,7 @@ async function fetchEvents(initial=false) {
     if (event.type === 'assistant_message' || event.type === 'assistant_text' || event.type === 'agent_message') {
       appendConversation('assistant', message, event.at);
     } else if (event.type === 'feedback_queued') {
-      appendConversation('user', feedbackEventText(payload), event.at);
+      appendConversation('user', feedbackEventText(payload), event.at, payload.feedback_id);
     } else if (event.type === 'turn_started') {
       appendConversation('status', 'Codex 开始处理这一轮。', event.at);
     } else if (event.type === 'turn_completed') {
@@ -1845,7 +1912,9 @@ async function fetchEvents(initial=false) {
     } else if (event.type === 'feedback_requested') {
       appendConversation('assistant', message || '请查看当前场景并给出反馈。', event.at);
     } else if (event.type === 'approval_requested') {
-      appendConversation('status', 'Codex 正在等待审批。', event.at);
+      appendConversation('status', 'Codex 正在等待你确认，请在输入框上方处理。', event.at);
+    } else if (event.type === 'approval_resolved') {
+      appendConversation('status', ({accept:'已允许该操作。', decline:'已拒绝该操作。', cancel:'已取消该操作。', resolved_elsewhere:'该请求已在其他入口处理。', structured:'已提交所需回答。'})[payload.decision] || '确认已处理。', event.at);
     }
   }
   state.eventCursor = Number.isInteger(events.next_cursor) ? events.next_cursor : state.eventCursor;
@@ -1896,10 +1965,13 @@ async function addObject(item) {
     root.scale.set(...(item.size || [1,1,1]));
     root.add(gltf.scene);
     root.userData.gltfRoot = gltf.scene;
+    const asset = gltf.parser.json.asset || {};
+    const declaredUp = String(gltf.scene.userData.up_axis || asset.extras?.up_axis || '').toLowerCase();
+    root.userData.upAxis = ['y','z'].includes(declaredUp) ? declaredUp :
+      asset.generator === 'scene-feedback-harness room demo' ? 'z' : 'y';
     root.userData.loaded = true;
     registerAnimations(item, gltf);
     if (state.selectedId === item.id) renderSelection();
-    if (state.firstFrame) frameAllIfReady();
   } catch (error) {
     placeholder.material.color.set(0xc47472);
     root.userData.loaded = true;
@@ -1907,6 +1979,22 @@ async function addObject(item) {
   }
 }
 
+function applyGroundAxis(axis) {
+  const yUp = axis === 'y';
+  controls.setWorldUp(new THREE.Vector3(0, yUp ? 1 : 0, yUp ? 0 : 1));
+  grid.rotation.set(yUp ? 0 : Math.PI / 2, 0, 0);
+  grid.position.copy(controls.worldUp).multiplyScalar(-.003);
+  ground.rotation.set(yUp ? -Math.PI / 2 : 0, 0, 0);
+  ground.position.copy(controls.worldUp).multiplyScalar(-.008);
+  hemisphereLight.position.copy(controls.worldUp);
+  keyLight.position.copy(navigationDirection([5,-4,10]));
+  fillLight.position.copy(navigationDirection([-5,6,5]));
+  id('ground-axis').value = state.groundAxis;
+}
+function navigationDirection(values) {
+  const vector = new THREE.Vector3(...values);
+  return controls.worldUp.y === 1 ? vector.set(vector.x, vector.z, -vector.y) : vector;
+}
 function frameAllIfReady() {
   if (!state.firstFrame) return;
   if (state.sceneObjects.some((item) => item.type === 'model' && !state.objectNodes.get(item.id)?.userData.loaded)) return;
@@ -2014,7 +2102,7 @@ function leaveReferenceCamera() {
   if (!state.alignedReferenceId) return;
   state.alignedReferenceId = null;
   state.alignmentExact = false;
-  camera.up.set(0, 0, 1);
+  camera.up.copy(controls.worldUp);
   camera.fov = 44;
   camera.updateProjectionMatrix();
   controls.update();
@@ -2029,6 +2117,7 @@ function alignActiveReference({showLive=true, notify=false, persist=true}={}) {
     updateAlignmentStatus();
     return false;
   }
+  controls.cancelTransition();
   // Clear any remaining damped orbit motion before placing the recorded camera.
   const damping = controls.enableDamping;
   controls.enableDamping = false;
@@ -2061,25 +2150,27 @@ function alignActiveReference({showLive=true, notify=false, persist=true}={}) {
   if (notify) announce('已切换到「' + (ref.name || '参考图') + '」的拍摄机位。');
   return true;
 }
-function frameBox(box) {
+function frameBox(box, {smooth=false, keepDirection=false}={}) {
   if (!box || box.isEmpty()) return;
+  controls.cancelTransition();
+  controls.flush();
+  const direction = keepDirection ? camera.position.clone().sub(controls.target).normalize() : navigationDirection([1,-1.4,0.95]).normalize();
   leaveReferenceCamera();
   const center = box.getCenter(new THREE.Vector3());
   const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.45);
-  const distance = Math.max(radius / Math.sin(camera.fov * Math.PI / 360) * 1.25, 2.5);
-  camera.position.copy(center).addScaledVector(new THREE.Vector3(1,-1.4,0.95).normalize(), distance);
-  controls.target.copy(center);
+  const halfFov = Math.min(camera.fov * Math.PI / 360, Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect));
+  const distance = Math.max(radius / Math.sin(halfFov) * 1.15, 0.6);
   camera.near = Math.max(distance / 1000, 0.005);
   camera.far = Math.max(distance * 100, 100);
   camera.updateProjectionMatrix();
-  controls.update();
+  controls.moveTo(center.clone().addScaledVector(direction, distance), center, {smooth});
   saveDraft();
 }
-function frameAll() {
+function frameAll(options={}) {
   const box = new THREE.Box3();
   for (const root of state.objectNodes.values()) box.expandByObject(root);
   if (box.isEmpty()) box.setFromCenterAndSize(new THREE.Vector3(0,0,0.5), new THREE.Vector3(3,3,2));
-  frameBox(box);
+  frameBox(box, options);
 }
 function clearSelectionHelper() {
   if (!selectionHelper) return;
@@ -2096,7 +2187,7 @@ function renderSelection() {
     if (state.selectedSceneNode && !selectedNode) state.selectedSceneNode = null;
     const box = selectedNode ? new THREE.Box3().setFromObject(selectedNode) : objectBox(item.id);
     if (box) {
-      selectionHelper = new THREE.Box3Helper(box, 0x292925);
+      selectionHelper = new THREE.Box3Helper(box, document.documentElement.dataset.theme === 'dark' ? 0xecece8 : 0x292925);
       selectionHelper.material.transparent = true;
       selectionHelper.material.opacity = 0.95;
       selectionHelper.material.depthTest = false;
@@ -2122,13 +2213,13 @@ function renderSelection() {
       cite.type = 'button';
       cite.className = 'reference-insert selected-reference-insert';
       cite.textContent = '引用';
-      cite.title = '在提示中引用选中的' + (state.selectionLevel === 'item' ? '物品' : '部件');
+      cite.title = '在提示中引用选中的' + (state.selectionLevel === 'item' ? '物体' : '部件');
       cite.disabled = !editable();
       cite.addEventListener('mousedown', (event) => event.preventDefault());
       cite.addEventListener('click', () => insertSceneNodeReference({...state.selectedSceneNode}, nodeLabel));
       ui.selectionSummary.append(cite);
     }
-    ui.selectedChip.textContent = '已选' + (state.selectedSceneNode ? (state.selectionLevel === 'item' ? '物品' : '部件') : '对象') + ' · ' + (nodeLabel || item.name || item.id);
+    ui.selectedChip.textContent = '已选' + (state.selectedSceneNode ? (state.selectionLevel === 'item' ? '物体' : '部件') : '对象') + ' · ' + (nodeLabel || item.name || item.id);
     ui.selectedChip.classList.remove('hidden');
     ui.clearSelection.classList.remove('hidden');
   } else {
@@ -2228,6 +2319,16 @@ async function loadScene(sceneData) {
     objectLayer.clear();
     state.objectNodes.clear();
     await Promise.allSettled(state.sceneObjects.map(addObject));
+    const axes = new Set([...state.objectNodes.values()].filter(root => root.userData.loaded).map(root => root.userData.upAxis || 'z'));
+    // Mixed or primitive scenes retain the workspace convention; GLB uses Y-up unless explicitly declared.
+    state.detectedUpAxis = axes.size === 1 ? [...axes][0] : 'z';
+    const axis = state.groundAxis === 'auto' ? state.detectedUpAxis : state.groundAxis;
+    const changedAxis = (controls.worldUp.y === 1 ? 'y' : 'z') !== axis;
+    const alignedPose = state.alignedReferenceId ? {position:camera.position.clone(), up:camera.up.clone(), quaternion:camera.quaternion.clone()} : null;
+    applyGroundAxis(axis);
+    if (alignedPose) {
+      camera.position.copy(alignedPose.position); camera.up.copy(alignedPose.up); camera.quaternion.copy(alignedPose.quaternion);
+    } else if (changedAxis) state.firstFrame = true;
     applyAnimationTime(state.time);
     renderTimeline();
     renderAnimationChoices();
@@ -2287,7 +2388,9 @@ function freezeScene() {
   const comparison = captureSnapshotComparison();
   if (comparison === false) return;
   const before = annotationEditState();
-  if (state.mode === 'select') state.mode = 'rectangle';
+  state.toolPane = 'scene';
+  state.paneModes.scene = toolMode('scene') === 'select' ? 'rectangle' : toolMode('scene');
+  state.mode = toolMode('scene');
   settleOrbit();
   const shot = captureLiveScene({includeSize:true});
   state.snapshot = {
@@ -2314,38 +2417,39 @@ function openSceneSnapshot(snapshotId) {
   state.snapshot = snapshot; state.sceneView = 'snapshot';
   renderSceneView(); renderAnnotations();
 }
+function galleryItems() {
+  return [...state.sceneSnapshots,...state.dynamicSnapshots].map(snapshot => {
+    const dynamic=Number.isFinite(snapshot.time_sec);
+    const count=state.annotations.filter(mark=>dynamic ? markMatchesMoment(mark,snapshot) : mark.pane==='scene' && mark.snapshot_id===snapshot.id).length;
+    const name=dynamic ? shortTime(snapshot.time_sec) : snapshot.name;
+    const viewId=snapshot.view_id || (dynamic ? referenceViewForMoment(snapshot)?.clip_id : null);
+    const title=[name,dynamic ? (snapshot.view_name || referenceViewForMoment(snapshot)?.name || '场景动画') : null,
+      dynamic && momentFrameIndex(snapshot)!==null ? '第 '+(momentFrameIndex(snapshot)+1)+' 帧' : null,'场景版本 '+snapshot.scene_revision,count+' 个标记'].filter(Boolean).join(' · ');
+    return {id:snapshot.id,dynamic,time:snapshot.time_sec,viewId,name,title,count,disabled:!editable(),
+      active:state.sceneView==='snapshot' && state.snapshot?.id===snapshot.id,
+      cover:dynamic && snapshot.reference_url || snapshot.data_url,reference:dynamic ? snapshot.reference_url : null,scene:snapshot.data_url};
+  });
+}
+function removeSavedSnapshot(snapshotId) {
+  if(!editable()) return;
+  const moment=state.dynamicSnapshots.find(entry=>entry.id===snapshotId);
+  const snapshot=moment || state.sceneSnapshots.find(entry=>entry.id===snapshotId);
+  if(!snapshot) return;
+  const before=annotationEditState();
+  pauseTimeline(); hideTextEditor(); state.drag=null;
+  state.annotations=state.annotations.filter(mark=>moment ? !markMatchesMoment(mark,moment) : mark.pane!=='scene' || mark.snapshot_id!==snapshotId);
+  state.sceneSnapshots=state.sceneSnapshots.filter(entry=>entry.id!==snapshotId);
+  state.dynamicSnapshots=state.dynamicSnapshots.filter(entry=>entry.id!==snapshotId);
+  if(state.snapshot?.id===snapshotId) {state.snapshot=null;state.sceneView='live';state.paneModes.scene='select';state.mode=toolMode(state.toolPane);}
+  recordAnnotationEdit(before);renderSceneView();renderAnnotations();renderTimeline();saveDraft();
+  announce('已删除截图及其标记，可撤销恢复。');
+}
 function renderSceneSnapshots() {
-  ui.snapshotStrip.replaceChildren();
-  for (const snapshot of state.sceneSnapshots) {
-    const card = document.createElement('div'); card.className = 'snapshot-card';
-    const open = document.createElement('button'); open.type = 'button'; open.className = 'snapshot-open';
-    open.dataset.snapshotId = snapshot.id;
-    open.disabled = !editable();
-    open.setAttribute('aria-pressed', String(state.sceneView === 'snapshot' && state.snapshot?.id === snapshot.id));
-    const count = state.annotations.filter(mark => mark.pane === 'scene' && mark.snapshot_id === snapshot.id).length;
-    open.title = snapshot.name + ' · 场景版本 ' + snapshot.scene_revision + ' · ' + count + ' 个标记';
-    const image = document.createElement('img'); image.src = snapshot.data_url; image.alt = '';
-    const label = document.createElement('span'); label.textContent = snapshot.name + (count ? ' · ' + count : '');
-    open.append(image, label); open.addEventListener('click', () => openSceneSnapshot(snapshot.id));
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'snapshot-remove'; remove.textContent = '×';
-    remove.title = '删除' + snapshot.name + '及其标记，可撤销'; remove.setAttribute('aria-label', remove.title);
-    remove.disabled = !editable();
-    remove.addEventListener('click', () => {
-      if (!editable()) return;
-      const before = annotationEditState();
-      hideTextEditor(); state.drag = null;
-      state.sceneSnapshots = state.sceneSnapshots.filter(entry => entry.id !== snapshot.id);
-      state.annotations = state.annotations.filter(mark => mark.pane !== 'scene' || mark.snapshot_id !== snapshot.id);
-      if (state.snapshot?.id === snapshot.id) { state.snapshot = null; state.sceneView = 'live'; state.mode = 'select'; }
-      recordAnnotationEdit(before); renderSceneView(); renderAnnotations(); saveDraft();
-      announce('已删除' + snapshot.name + '，可撤销恢复。');
-    });
-    card.append(open, remove); ui.snapshotStrip.append(card);
-  }
+  snapshotGallery?.render();
   workspaceControls?.refresh();
 }
 function updateSnapshotGeometry() {
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   if (!state.snapshot) return;
   // Size a new screenshot immediately. Its image can still be decoding when
   // the user's first drag starts, or the previous image can have another aspect.
@@ -2494,7 +2598,7 @@ function renderSceneView({persist=true}={}) {
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
   ui.browse.setAttribute('aria-pressed', String(!showingSnapshot));
   ui.snapshotButton.setAttribute('aria-pressed', String(showingSnapshot));
-  ui.snapshotButton.title = '浏览上一次操作的截图；新增截图请点击「＋ 截图」';
+  ui.snapshotButton.title = '回到上次查看的截图；新增图片请先返回 3D';
   ui.savedSnapshot.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
   ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
@@ -2503,7 +2607,7 @@ function renderSceneView({persist=true}={}) {
   }
   renderCompareControls();
   renderSceneSnapshots();
-  controls.enabled = editable() && state.mode === 'select' && !showingSnapshot;
+  controls.enabled = editable() && toolMode('scene') === 'select' && !showingSnapshot;
   updateSnapshotGeometry();
   updateMode();
   updateSceneHint();
@@ -2612,8 +2716,8 @@ function showActiveReference() {
   const hasReference = !!ref;
   ui.referenceMedia.classList.toggle('hidden', !hasReference);
   ui.referenceEmpty.classList.toggle('hidden', hasReference);
-  ui.referenceHint.classList.toggle('hidden', !hasReference || state.mode === 'select');
-  ui.referenceTitle.textContent = ref?.name || '照片里的目标';
+  ui.referenceHint.classList.toggle('hidden', !hasReference || toolMode('reference') === 'select');
+  renderReferenceHeading();
   updateAlignmentStatus();
   renderHumanPosePanel();
   renderCompareControls();
@@ -2920,7 +3024,7 @@ function updatePoseJoint(visibility,position=null) {
 function referencePoseEdit(sample,{focus=true}={}) {
   if (!editable() || !sample?.edits.length || !state.poseCorrectionsSupported) return;
   const token=poseEditToken(sample.id);
-  if (ui.note.value.includes(token)) { if (focus) { minimalLayout?.openChat(); ui.note.focus(); } return; }
+  if (promptText().includes(token)) { if (focus) { minimalLayout?.openChat(); ui.note.focus(); } return; }
   insertNoteText('手部修正（' + sample.label + '） ' + token,{replaceSelection:false,focus});
 }
 async function downloadPoseEdit(sample) {
@@ -2980,7 +3084,8 @@ function bindPoseEditEvents() {
     const sample=context.sample; sample.edits=sample.edits.filter((point) => point.name !== context.editor.jointName);
     if (!sample.edits.length) {
       state.poseEdits=state.poseEdits.filter((item) => item.id !== sample.id);
-      ui.note.value=ui.note.value.split(poseEditToken(sample.id)).join('');
+      ui.note.value=promptReferenceText.remove(ui.note.value,poseEditToken(sample.id));
+      renderPromptImageReferences();
     }
     context.editor.visibility='visible'; drawOverlays(); saveDraft();
   });
@@ -3072,7 +3177,7 @@ function insertHumanPoseReference(job, frame) {
   if (!token) return false;
   const existing=state.poseRefs.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id);
   try {
-    const cited=collectPoseReferences(ui.note.value,state.poseRefs);
+    const cited=collectPoseReferences(promptText(),state.poseRefs);
     if (!cited.some(item => item.job_id === ref.job_id && item.reference_id === ref.reference_id) && cited.length >= 8) {
       announce('每轮最多引用 8 个人体结果。',true); return false;
     }
@@ -3136,7 +3241,7 @@ function bindHumanPoseEvents() {
   },5000);
 }
 function updateReferenceGeometry() {
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   const image = ui.referenceImage;
   const stage = ui.referenceStage;
   if (!image.naturalWidth || !image.naturalHeight || !stage.clientWidth || !stage.clientHeight) return;
@@ -3399,7 +3504,7 @@ function pauseTimeline() {
   state.seekGeneration++; state.seeking = false;
   if (state.scrubRequest !== null) cancelAnimationFrame(state.scrubRequest);
   state.scrubRequest = null; state.timelineTarget = null; state.pendingViewId = null;
-  ui.play.textContent = '播放';
+  setActionIcon(ui.play,'play','播放');
 }
 function timelineOverlayUrl(ref, {forceAlign=false}={}) {
   const willAlign = referenceCamera(ref) && (forceAlign || state.alignmentExact || !state.alignedReferenceId);
@@ -3460,7 +3565,7 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=timel
   const imagesReady = !ref || (imageReadyAtUrl(ui.referenceImage, ref.url) &&
     imageReadyAtUrl(ui.compareImage, overlayUrl));
   if (playback && Math.abs(state.time - next) < 1e-7 && imagesReady &&
-      state.sceneView === 'live' && (!ref || state.clipEnabled)) return true;
+      (!ref || state.clipEnabled)) return true;
   if (!playback) {
     state.timelineTarget = next;
     state.pendingViewId = switchingView ? view.clip_id : null;
@@ -3486,16 +3591,15 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=timel
     if (resumedReference) state.clipEnabled = true;
     const previousTime = state.time;
     const changed = Math.abs(state.time - next) > 1e-7;
-    const leavingSnapshot = state.sceneView === 'snapshot';
     state.time = next;
     if (view) state.activeViewId = view.clip_id;
     if (changed || forcePose) applyAnimationTime(next);
     syncTimelineReference({forceAlign:switchingView});
     if (resumedReference || switchingView) renderReferenceStrip();
-    if (leavingSnapshot) { state.sceneView = 'live'; renderSceneView({persist:false}); }
     if (changed || !playback) updateReferenceGeometry();
     state.timelineTarget = null; state.pendingViewId = null;
-    renderTimeline({moments:leavingSnapshot});
+    renderTimeline({moments:switchingView});
+    updateAnnotationHistory();
     if (!playback) scheduleTimelineDraft();
     if (changed || !playback) prefetchTimelineFrames(next, next < previousTime ? -1 : 1);
     return true;
@@ -3521,16 +3625,67 @@ function advanceTimeline(timestamp) {
   seekTimeline(next, {playback:true});
   if (next >= timelineDuration() && !state.seeking) { pauseTimeline(); saveDraft(); }
 }
+function shortTime(value) {
+  const tenths = Math.max(0,Math.round((Number(value)||0)*10));
+  const minutes = Math.floor(tenths/600), seconds = Math.floor(tenths/10)%60;
+  return `${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}.${tenths%10}`;
+}
+function renderReferenceHeading() {
+  const ref=activeReference(), video=!!clipReference();
+  ui.referenceTitle.textContent = video ? (referenceView()?.name || state.referenceClip.name) : ref?.name || '参考图片';
+  ui.referenceTitle.title = ui.referenceTitle.textContent;
+  const label=id('reference-frame-label'); label.hidden=!video;
+  const frames=video ? referenceView().frames : [];
+  if(video) label.textContent=`${Math.max(1,frames.findIndex(frame=>frame.id===ref?.id)+1)} / ${frames.length} 帧`;
+  document.querySelector('.reference-pane').classList.toggle('single-reference-video',video && referenceViews().length===1 && state.references.length===0);
+}
+function feedbackEvidenceData() {
+  if(state.pendingSubmission) {
+    const saved=savedEvidence(state.pendingSubmission.payload);
+    return {...saved,description:'正在重试上次已冻结的反馈。以下附件不会随当前视角变化。'};
+  }
+  const views=[...state.sceneSnapshots,...state.dynamicSnapshots], rows=[];
+  for(const ref of state.references) rows.push({name:ref.name || '参考图',url:ref.url,detail:`参考原图 · ${state.annotations.filter(mark=>mark.pane==='reference' && mark.reference_image_id===ref.id && !mark.frame_id).length} 个标记`});
+  for(const view of views) {
+    const count=state.annotations.filter(mark=>mark.snapshot_id===view.id || mark.frame_id===view.id).length;
+    const compared=view.comparison?.enabled && view.comparison.opacity>0;
+    rows.push({name:view.name || `保留时刻 ${shortTime(view.time_sec)}`,url:view.data_url,detail:`原图预览 · ${count} 个标记 · v${view.scene_revision}${compared?' · 含叠图':''}`});
+    if(view.reference_url) rows.push({name:(view.view_name || '视频')+' · '+shortTime(view.time_sec)+' 参考帧',url:view.reference_url,detail:'保留时刻的参考图'});
+  }
+  const selected=snapshotForFeedback();
+  if(!selected) rows.push({name:'当前场景视角',detail:'发送时另行保存当前视角和相机'});
+  if(dynamicEnabled() && !state.dynamicSnapshots.length) rows.push({name:'当前视频时刻',url:activeReference()?.url,detail:'发送时保留当前参考帧与场景'});
+  const imageRefs=state.imageRefs.filter(image=>promptText().includes(`[[image:${image.id}]]`));
+  for(const image of imageRefs) rows.push({name:image.label || '额外图片引用',url:image.original_data_url || image.data_url,detail:'在修改说明中引用的固定图片'});
+  const poses=state.poseRefs.filter(pose=>promptText().includes(poseToken(pose.job_id,pose.reference_id)));
+  const edits=state.poseEdits.filter(pose=>promptText().includes(`[[pose_edit:${pose.id}]]`));
+  if(poses.length || edits.length) rows.push({name:'人体姿态证据',detail:`${poses.length} 份姿态引用 · ${edits.length} 份关键点修正`});
+  const overlay=views.some(view=>view.comparison?.enabled && view.comparison.opacity>0) || (selected ? selected.comparison?.enabled && selected.comparison.opacity>0 : comparePreferences.enabled && comparePreferences.opacity>0 && !!activeReference());
+  const parts=[state.references.length ? `${state.references.length} 张参考图` : null,state.sceneSnapshots.length ? `${state.sceneSnapshots.length} 张截图` : null,
+    state.dynamicSnapshots.length ? `${state.dynamicSnapshots.length} 个时刻` : dynamicEnabled() ? '当前时刻' : !selected ? '当前场景' : null,
+    `${state.annotations.length} 个标记`, imageRefs.length ? `${imageRefs.length} 张额外引用` : null,poses.length+edits.length ? '含人体证据' : null,overlay ? '含叠图' : null];
+  const scope=dynamicEnabled() ? (ui.scope.value==='range' ? `反馈区间 ${shortTime(ui.rangeStart.value)}—${shortTime(ui.rangeEnd.value)}。` : ui.scope.value==='clip' ? '反馈范围为整个片段。' : '反馈范围为所标帧。') : '';
+  return {summary:parts.filter(Boolean).join(' · '),rows,
+    description:`本轮所有保留图片和标记都会发送；引用用于说明具体目标，并不筛选其他附件。${scope}缩略图为原图预览，提交时附带标注图；发送后可从聊天记录查看保存的附件。`};
+}
 function renderTimeline({moments=true}={}) {
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   renderPoseEditor();
   const enabled = dynamicEnabled();
   ui.timeline.classList.toggle('hidden', !enabled);
+  // Keep one set of playback controls and listeners while moving it with its media.
+  const referenceTimeline = !!state.referenceClip;
+  const timelineParent = document.querySelector(referenceTimeline ? '.reference-pane' : '.workspace');
+  ui.timeline.classList.toggle('reference-timeline', referenceTimeline);
+  if (ui.timeline.parentElement !== timelineParent) timelineParent.appendChild(ui.timeline);
+  ui.timeline.setAttribute('aria-label', referenceTimeline ? '参考视频时间轴' : '动态场景时间轴');
   const duration = timelineDuration();
   const displayedTime = state.timelineTarget ?? state.time;
   ui.seek.max = String(duration || 1); ui.seek.value = String(displayedTime);
-  ui.time.textContent = displayedTime.toFixed(3) + ' / ' + duration.toFixed(3) + ' s' + (state.timelineTarget !== null ? ' · 更新中' : '');
-  ui.play.textContent = state.playing ? '暂停' : '播放';
+  ui.time.textContent = shortTime(displayedTime) + ' / ' + shortTime(duration) + (state.timelineTarget !== null ? ' · 更新中' : '');
+  ui.time.title = `${displayedTime.toFixed(3)} / ${duration.toFixed(3)} 秒`;
+  renderReferenceHeading();
+  setActionIcon(ui.play,state.playing ? 'pause' : 'play',state.playing ? '暂停' : '播放');
   ui.timelineSource.textContent = state.referenceClip
     ? referenceView().name + ' · ' + referenceView().frames.length + ' 帧 · ' + referenceView().fps + ' fps · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
     : 'GLB 动画 · ' + timelineFps() + ' fps';
@@ -3540,31 +3695,8 @@ function renderTimeline({moments=true}={}) {
   }
   renderReferenceViews();
   if (!moments) return;
-  ui.moments.replaceChildren();
-  if (!state.dynamicSnapshots.length) {
-    const hint = document.createElement('span'); hint.className = 'muted';
-    hint.textContent = '圈画时自动保留时刻；也可先点「保留此刻」。最多 8 个。'; ui.moments.append(hint);
-  }
-  for (const moment of state.dynamicSnapshots) {
-    const card = document.createElement('div');
-    card.className = 'moment-card' + (state.snapshot?.id === moment.id && state.sceneView === 'snapshot' ? ' active' : '');
-    const button = document.createElement('button'); button.type = 'button';
-    const count = state.annotations.filter((mark) => markMatchesMoment(mark, moment)).length;
-    button.textContent = frameTimeLabel(moment.time_sec, momentFrameIndex(moment), moment.view_name || referenceViewForMoment(moment)?.name || '') + ' · v' + moment.scene_revision + ' · ' + count + ' 标记';
-    button.addEventListener('click', () => openMoment(moment.id));
-    const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '×';
-    remove.title = '移除此刻和它的标记'; remove.disabled = !editable();
-    remove.addEventListener('click', () => {
-      if (!editable()) return;
-      const before = annotationEditState();
-      state.annotations = state.annotations.filter((mark) => !markMatchesMoment(mark, moment));
-      state.dynamicSnapshots = state.dynamicSnapshots.filter((entry) => entry.id !== moment.id);
-      if (state.snapshot?.id === moment.id) { state.snapshot = null; state.sceneView = 'live'; }
-      recordAnnotationEdit(before);
-      renderSceneView(); renderAnnotations(); renderTimeline(); saveDraft();
-    });
-    card.append(button, remove); ui.moments.append(card);
-  }
+  feedbackEvidence?.refresh();
+  renderSceneSnapshots();
 }
 function referencePixelsReady() {
   const ref = activeReference();
@@ -3575,7 +3707,8 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   if (state.seeking || state.pendingViewId) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
   pauseTimeline();
   if (!referencePixelsReady()) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
-  const matching = state.dynamicSnapshots.find((entry) => entry.id === state.snapshot?.id &&
+  const candidates=[state.snapshot,...state.dynamicSnapshots.filter(entry=>entry.id!==state.snapshot?.id)].filter(Boolean);
+  const matching = candidates.find((entry) => Number.isFinite(entry.time_sec) &&
     entry.clip_id === (state.referenceClip?.clip_id || null) && entry.reference_id === (activeReference()?.id || null) &&
     Math.abs(entry.time_sec - state.time) < 1e-6 &&
     (state.sceneView === 'snapshot' || (entry.scene_revision === state.sceneRevision && comparisonMatchesLive(entry) &&
@@ -3583,6 +3716,7 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
       JSON.stringify(entry.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []) &&
       JSON.stringify(entry.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []))));
   if (matching) {
+    if (showSnapshot || state.sceneView!=='snapshot') state.snapshot=matching;
     if (showSnapshot) { state.sceneView = 'snapshot'; renderSceneView(); }
     return matching;
   }
@@ -3612,7 +3746,8 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
   }
   const frameIndex = momentFrameIndex(moment);
   if (frameIndex !== null) moment.frame_index = frameIndex;
-  state.dynamicSnapshots.push(moment); state.snapshot = moment;
+  state.dynamicSnapshots.push(moment);
+  if(showSnapshot || state.sceneView!=='snapshot') state.snapshot = moment;
   if (showSnapshot) state.sceneView = 'snapshot';
   renderSceneView(); renderTimeline(); saveDraft();
   return moment;
@@ -3836,52 +3971,72 @@ function cameraData() {
 }
 function updateSceneHint() {
   if (state.sceneLoading) { ui.sceneHint.textContent = '新场景正在加载，完成后可继续标注和发送。'; return; }
-  if (state.mode === 'erase') {
+  if (toolMode('scene') === 'erase') {
     ui.sceneHint.textContent = state.sceneView === 'snapshot' ? '划过标记擦除整条 · 可撤销' : '先选择一张截图，再擦除标记';
     return;
   }
   if (state.sceneView === 'live') {
-    ui.sceneHint.textContent = state.mode === 'select'
-      ? '拖拽旋转 · 滚轮缩放 · 点击' + (state.selectionLevel === 'item' ? '物品' : '部件') + ' · 选绘图工具即可圈画'
+    ui.sceneHint.textContent = toolMode('scene') === 'select'
+      ? (controls.freeRotation ? '自由旋转 · ' : '') + '左拖旋转 · 右拖平移 · 滚轮缩放 · 双击聚焦'
       : '直接在渲染图上圈画，自动保留当前截图';
-  } else if (state.mode === 'select') {
+  } else if (toolMode('scene') === 'select') {
     const selected = selectedAnnotation();
     ui.sceneHint.textContent = selected?.pane === 'scene' ? selected.name + ' · Backspace 删除 · 拖到会话引用' : '点击标记选中 · 拖到会话引用 · 3D 浏览可旋转场景';
   } else {
     ui.sceneHint.textContent = '在场景上' +
-      ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[state.mode] +
+      ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[toolMode('scene')] +
       ' · 标记绑定当前截图';
   }
 }
 function updateMode() {
+  feedbackEvidence?.refresh();
   updateAnnotationHistory();
-  renderPromptDragControls();
+  renderPromptReferenceControls();
   ui.frame.disabled = !editable() || !state.selectedId;
   ui.resetView.disabled = !editable();
   for (const button of [ui.savedSnapshot, ui.browse, ui.snapshotButton]) button.disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
+  ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
+  const context = id('snapshot-context');
+  context.hidden = state.sceneView !== 'snapshot';
+  context.textContent = state.sceneView === 'snapshot' ? (state.snapshot?.time_sec!==undefined ? `固定截图 · ${shortTime(state.snapshot.time_sec)}` : `${state.snapshot?.name || '截图'} · 固定视角`) : '';
   renderSceneSnapshots();
   document.body.dataset.tool = state.mode;
+  ui.referenceCanvas.dataset.tool = toolMode('reference'); ui.sceneCanvas.dataset.tool = toolMode('scene');
+  workspaceChrome?.syncState();
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
-  const drawing = state.mode !== 'select' && editable();
+  const cursor = pane => !editable() || toolMode(pane) === 'select' ? 'default' : toolMode(pane) === 'erase' ? '' : 'crosshair';
   ui.referenceCanvas.style.pointerEvents = editable() ? 'auto' : 'none';
   ui.sceneCanvas.style.pointerEvents = editable() && state.sceneView === 'snapshot' ? 'auto' : 'none';
-  const cursor = drawing ? (state.mode === 'erase' ? '' : 'crosshair') : 'pointer';
-  ui.referenceCanvas.style.cursor = cursor;
-  ui.sceneCanvas.style.cursor = cursor;
-  renderer.domElement.style.cursor = drawing && state.sceneView === 'live' ? (state.mode === 'erase' ? 'not-allowed' : 'crosshair') : '';
+  ui.referenceCanvas.style.cursor = cursor('reference');
+  ui.sceneCanvas.style.cursor = cursor('scene');
+  renderer.domElement.style.cursor = state.sceneView === 'live' && toolMode('scene') !== 'select' ? 'crosshair' : '';
   updateAnnotationSelectionHint();
-  controls.enabled = editable() && state.mode === 'select' && state.sceneView === 'live';
+  controls.enabled = editable() && toolMode('scene') === 'select' && state.sceneView === 'live';
+  id('camera-navigation').classList.toggle('hidden', state.sceneView !== 'live' || toolMode('scene') !== 'select');
+  id('camera-navigation').querySelectorAll('button').forEach(button => button.disabled = !controls.enabled);
+  id('ground-axis').disabled = !controls.enabled;
+  id('free-rotation').disabled = id('upright-camera').disabled = !controls.enabled;
+  id('free-rotation').setAttribute('aria-pressed', String(controls.freeRotation));
   ui.referenceHint.classList.toggle('hidden', !activeReference());
   updateSceneHint();
   state.drag = null;
   drawOverlays();
 }
-function setMode(mode) {
+function validTool(mode) {
+  return ['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode) ? mode : 'select';
+}
+function toolMode(pane) { return state.paneModes[pane] || 'select'; }
+function activateToolPane(pane) {
+  if (state.toolPane === pane) return;
+  state.toolPane = pane; state.mode = toolMode(pane);
+  updateMode();
+}
+function setMode(mode, pane=state.toolPane) {
   if (state.submitting || state.pendingSubmission) return;
   if (!['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode)) return;
-  state.mode = mode;
+  state.toolPane = pane; state.paneModes[pane] = mode; state.mode = mode;
   if (mode !== 'select') { state.poseEditor=null; state.poseEditDrag=null; }
   if (mode !== 'select') pauseTimeline();
   hideTextEditor();
@@ -3892,7 +4047,7 @@ function setMode(mode) {
 function browseScene() {
   if (!editable()) return;
   state.sceneView = 'live'; state.selectedAnnotationId = null;
-  setMode('select'); renderSceneView();
+  setMode('select','scene'); renderSceneView();
 }
 function updateSelectionLevelControls() {
   document.querySelectorAll('[data-selection-level]').forEach((button) => {
@@ -3901,8 +4056,8 @@ function updateSelectionLevelControls() {
     button.setAttribute('aria-pressed', String(active));
   });
   id('selection-level-hint').textContent = state.selectionLevel === 'item'
-    ? '物品：点击 GLB 的顶层物品；基本图元整体选中。'
-    : '部件：点击 GLB 的具体节点；基本图元整体选中。';
+    ? '物体：选择一整件模型，例如整张桌子。'
+    : '部件：选择模型内的节点，例如桌腿；取决于模型是否拆分。';
 }
 function setSelectionLevel(level) {
   if (state.submitting || state.pendingSubmission) return;
@@ -3927,6 +4082,7 @@ function pointFromPointer(event, canvas) {
 }
 function addAnnotation(annotation) {
   const before = annotationEditState();
+  const moment=annotation.pane==='reference' ? referenceMoment() : state.snapshot;
   const item = {
     id:newId(), pane:annotation.pane, type:annotation.type,
     coordinates:annotation.coordinates
@@ -3942,16 +4098,16 @@ function addAnnotation(annotation) {
   }
   if (annotation.text) item.text = annotation.text;
   if (annotation.points) item.points = annotation.points;
-  if (dynamicEnabled() && state.snapshot?.time_sec !== undefined) {
-    item.frame_id = state.snapshot.id;
-    item.time_sec = state.snapshot.time_sec;
-    item.clip_id = state.snapshot.clip_id;
-    if (state.snapshot.view_id) {
-      item.view_id = state.snapshot.view_id;
-      item.view_name = state.snapshot.view_name;
+  if (dynamicEnabled() && moment?.time_sec !== undefined) {
+    item.frame_id = moment.id;
+    item.time_sec = moment.time_sec;
+    item.clip_id = moment.clip_id;
+    if (moment.view_id) {
+      item.view_id = moment.view_id;
+      item.view_name = moment.view_name;
     }
-    item.scene_revision = state.snapshot.scene_revision;
-    const frameIndex = momentFrameIndex(state.snapshot);
+    item.scene_revision = moment.scene_revision;
+    const frameIndex = momentFrameIndex(moment);
     if (frameIndex !== null) item.frame_index = frameIndex;
   }
   state.annotations.push(item);
@@ -3975,11 +4131,15 @@ function prepareSceneAnnotation() {
   freezeScene();
   return state.sceneView === 'snapshot' && !!state.snapshot;
 }
+function referenceMoment() {
+  const matches=entry=>entry?.time_sec!==undefined && entry.reference_id===state.activeReferenceId && Math.abs(entry.time_sec-state.time)<1e-6;
+  return matches(state.snapshot) ? state.snapshot : state.dynamicSnapshots.findLast(matches);
+}
 function annotationVisibleInPane(annotation, pane) {
   if (annotation.pane !== pane) return false;
   if (pane === 'scene') return state.sceneView === 'snapshot' && annotation.snapshot_id === state.snapshot?.id;
   if (annotation.reference_image_id !== state.activeReferenceId) return false;
-  return !annotation.frame_id || (!state.playing && annotation.frame_id === state.snapshot?.id && Math.abs(annotation.time_sec - state.time) < 1e-6);
+  return !annotation.frame_id || (!state.playing && state.dynamicSnapshots.some(entry=>entry.id===annotation.frame_id) && Math.abs(annotation.time_sec - state.time) < 1e-6);
 }
 function selectedAnnotation() {
   const mark = state.annotations.find(mark => mark.id === state.selectedAnnotationId);
@@ -3987,8 +4147,8 @@ function selectedAnnotation() {
 }
 function updateAnnotationSelectionHint() {
   const mark = selectedAnnotation();
-  ui.referenceHint.textContent = state.mode === 'erase' ? '划过标记擦除整条 · 可撤销'
-    : state.mode !== 'select' ? '在图片上圈出想让 Codex 注意的地方'
+  ui.referenceHint.textContent = toolMode('reference') === 'erase' ? '划过标记擦除整条 · 可撤销'
+    : toolMode('reference') !== 'select' ? '在图片上圈出想让 Codex 注意的地方'
     : mark?.pane === 'reference' ? mark.name + ' · Backspace 删除 · 拖到会话引用'
     : '点击标记选中 · 拖到会话引用 · 空白处拖动平移';
   for (const button of ui.annotationList.querySelectorAll('[data-annotation-id]')) {
@@ -4016,9 +4176,10 @@ async function revealAnnotation(annotation) {
     state.referenceZoom = 1; state.referencePan = {x:0,y:0};
     renderReferenceStrip(); showActiveReference();
   }
-  setMode('select');
+  setMode('select',annotation.pane);
   state.selectedAnnotationId = annotation.id;
   minimalLayout?.closeReferences(); drawOverlays(); saveDraft();
+  workspaceChrome?.open(annotation.pane);
   (annotation.pane === 'scene' ? ui.sceneCanvas : ui.referenceCanvas).focus({preventScroll:true});
 }
 function selectAnnotationFromPointer(event,pane) {
@@ -4098,13 +4259,15 @@ function sweepEraser(to, canvas) {
 }
 function annotationPointerDown(event, pane) {
   if (!editable() || state.spacePan || event.button !== 0) return;
-  if (state.mode === 'select') { selectAnnotationFromPointer(event,pane); return; }
+  const mode = toolMode(pane);
+  if (mode === 'select') { selectAnnotationFromPointer(event,pane); return; }
   if (pane === 'reference' && !activeReference()) return;
+  pauseTimeline();
   const canvas = event.currentTarget;
   // Preserve the clicked pixel before saving a moment can resize the timeline.
   const point = pointFromPointer(event, canvas);
   event.preventDefault();
-  if (state.mode === 'erase') {
+  if (mode === 'erase') {
     if (pane === 'scene' && state.sceneView !== 'snapshot') { announce('请先选择一张截图，再擦除上面的标记。'); return; }
     canvas.setPointerCapture(event.pointerId);
     state.drag = {pane, type:'erase', start:point, end:point, pointerId:event.pointerId, erased:new Set()};
@@ -4113,13 +4276,13 @@ function annotationPointerDown(event, pane) {
   }
   if (pane === 'scene') { if (!prepareSceneAnnotation()) return; }
   else if (dynamicEnabled() && !ensureDynamicMoment()) return;
-  if (state.mode === 'text') {
+  if (mode === 'text') {
     showTextEditor(pane, point, event.clientX, event.clientY);
     return;
   }
   canvas.setPointerCapture(event.pointerId);
-  state.drag = {pane, type:state.mode, start:point, end:point, pointerId:event.pointerId,
-    points:state.mode === 'freehand' ? [point] : null};
+  state.drag = {pane, type:mode, start:point, end:point, pointerId:event.pointerId,
+    points:mode === 'freehand' ? [point] : null};
   drawOverlays();
 }
 function annotationPointerMove(event) {
@@ -4508,19 +4671,14 @@ function promptImageUnavailable(pane) {
   if (comparison?.enabled && comparison.opacity > 0 && !imageReadyAtUrl(ui.snapshotCompareImage,comparison.data_url)) return '截图的叠图参考正在加载，请稍后再引用。';
   return null;
 }
-function renderPromptDragControls() {
-  for (const [pane,button] of [['reference',ui.dragReference],['scene',ui.dragScene]]) {
-    if (!button) continue;
-    const reason = promptImageUnavailable(pane);
-    button.disabled = !!reason;
-    button.title = reason || '拖到提示，也可点击引用当前' + (pane === 'reference' ? '参考图' : '渲染图');
-  }
+function renderPromptReferenceControls() {
+  promptAttachments?.refresh();
   promptMentions?.refresh();
 }
-function capturePromptImage(pane) {
-  const reason = promptImageUnavailable(pane);
+function capturePromptImage(pane, saved=null) {
+  const reason = saved ? (!editable() || !state.imageReferencesSupported ? '当前暂时无法引用图片。' : null) : promptImageUnavailable(pane);
   if (reason) throw new Error(reason);
-  // Capture synchronously at dragstart. The pixels and metadata in this object
+  // Capture at selection time. The pixels and metadata in this object
   // never follow later camera movements, source seeks, or scene publications.
   pauseTimeline();
   const entry = {id:newId().replace(/-/g,''), pane};
@@ -4539,19 +4697,20 @@ function capturePromptImage(pane) {
       entry.label = promptImageLabel('参考图 · ' + frameTimeLabel(ref.time_sec,index,view.name || ''));
     }
     marks = state.annotations.filter((mark) => mark.pane === 'reference' && mark.reference_image_id === ref.id &&
-      (!mark.frame_id || mark.frame_id === state.snapshot?.id && Math.abs(mark.time_sec-state.time) <= 1e-6));
+      (!mark.frame_id || Math.abs(mark.time_sec-(ref.time_sec ?? state.time)) <= 1e-6));
   } else {
-    const snapshot = state.sceneView === 'snapshot' ? state.snapshot : null;
+    const snapshot = saved?.snapshot || (state.sceneView === 'snapshot' ? state.snapshot : null);
     entry.scene_revision = snapshot?.scene_revision ?? state.sceneRevision;
     entry.selected_object_ids = [...(snapshot?.selected_object_ids || (state.selectedId ? [state.selectedId] : []))];
     entry.selected_scene_nodes = structuredClone(snapshot?.selected_scene_nodes || (state.selectedSceneNode ? [state.selectedSceneNode] : []));
     entry.label = '场景 · 版本 ' + entry.scene_revision;
     if (snapshot) {
-      source = ui.snapshotImage;
+      source = saved?.source || ui.snapshotImage;
+      if(snapshot.name) entry.label=snapshot.name+' · 版本 '+entry.scene_revision;
       entry.original_data_url = snapshot.data_url;
       entry.camera = structuredClone(snapshot.camera);
       if (snapshot.comparison?.enabled && snapshot.comparison.opacity > 0) comparison=snapshot.comparison;
-      marks = state.annotations.filter((mark) => mark.pane === 'scene' && mark.snapshot_id === snapshot.id);
+      marks = saved?.marks || state.annotations.filter((mark) => mark.pane === 'scene' && mark.snapshot_id === snapshot.id);
       if (Number.isFinite(snapshot.time_sec)) {
         entry.time_sec = snapshot.time_sec;
         if (snapshot.clip_id) entry.clip_id = snapshot.clip_id;
@@ -4592,7 +4751,7 @@ function capturePromptImage(pane) {
   if (comparison) {
     const rect=comparison.rect;
     context.globalAlpha=comparison.opacity/100;
-    context.drawImage(ui.snapshotCompareImage,rect.x*canvas.width,rect.y*canvas.height,rect.width*canvas.width,rect.height*canvas.height);
+    context.drawImage(saved?.comparisonImage || ui.snapshotCompareImage,rect.x*canvas.width,rect.y*canvas.height,rect.width*canvas.width,rect.height*canvas.height);
     context.globalAlpha=1;
   }
   if (marks.length || comparison) {
@@ -4601,17 +4760,30 @@ function capturePromptImage(pane) {
   }
   return entry;
 }
+async function addSavedPromptImage(snapshotId,isCurrent) {
+  const original=[...state.sceneSnapshots,...state.dynamicSnapshots].find(item=>item.id===snapshotId);
+  if(!original) throw new Error('这张截图已移除，请重新选择。');
+  const sessionId=state.sessionId,snapshot=structuredClone(original);
+  const marks=structuredClone(state.annotations.filter(mark=>mark.pane==='scene' && mark.snapshot_id===snapshotId));
+  const comparison=snapshot.comparison?.enabled && snapshot.comparison.opacity>0;
+  const [source,comparisonImage]=await Promise.all([loadImage(snapshot.data_url),comparison?loadImage(snapshot.comparison.data_url):null]);
+  if(!isCurrent() || state.sessionId!==sessionId) return false;
+  if(![...state.sceneSnapshots,...state.dynamicSnapshots].some(item=>item.id===snapshotId)) throw new Error('这张截图已移除，请重新选择。');
+  return addPromptImageReference(capturePromptImage('scene',{snapshot,source,comparisonImage,marks}));
+}
 function addPromptImageReference(entry) {
   if (!editable()) return false;
   if (!state.imageReferencesSupported) { announce('服务尚不支持图片引用，请更新服务并刷新页面。',true); return false; }
   let cited;
-  try { cited = collectImageReferences(ui.note.value,state.imageRefs); }
+  try { cited = collectImageReferences(promptText(),state.imageRefs); }
   catch (error) { announce(error.message,true); return false; }
   if (cited.length >= 8 && !cited.some((item) => item.id === entry.id)) {
     announce('一条提示最多引用 8 张图片，请先移除不需要的图片。',true); return false;
   }
   const previous = state.imageRefs;
-  state.imageRefs = [...cited.filter((item) => item.id !== entry.id),entry];
+  const citedIds=new Set(cited.map(item=>item.id));
+  const dormant=state.imageRefs.filter(item=>!citedIds.has(item.id) && item.id!==entry.id).slice(-8);
+  state.imageRefs = [...dormant,...cited.filter(item=>item.id!==entry.id),entry];
   if (!insertNoteReference(entry.label,imageToken(entry.id))) { state.imageRefs = previous; return false; }
   renderPromptImageReferences();
   return true;
@@ -4625,31 +4797,85 @@ function previewPromptImage(entry) {
   ui.imagePreviewToggle.dataset.original = 'false';
   ui.imagePreview.showModal();
 }
+function promptText() { return promptReferenceText.expand(ui.note.value); }
+function resolvePromptReference(token, fallback='') {
+  const match=/^\[\[(object|node|annotation|image|pose|pose_edit):(.+)\]\]$/.exec(token);
+  if(!match) return null;
+  const [,kind,key]=match;
+  let name=fallback,label=fallback,title=fallback,missing=false;
+  if(kind==='image') {
+    const entry=state.imageRefs.find(item=>item.id===key);
+    label=entry?.label || fallback;name='图';title=label;missing=!entry;
+  } else if(kind==='annotation') {
+    const mark=state.annotations.find(item=>item.id===key);
+    name=mark?.name || fallback.split('（')[0] || '标记';label=mark?annotationReferenceLabel(mark):fallback;
+    const snapshot=[...state.sceneSnapshots,...state.dynamicSnapshots].find(item=>item.id===(mark?.frame_id || mark?.snapshot_id));
+    title=[mark?.pane==='reference'?'参考图':'场景截图',snapshot?.name,label,mark?.text].filter(Boolean).join(' · ');missing=!mark;
+  } else if(kind==='object') {
+    const item=sceneObject(key);name=item?.name || fallback || '物体';label=item?.name || fallback;title='物体 · '+label;missing=!item;
+  } else if(kind==='node') {
+    const node=state.referencedSceneNodes.find(item=>item.parent_object_id+':'+item.node_path.join('/')===key);
+    name=node?.node_name || fallback || '部件';label=node?.node_name || fallback;title='部件 · '+label;missing=!node;
+  } else if(kind==='pose') {
+    const job=state.humanJobs.find(item=>key.startsWith(item.job_id+':'));
+    name=job?humanJobName(job):'人体结果';title=fallback;missing=!state.poseRefs.some(item=>poseToken(item.job_id,item.reference_id)===token);
+  } else {
+    const item=state.poseEdits.find(item=>item.id===key);
+    name='手部修正';label=item?'手部修正（'+item.label+'）':fallback;title=label;missing=!item;
+  }
+  return {kind,name,label,title,missing};
+}
+function removePromptReference(token) {
+  if(!editable()) return;
+  // Retain source bytes until the draft is submitted, so native text undo can
+  // restore a removed image reference with the same immutable evidence.
+  const text=promptReferenceText.remove(ui.note.value,token);
+  replacePromptText(text);
+}
+function replacePromptText(text) {
+  const start=ui.note.selectionStart,end=ui.note.selectionEnd;
+  ui.note.focus({preventScroll:true});ui.note.select();
+  // insertText participates in the browser's native textarea undo history.
+  const replaced=document.execCommand('insertText',false,text);
+  if(!replaced) ui.note.value=text;
+  ui.note.setSelectionRange(Math.min(start,text.length),Math.min(end,text.length));
+  renderPromptImageReferences();saveDraft();
+}
+function previewPromptReference(entry) {
+  const meta=resolvePromptReference(entry.token,entry.label);
+  id('prompt-reference-title').textContent=entry.alias.slice(1,-1);
+  id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
+  id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
+  const locate=id('prompt-reference-locate');
+  const mark=entry.kind==='annotation'?state.annotations.find(item=>`[[annotation:${item.id}]]`===entry.token):null;
+  locate.hidden=!mark;locate.onclick=()=>{id('prompt-reference-dialog').close();revealAnnotation(mark);};
+  id('prompt-reference-dialog').showModal();
+}
 function renderPromptImageReferences() {
+  feedbackEvidence?.refresh();
   ui.imageRefs.replaceChildren();
-  const ids = new Set([...ui.note.value.matchAll(/\[\[image:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
-  const entries = state.imageRefs.filter((item) => ids.has(item.id));
+  const entries=promptReferenceText.entries(ui.note.value);
   ui.imageRefs.classList.toggle('hidden',!entries.length);
-  for (const entry of entries) {
-    const chip = document.createElement('div'); chip.className = 'prompt-image-chip'; chip.dataset.imageRefId = entry.id;
-    const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'prompt-image-preview';
-    preview.title = '预览引用时固定的图片'; preview.dataset.imageRefId = entry.id;
-    const image = document.createElement('img'); image.src = entry.annotated_data_url || entry.original_data_url; image.alt = '';
-    const label = document.createElement('span'); label.textContent = entry.label;
-    preview.append(image,label); preview.addEventListener('click',() => previewPromptImage(entry));
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'prompt-image-remove';
-    remove.dataset.imageRefId = entry.id; remove.textContent = '×'; remove.title = '移除图片引用';
-    remove.setAttribute('aria-label','移除 ' + entry.label); remove.disabled = !editable();
-    remove.addEventListener('click',() => {
-      if (!editable()) return;
-      const token = imageToken(entry.id);
-      ui.note.value = ui.note.value.split(token).join('');
-      state.imageRefs = state.imageRefs.filter((item) => item.id !== entry.id);
-      renderPromptImageReferences(); saveDraft(); ui.note.focus();
-    });
-    chip.append(preview,remove); ui.imageRefs.append(chip);
+  for(const entry of entries) {
+    const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
+    const chip=document.createElement('div');chip.className=image?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
+    const preview=document.createElement('button');preview.type='button';preview.className=image?'prompt-image-preview':'prompt-reference-preview';
+    preview.title=resolvePromptReference(entry.token,entry.label)?.title || entry.title || entry.label;
+    if(image) {
+      chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;
+      const thumbnail=document.createElement('img');thumbnail.src=image.annotated_data_url || image.original_data_url;thumbnail.alt='';preview.append(thumbnail);
+    } else {
+      const kind=document.createElement('span');kind.className='prompt-reference-kind';kind.textContent=({object:'物体',node:'部件',annotation:'标记',pose:'人体',pose_edit:'修正',image:'图片'})[entry.kind];preview.append(kind);
+    }
+    const label=document.createElement('span');label.textContent=entry.alias.slice(1,-1)+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
+    preview.addEventListener('click',()=>image?previewPromptImage(image):previewPromptReference(entry));
+    const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
+    if(image) remove.dataset.imageRefId=image.id;
+    remove.textContent='×';remove.title='移除引用';remove.setAttribute('aria-label','移除 '+entry.alias.slice(1,-1));remove.disabled=!editable();
+    remove.addEventListener('click',()=>removePromptReference(entry.token));chip.append(preview,remove);ui.imageRefs.append(chip);
   }
 }
+
 function selectedPromptReference() {
   const item = sceneObject(state.selectedId);
   if (!item) return null;
@@ -4667,7 +4893,7 @@ function getPromptMentionCandidates() {
   if (selection && item && (selection.kind !== 'node' || resolveSceneNode(selection.node))) {
     const node=selection.kind === 'node' ? selection.node : null;
     const key=node ? node.parent_object_id+':'+node.node_path.join('/') : selection.objectId;
-    const category=node ? state.selectionLevel === 'item' ? '物品' : '部件' : '物体';
+    const category=node ? state.selectionLevel === 'item' ? '物体' : '部件' : '物体';
     candidates.push({key:selection.kind+':'+key,kind:selection.kind,sessionId,label:selection.label,
       detail:'当前选中'+category+' · '+item.id+(node ? ' · '+node.node_path.join('/') : ''),
       search:['当前选中 物体 物品 对象 部件 节点 object item node part',key,item.name,node?.node_name,node?.semantic_id,node?.stable_id].join(' '),
@@ -4740,11 +4966,6 @@ function bindPromptDrag(element,getDescriptor,kind) {
   });
 }
 function bindPromptReferenceEvents() {
-  for (const [pane,button] of [['reference',ui.dragReference],['scene',ui.dragScene]]) {
-    const descriptor = () => ({kind:'image',image:capturePromptImage(pane)});
-    bindPromptDrag(button,descriptor,pane);
-    button.addEventListener('click',() => { try { insertPromptDragReference(descriptor()); } catch (error) { announce(error.message,true); } });
-  }
   bindPromptDrag(ui.selectedChip,selectedPromptReference,'selection');
   ui.selectedChip.tabIndex = 0; ui.selectedChip.setAttribute('role','button');
   ui.selectedChip.title = '拖到提示引用选中的物品或部件，也可点击引用';
@@ -4779,43 +5000,91 @@ function bindPromptReferenceEvents() {
     ui.imagePreviewImage.src = original ? imagePreviewReference.original_data_url : imagePreviewReference.annotated_data_url;
   });
 }
+function promptInsertionRange(from,to) {
+  let start=from,end=to;
+  for(const entry of promptReferenceText.entries(ui.note.value)) {
+    let at=ui.note.value.indexOf(entry.alias);
+    while(at>=0) {
+      const after=at+entry.alias.length;
+      if(start===end && start>at && start<after) start=end=after;
+      else if(start<after && end>at) {start=Math.min(start,at);end=Math.max(end,after);}
+      at=ui.note.value.indexOf(entry.alias,after);
+    }
+  }
+  return [start,end];
+}
+function bindCompactReferenceEditing() {
+  for(const event of ['focus','pointerdown']) ui.note.addEventListener(event,()=>workspaceChrome?.close({resetTool:false}));
+  ui.note.addEventListener('compositionstart',()=>{
+    const [start,end]=promptInsertionRange(ui.note.selectionStart,ui.note.selectionEnd);
+    ui.note.setSelectionRange(start,end);
+  });
+  id('prompt-reference-close').addEventListener('click',()=>id('prompt-reference-dialog').close());
+  ui.note.addEventListener('beforeinput',event=>{
+    if(event.isComposing || !editable() || !/^(delete|insert)/.test(event.inputType)) return;
+    const text=ui.note.value,start=ui.note.selectionStart,end=ui.note.selectionEnd;
+    let from=start,to=end;
+    for(const entry of promptReferenceText.entries(text)) {
+      let at=text.indexOf(entry.alias);
+      while(at>=0) {
+        const after=at+entry.alias.length;
+        const touched=start===end ? (event.inputType.endsWith('Backward')?start>at && (start<=after || event.inputType==='deleteWordBackward' && /^[ \t]*$/.test(text.slice(after,start))):
+          event.inputType.endsWith('Forward')?start<after && (start>=at || event.inputType==='deleteWordForward' && /^[ \t]*$/.test(text.slice(start,at))):start>at && start<after) : start<after && end>at;
+        if(touched) {from=Math.min(from,at);to=Math.max(to,after);}
+        at=text.indexOf(entry.alias,after);
+      }
+    }
+    if(from===start && to===end) return;
+    if(event.inputType.startsWith('delete')) {
+      event.preventDefault();ui.note.setSelectionRange(from,to);
+      if(!document.execCommand('delete')) {ui.note.setRangeText('',from,to,'end');ui.note.dispatchEvent(new Event('input',{bubbles:true}));}
+    } else {
+      // A caret in a short reference continues after it; a selection replaces
+      // the whole reference instead of leaving an unresolvable fragment.
+      ui.note.setSelectionRange(start===end?to:from,to);
+    }
+  });
+}
 function insertNoteText(text, {replaceSelection=true,focus=true}={}) {
   if (!editable()) return false;
-  const start = replaceSelection ? ui.note.selectionStart : ui.note.selectionEnd;
-  const end = ui.note.selectionEnd;
+  const [start,end]=promptInsertionRange(replaceSelection?ui.note.selectionStart:ui.note.selectionEnd,ui.note.selectionEnd);
   const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
   const after = end < ui.note.value.length && !/\s/.test(ui.note.value[end]) ? ' ' : '';
-  const insertion = before + text + after;
-  if (ui.note.value.length - (end - start) + insertion.length > 10000) {
+  const insertion = before + promptReferenceText.compact(text) + after;
+  const next=ui.note.value.slice(0,start)+insertion+ui.note.value.slice(end);
+  if (promptReferenceText.expand(next).length > 10000) {
     announce('加入引用会超过提示的 10000 字上限，请先精简提示或逐条引用。', true);
     return false;
   }
+  const previousFocus=document.activeElement;
   minimalLayout?.closeReferences();
   minimalLayout?.openChat();
-  ui.note.setRangeText(insertion, start, end, 'end');
+  ui.note.focus({preventScroll:true});ui.note.setSelectionRange(start,end);
+  if(!document.execCommand('insertText',false,insertion)) ui.note.setRangeText(insertion,start,end,'end');
   // Selecting or quoting a mark preserves the current screenshot.
   setMode('select');
   if (focus) ui.note.focus();
+  else if(previousFocus?.isConnected) previousFocus.focus({preventScroll:true});
   renderPromptImageReferences();
   saveDraft();
   return true;
 }
 function insertNoteReference(label, token) {
-  return insertNoteText(label + ' ' + token);
+  return insertNoteText(promptReferenceText.remember(label,token).alias);
 }
 function insertAllAnnotationReferences() {
   if (!editable() || !state.annotations.length) return;
-  const existing = new Set([...ui.note.value.matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
+  const existing = new Set([...promptText().matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)].map((match) => match[1]));
   const references = state.annotations.flatMap((annotation, index) => {
     if (existing.has(annotation.id)) return [];
-    return [annotationReferenceLabel(annotation) + ` [[annotation:${annotation.id}]]`];
+    return [promptReferenceText.remember(annotationReferenceLabel(annotation),`[[annotation:${annotation.id}]]`).alias];
   });
   if (!references.length) {
     minimalLayout?.closeReferences(); minimalLayout?.openChat({focus:true});
     announce('全部标记已在提示中引用。');
     return;
   }
-  if (insertNoteText(references.join('\n'), {replaceSelection:false})) {
+  if (insertNoteText(references.join(' '), {replaceSelection:false})) {
     announce('已引用 ' + references.length + ' 条标记，可继续补充提示。');
   }
 }
@@ -4831,7 +5100,7 @@ function insertSceneNodeReference(node, label, source=null) {
   saveDraft();
   return true;
 }
-function promptReferences(note=ui.note.value) {
+function promptReferences(note=promptText()) {
   if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
   if (/\[\[image:/.test(note) && !state.imageReferencesSupported) throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
   collectImageReferences(note,state.imageRefs);
@@ -4880,10 +5149,11 @@ function clearSubmittedPrompt(submission) {
   const submittedDraft = submission.draftNote;
   const submittedNote = submission.payload.note;
   const unchanged = typeof submittedDraft === 'string'
-    ? ui.note.value === submittedDraft
-    : ui.note.value.trim() === String(submittedNote || '').trim();
+    ? ui.note.value === promptReferenceText.compact(submittedDraft)
+    : ui.note.value.trim() === promptReferenceText.compact(String(submittedNote || '')).trim();
   if (!unchanged) return false;
   ui.note.value = '';
+  promptReferenceText.reset();
   state.referencedSceneNodes = [];
   state.poseRefs = [];
   state.poseEdits = []; state.poseEditor=null; state.poseEditDrag=null;
@@ -4905,7 +5175,7 @@ async function clearSubmittedDraft(submission) {
   state.selectedSceneNode = null;
   state.lastPickedDetailNode = null;
   state.groupId = ''; ui.groupSelect.value = '';
-  state.mode = 'select';
+  state.paneModes = {reference:'select',scene:'select'}; state.mode = 'select';
   // A submitted round is a fresh undo boundary. Its evidence lives in the
   // saved feedback packet, rather than being restored into a later round.
   annotationHistory.clear();
@@ -4975,7 +5245,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
 }
 async function submitFeedback() {
   if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject) return;
-  const promptText = ui.note.value;
+  const promptText = promptReferenceText.expand(ui.note.value);
   if (!state.poseCorrectionsSupported && (/\[\[pose_edit:/.test(promptText) || state.pendingSubmission?.payload?.pose_edits?.length)) {
     announce('服务尚不支持关键点修正，请更新服务并刷新页面后发送。',true); return;
   }
@@ -5034,6 +5304,7 @@ async function submitFeedback() {
     const result = await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/feedback', {
       method:'POST', body:state.pendingSubmission.payload
     });
+    feedbackEvidence?.rememberSaved(result.feedback || result);
     const submitted = state.pendingSubmission;
     await clearOutbox();
     state.pendingSubmission = null;
@@ -5171,10 +5442,28 @@ function setRendererSize(width, height) {
   renderer.getSize(rendererSize);
   if (rendererSize.x !== width || rendererSize.y !== height) renderer.setSize(width, height, false);
 }
+function applyTheme({dark, animate=false}) {
+  const palette = {background:new THREE.Color(dark ? '#202327' : '#eae9e3'), grid:new THREE.Color(dark ? '#8e9ba8' : '#ffffff')};
+  const apply = () => {
+    threeScene.background.copy(palette.background); threeScene.fog.color.copy(palette.background);
+    ground.material.color.copy(palette.background); grid.material.color.copy(palette.grid);
+  };
+  if (animate) backgroundTransition = {start:performance.now(), from:threeScene.background.clone(), gridFrom:grid.material.color.clone(), ...palette};
+  else { backgroundTransition = null; apply(); }
+  if (selectionHelper) selectionHelper.material.color.set(dark ? '#ecece8' : '#292925');
+}
 function animate(timestamp) {
   requestAnimationFrame(animate);
+  if (backgroundTransition) {
+    const t = Math.min(1, (timestamp - backgroundTransition.start) / 380);
+    const ease = t * t * (3 - 2 * t);
+    threeScene.background.lerpColors(backgroundTransition.from, backgroundTransition.background, ease);
+    threeScene.fog.color.copy(threeScene.background); ground.material.color.copy(threeScene.background);
+    grid.material.color.lerpColors(backgroundTransition.gridFrom, backgroundTransition.grid, ease);
+    if (t === 1) backgroundTransition = null;
+  }
   advanceTimeline(timestamp);
-  controls.update();
+  controls.tick(timestamp);
   if (state.sceneView === 'live') renderer.render(threeScene, camera);
 }
 async function poll() {
@@ -5202,25 +5491,35 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
+  snapshotGallery=setupSnapshotGallery({getItems:galleryItems,
+    getTimeline:()=>({duration:timelineDuration(),viewId:state.referenceClip ? referenceView()?.clip_id : null}),
+    onOpen:id=>state.dynamicSnapshots.some(entry=>entry.id===id) ? openMoment(id) : openSceneSnapshot(id),
+    onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
+  workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}}});
   minimalLayout = setupMinimalLayout({getState:() => state});
+  setupTheme({onChange:applyTheme});
+  immersiveWorkspace = setupImmersive({onResize:() => { resizeScene(); updateReferenceGeometry(); }, onLayoutChange:() => workspaceChrome?.layoutChanged(), hasActiveGesture:() => !!(state.drag || annotationReferenceDrag || state.textPending || state.poseEditDrag)});
+  workspaceChrome = setupWorkspaceChrome({getState:() => state, setMode, activateToolPane, revealReference:() => immersiveWorkspace.setReference(true)});
+  setupActionIcons();
+  feedbackEvidence = setupFeedbackEvidence({getDraft:feedbackEvidenceData, api, resourceURL});
   bindPromptReferenceEvents();
   bindPoseEditEvents();
   promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
     getCandidates:getPromptMentionCandidates,onSelect:insertPromptMention,isEnabled:editable,
     onError:(message) => announce(message,true)});
+  promptAttachments=setupPromptAttachments({
+    isEnabled:()=>editable() && state.imageReferencesSupported,
+    getOptions:()=>({reference:{label:dynamicEnabled() && clipReference()?'引用当前视频帧':'引用当前参考图',disabled:promptImageUnavailable('reference')},
+      scene:{label:state.sceneView==='snapshot'?'引用这张截图':'引用当前场景画面',disabled:promptImageUnavailable('scene')}}),
+    getSaved:galleryItems,
+    onCapture:pane=>addPromptImageReference(capturePromptImage(pane)),
+    onSaved:addSavedPromptImage,
+    onBeforeOpen:()=>promptMentions?.close({dismiss:true}),
+    onError:message=>announce(message,true)
+  });
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);
-  id('close-projects').addEventListener('click', () => ui.projectsDialog.close());
-  ui.projectsDialog.addEventListener('close', () => {
-    ui.projectsButton.setAttribute('aria-expanded', 'false');
-    ui.projectsButton.focus({preventScroll:true});
-  });
-  ui.projectsDialog.addEventListener('click', (event) => {
-    if (event.target !== ui.projectsDialog) return;
-    const bounds = ui.projectsDialog.getBoundingClientRect();
-    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) ui.projectsDialog.close();
-  });
   ui.refreshProjects.addEventListener('click', () => {
     loadProjects().catch(() => {});
     if (state.modelLoadError) loadModels({forProjects:true}).catch(() => {});
@@ -5232,6 +5531,7 @@ function bindEvents() {
   ui.projectModel.addEventListener('change', () => {
     state.projectModelChoice = ui.projectModel.value || null; state.projectEffortChoice = ''; renderCreateProject();
   });
+  ui.projectPermissions.addEventListener('change', renderCreateProject);
   ui.projectEffort.addEventListener('change', () => { state.projectEffortChoice = ui.projectEffort.value || ''; renderCreateProject(); });
   ui.createProjectForm.addEventListener('submit', (event) => { event.preventDefault(); createSceneProject(); });
   ui.openCreatedProject.addEventListener('click', () => navigateProject(state.projectCreationResult));
@@ -5285,12 +5585,14 @@ function bindEvents() {
     saveDraft();
   });
   ui.referenceStage.addEventListener('wheel', (event) => {
+    if (event.target.closest('.reference-corner-tools, button, summary, input, select')) return;
     if (!activeReference()) return;
     event.preventDefault();
     setReferenceZoom(state.referenceZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), event);
   }, {passive:false});
   ui.referenceStage.addEventListener('pointerdown', (event) => {
-    if (!activeReference() || !(state.mode === 'select' || state.spacePan)) return;
+    if (event.target.closest('.reference-corner-tools, button, summary, input, select')) return;
+    if (!activeReference() || !(toolMode('reference') === 'select' || state.spacePan)) return;
     event.preventDefault();
     ui.referenceStage.setPointerCapture(event.pointerId);
     state.referencePanning = {pointerId:event.pointerId, x:event.clientX, y:event.clientY,
@@ -5309,7 +5611,7 @@ function bindEvents() {
   });
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
-  ui.snapshotCompareImage.addEventListener('load', renderPromptDragControls);
+  ui.snapshotCompareImage.addEventListener('load', renderPromptReferenceControls);
   ui.savedSnapshot.addEventListener('click', openSavedSnapshot);
   ui.captureScene.addEventListener('click', freezeScene);
   ui.browse.addEventListener('click', browseScene);
@@ -5335,6 +5637,7 @@ function bindEvents() {
     canvas.tabIndex = 0;
     canvas.addEventListener('lostpointercapture', () => finishAnnotationReferenceDrag());
   }
+  bindCompactReferenceEditing();
   ui.note.addEventListener('input',() => { renderPromptImageReferences(); saveDraft(); });
   ui.note.addEventListener('keydown', (event) => {
     if (promptMentions.isComposing(event) || promptMentions.handleKeydown(event)) return;
@@ -5353,32 +5656,44 @@ function bindEvents() {
     } catch (error) { announce('停止失败：' + error.message, true); }
     finally { ui.stop.disabled = false; }
   });
-  ui.clearAnnotations.addEventListener('click', () => {
-    if (!editable() || ui.clearAnnotations.disabled) return;
-    ui.clearDialog.showModal();
-    ui.cancelClear.focus();
-  });
+  const askClear = scope => {
+    if (!editable()) return;
+    const marks = state.annotations.filter(mark => scope === 'round' || annotationVisibleInPane(mark,state.toolPane));
+    clearRequest = {scope,pane:state.toolPane,ids:new Set(marks.map(mark=>mark.id))};
+    if (scope === 'round' ? id('clear-round').disabled : !marks.length) return;
+    id('clear-annotations-title').textContent = scope === 'round' ? '清空本轮图片与标记？' : '清除本图标记？';
+    id('clear-annotations-description').textContent = scope === 'round'
+      ? `将移除 ${state.sceneSnapshots.length} 张截图、${state.dynamicSnapshots.length} 个保留时刻和 ${marks.length} 个标记。参考素材、模型、文字与文字中的图片引用保留，可撤销。`
+      : `仅移除当前${state.toolPane === 'reference' ? '参考图' : '截图'}上的 ${marks.length} 个标记。图片和其他标记保留，可撤销。`;
+    ui.confirmClear.textContent = scope === 'round' ? '确认清空本轮' : '确认清除';
+    pauseTimeline(); ui.clearDialog.showModal(); ui.cancelClear.focus();
+  };
+  ui.clearAnnotations.addEventListener('click', () => askClear('image'));
+  id('clear-round').addEventListener('click', () => askClear('round'));
   ui.cancelClear.addEventListener('click', () => ui.clearDialog.close());
   ui.clearDialog.addEventListener('close', () => {
-    const target = ui.clearAnnotations.disabled ? ui.undoAnnotation : ui.clearAnnotations;
-    if (!target.disabled) target.focus({preventScroll:true});
+    const pane = clearRequest?.pane; const global = clearRequest?.scope === 'round'; const confirmed=clearRequest?.confirmed; clearRequest = null;
+    if (global && confirmed) workspaceSidebar.close();
+    else if (global) id('close-projects').focus({preventScroll:true});
+    else {
+      workspaceChrome?.open(pane || state.toolPane);
+      (ui.clearAnnotations.disabled ? ui.undoAnnotation : ui.clearAnnotations).focus({preventScroll:true});
+    }
   });
   ui.confirmClear.addEventListener('click', () => {
-    if (!ui.clearDialog.open) return;
+    if (!ui.clearDialog.open || !clearRequest) return;
     if (!editable()) { ui.clearDialog.close(); return; }
     pauseTimeline(); hideTextEditor(); state.drag = null;
     const before = annotationEditState();
-    state.annotations = [];
-    state.dynamicSnapshots = [];
-    state.sceneSnapshots = [];
-    state.snapshot = null; state.sceneView = 'live'; renderSceneView();
-    recordAnnotationEdit(before);
-    renderTimeline();
-    renderAnnotations();
-    drawOverlays();
-    saveDraft();
-    ui.clearDialog.close();
-    announce('已清空标记和截图，可点击「撤销」恢复。');
+    if (clearRequest.scope === 'round') {
+      state.annotations = []; state.dynamicSnapshots = []; state.sceneSnapshots = [];
+      state.snapshot = null; state.sceneView = 'live'; state.paneModes.scene = 'select';
+      state.mode = toolMode(state.toolPane); renderSceneView();
+    } else state.annotations = state.annotations.filter(mark => !clearRequest.ids.has(mark.id));
+    if (!state.annotations.some(mark => mark.id === state.selectedAnnotationId)) state.selectedAnnotationId = null;
+    recordAnnotationEdit(before); renderTimeline(); renderAnnotations(); drawOverlays(); saveDraft();
+    clearRequest.confirmed=true;
+    ui.clearDialog.close(); announce('已清除，可撤销恢复。');
   });
   ui.undoAnnotation.addEventListener('click', undoAnnotationEdit);
   ui.redoAnnotation.addEventListener('click', redoAnnotationEdit);
@@ -5392,18 +5707,60 @@ function bindEvents() {
     renderSelection();
     saveDraft();
   });
-  ui.frame.addEventListener('click', () => {
+  const focusSelection = () => {
     if (!editable()) return;
     browseScene();
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
-    if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode));
-    else if (state.selectedId) frameBox(objectBox(state.selectedId));
-    else frameAll();
+    if (selectedNode) frameBox(new THREE.Box3().setFromObject(selectedNode), {smooth:true, keepDirection:true});
+    else if (state.selectedId) frameBox(objectBox(state.selectedId), {smooth:true, keepDirection:true});
+    else frameAll({smooth:true});
     minimalLayout?.closeReferences();
+  };
+  ui.frame.addEventListener('click', focusSelection);
+  renderer.domElement.addEventListener('dblclick', (event) => {
+    if (!editable() || state.sceneView !== 'live' || toolMode('scene') !== 'select') return;
+    const selection = pickScene(event);
+    if (!selection) return;
+    selectObject(selection.objectId, selection.sceneNode, selection.detailNode);
+    focusSelection();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key.toLowerCase() !== 'f' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 ||
+        event.target.closest('input, textarea, select, [contenteditable], dialog[open]') || document.querySelector('dialog[open]') || state.sceneView !== 'live') return;
+    event.preventDefault(); focusSelection();
+  });
+  const directions = {front:[0,-1,0], back:[0,1,0], left:[-1,0,0], right:[1,0,0], top:[0,-.0001,1], bottom:[0,-.0001,-1], iso:[1,-1.4,.95]};
+  id('camera-navigation').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-camera-view]');
+    if (!button || !editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera();
+    controls.setFree(false);
+    const direction = navigationDirection(directions[button.dataset.cameraView]).normalize();
+    controls.moveTo(controls.target.clone().addScaledVector(direction, Math.max(.3, controls.getDistance())), controls.target, {up:controls.worldUp});
+    updateMode();
+  });
+  id('ground-axis').addEventListener('change', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera();
+    state.groundAxis = id('ground-axis').value;
+    applyGroundAxis(state.groundAxis === 'auto' ? state.detectedUpAxis : state.groundAxis);
+    controls.setFree(false); frameAll({smooth:true}); updateMode(); saveDraft();
+  });
+  id('free-rotation').addEventListener('click', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera(); controls.setFree(!controls.freeRotation); updateMode(); saveDraft();
+  });
+  id('upright-camera').addEventListener('click', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    leaveReferenceCamera(); controls.setFree(false); updateMode(); saveDraft();
+  });
+  id('frame-all').addEventListener('click', () => {
+    if (!editable() || state.sceneView !== 'live') return;
+    controls.setFree(false); frameAll({smooth:true}); updateMode();
   });
   ui.resetView.addEventListener('click', () => {
     if (!editable()) return;
-    browseScene(); frameAll(); minimalLayout?.closeReferences();
+    browseScene(); controls.setFree(false); frameAll({smooth:true}); updateMode(); minimalLayout?.closeReferences();
   });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);
@@ -5411,13 +5768,11 @@ function bindEvents() {
     if (event.key === 'Enter') { event.preventDefault(); saveTextAnnotation(); }
     if (event.key === 'Escape') { event.preventDefault(); hideTextEditor(); }
   });
-  id('help-button').addEventListener('click', () => id('help-dialog').showModal());
-  id('close-help').addEventListener('click', () => id('help-dialog').close());
   renderer.domElement.addEventListener('pointerdown', (event) => {
     pointerDown = {x:event.clientX, y:event.clientY, button:event.button};
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
-    if (!pointerDown || pointerDown.button !== 0 || state.mode !== 'select' || state.sceneView !== 'live') return;
+    if (!pointerDown || pointerDown.button !== 0 || toolMode('scene') !== 'select' || state.sceneView !== 'live') return;
     const distance = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
     pointerDown = null;
     if (distance < 5) handleSceneClick(event);
@@ -5489,6 +5844,11 @@ animate();
 try {
   await ensureSession();
   await loadScene();
+  if(state.legacyPromptMigration && ui.note.value===state.legacyPromptMigration.display) {
+    ui.note.value=promptReferenceText.compact(state.legacyPromptMigration.original);
+    renderPromptImageReferences();saveDraft();
+  }
+  state.legacyPromptMigration=null;
   updateMode();
   renderAnnotations();
   drawOverlays();

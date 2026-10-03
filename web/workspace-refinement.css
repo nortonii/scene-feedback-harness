@@ -1,0 +1,116 @@
+/* Consistent reading hierarchy, grouped scene controls and explicit feedback scope. */
+:root { --text-control: 13px; --text-caption: 12px; --text-body: 14px; --surface-menu: #faf9f5f7; }
+:root[data-theme=dark] { --surface-menu: #292c30fa; }
+.topbar #scene-name { font-size: 14px; font-weight: 600; letter-spacing: 0; }
+.action-icon { width: 18px; height: 18px; flex: none; vertical-align: middle; }
+button .action-icon, summary .action-icon { pointer-events: none; }
+#annotation-tool-panel .tool-list > .tool-button { font-size: 13px; min-height: 34px; }
+#annotation-tool-panel .annotation-dock-heading { gap: 4px; }
+#workspace-menu #revision-label, #compare-summary { font-size: 12px; }
+#annotation-context-label { font-size: 12px; font-weight: 500; }
+#annotation-tool-panel .eraser-tool > span { font-size: 12px; letter-spacing: 0; }
+#annotation-tool-panel { --annotation-dock-width: 84px; }
+#annotation-tool-panel .eraser-tool { padding-left: 3px; padding-right: 14px; }
+#annotation-tool-panel .eraser-settings > summary .action-icon { width: 12px; height: 12px; }
+#annotation-tool-panel .annotation-history-tools .compact-button { font-size: 12px; }
+#annotation-tool-panel .eraser-settings .popover-content { right: calc(100% + 66px); }
+#annotation-tool-panel.is-compact { --annotation-dock-width: 60px; }
+#annotation-tool-panel.is-compact .eraser-settings .popover-content { right: calc(100% + 44px); }
+#annotation-tool-panel.is-compact .tool-list > .tool-button { min-height: 32px; }
+#annotation-tool-panel #more-tools > summary { font-size: 12px; }
+#annotation-tool-panel #scene-labels-toggle { font-size: 12px; }
+#reference-title { font-weight: 500; }
+.reference-frame-label { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.reference-pane .pane-heading { align-items: center; gap: 7px; }
+.reference-pane #reference-title { flex: 0 1 auto; min-width: 0; }
+.reference-pane.single-reference-video .reference-navigation { display: none; }
+.selection-level-hint { margin: 6px 3px 2px; max-width: 200px; font-size: 12px; line-height: 1.6; color: var(--muted); white-space: normal; }
+.selection-popover .popover-content { min-width: 194px; }
+.scene-pane .pane-actions > #references-dialog-button {
+  position: static; inset: auto; min-width: 0; width: auto; height: auto;
+  gap: 5px; padding: 5px 8px; background: transparent; box-shadow: none;
+  border: 1px solid transparent; backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+.scene-pane .pane-actions > #references-dialog-button:hover { background: var(--surface-hover); border-color: var(--line); }
+#annotation-count { font-size: 12px; color: var(--muted); min-width: 10px; text-align: center; }
+#references-dialog-button .action-icon { width: 16px; height: 16px; }
+.scene-snapshots, [data-layout=immersive] .scene-snapshots { right: 12px; max-width: calc(100% - 24px); }
+[data-layout=immersive] .scene-snapshots { max-width: min(48vw,680px); }
+.scene-pane { position: relative; }
+.snapshot-context { position: absolute; z-index: 15; left: 12px; bottom: 12px; padding: 5px 9px; border-radius: 8px; background: var(--surface-menu); color: var(--muted); font-size: 12px; pointer-events: none; }
+#snapshot-context:not([hidden]) ~ .scene-stage #scene-hint { bottom: 48px; }
+[data-layout=immersive] .snapshot-context { position: fixed; left: 20px; bottom: 22px; }
+#drag-reference-image, [data-layout=immersive] .reference-pane #drag-reference-image { width: auto; min-width: 32px; padding: 5px 7px; gap: 4px; }
+#drag-scene-image, [data-layout=immersive] #drag-scene-image { width: auto; padding: 6px 9px; gap: 5px; opacity: 1; }
+.image-drag-handle span { font-size: 12px; }
+/* Menus read as solid content while outer windows keep their glass edge. */
+.popover-content, .reference-pane .import-popover .popover-content,
+#workspace-menu > .popover-content, #annotation-tool-panel .popover-content,
+.selection-popover .popover-content, .compare-settings,
+[data-layout=compare] .scene-pane .view-popover .popover-content,
+[data-layout=compare] .scene-pane .compare-settings {
+  background: var(--surface-menu); border: 1px solid var(--line);
+  border-radius: 14px; box-shadow: 0 12px 32px #00000018;
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+}
+[data-theme=dark] .popover-content { box-shadow: 0 14px 38px #00000045; }
+.conversation-item { font-size: 14px; line-height: 1.7; }
+.chat-history { background: color-mix(in srgb,var(--surface) 68%,transparent); }
+#feedback-note { font-size: 14px; line-height: 1.65; }
+/* Two rows: transport plus time/scope, followed by an uninterrupted seek bar. */
+.reference-timeline .timeline-controls { display: grid; grid-template-columns: 28px 58px 28px minmax(0,1fr) auto; gap: 4px; }
+.reference-timeline #timeline-prev { grid-area: 1/1; }
+.reference-timeline #timeline-play { grid-area: 1/2; gap: 4px; padding: 4px; }
+.reference-timeline #timeline-next { grid-area: 1/3; }
+.reference-timeline #timeline-time { grid-area: 1/4; justify-self: end; font-size: 12px; }
+.reference-timeline .timeline-options { grid-area: 1/5; margin: 0; }
+.reference-timeline #timeline-seek { grid-area: 2/1/3/-1; margin: 4px 0; }
+.reference-timeline .timeline-details #save-moment { display: flex; grid-area: auto; justify-self: stretch; border-top: 1px solid var(--line); border-radius: 0; padding-top: 9px; }
+.timeline-controls .action-icon { width: 15px; height: 15px; }
+.reference-timeline .timeline-details { min-width: min(250px,calc(100vw - 44px)); }
+#reference-annotations[data-tool=erase], #scene-annotations[data-tool=erase] { cursor: var(--eraser-cursor) !important; }
+#reference-annotations:not([data-tool=erase]), #scene-annotations:not([data-tool=erase]) { cursor: auto; }
+/* Draft attachments are an overview, never a second selection mechanism. */
+.feedback-evidence { margin: 0 0 7px; min-width: 0; font-size: 12px; }
+.feedback-evidence > summary { display: block; padding: 3px 4px; border-radius: 6px; cursor: pointer; color: var(--muted); line-height: 1.6; list-style: none; }
+.feedback-evidence > summary::before { content: '›'; display: inline-block; margin-right: 6px; transition: transform 180ms; }
+.feedback-evidence[open] > summary::before { transform: rotate(90deg); }
+.feedback-evidence > summary:hover { color: var(--ink); background: var(--surface-hover); }
+.feedback-evidence-body { padding: 7px 4px; max-height: min(32vh,260px); overflow-y: auto; overscroll-behavior: contain; }
+.feedback-evidence-body > p { margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.evidence-list { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: 10px; min-width: 0; }
+.evidence-card { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); display: flex; flex-direction: column; gap: 6px; }
+.evidence-card strong { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.evidence-card small { color: var(--muted); font-size: 12px; }
+.evidence-card img { display: block; width: 100%; max-height: 280px; object-fit: contain; border-radius: 7px; }
+.evidence-variants { display: flex; flex-wrap: wrap; gap: 3px; }
+.evidence-variants button { font-size: 12px; border-radius: 7px; }
+.evidence-variants button[aria-pressed=true] { background: var(--surface-hover); border-color: var(--line); }
+.feedback-receipt { display: block; margin-top: 9px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; text-align: left; background: var(--surface); color: var(--ink); font-size: 12px; line-height: 1.6; }
+.feedback-receipt:hover { background: var(--surface-hover); }
+.feedback-preview-dialog { width: min(850px,calc(100vw - 32px)); max-width: min(850px,calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; border-radius: 20px; }
+#feedback-preview-status { color: var(--muted); font-size: 13px; }
+#feedback-preview-note { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; }
+#clear-round { color: var(--muted); }
+@media (max-width: 640px) {
+  .topbar #scene-name { font-size: 13px; }
+  .scene-pane .pane-actions > #references-dialog-button { padding: 4px 5px; }
+  .scene-pane > .pane-head { flex-wrap: wrap; }
+  .scene-pane > .pane-head > .pane-heading { flex: 1 0 100%; }
+  .scene-pane > .pane-head > .pane-actions { flex: 1 0 100%; flex-wrap: nowrap; justify-content: space-between; }
+  [data-layout=immersive] .scene-pane > .pane-head { row-gap: 4px; }
+  #references-dialog-button .action-icon { display: none; }
+  .reference-frame-label { font-size: 12px; }
+  .reference-timeline .timeline-controls { grid-template-columns: 26px 54px 26px minmax(0,1fr) auto; gap: 2px; }
+  .reference-timeline #timeline-time { font-size: 12px; }
+  .reference-pane .pane-head .eyebrow { display: none; }
+  #drag-reference-image > span { display: none; }
+  .feedback-evidence-body { max-height: 24vh; }
+  .evidence-list { grid-template-columns: repeat(auto-fit,minmax(145px,1fr)); }
+}
+@media (prefers-reduced-motion: reduce) { .feedback-evidence > summary::before { transition: none; } }
+
+.evidence-image { display: block; width: 100%; padding: 0; border: 0; border-radius: 7px; background: transparent; cursor: zoom-in; }
+.evidence-card.is-expanded { grid-column: 1 / -1; }
+.evidence-card.is-expanded .evidence-image { cursor: zoom-out; }
+.evidence-card.is-expanded img { max-height: 70dvh; }

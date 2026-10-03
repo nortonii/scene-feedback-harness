@@ -73,7 +73,7 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
     labelsToggle.setAttribute('aria-pressed', String(sceneLabelsVisible));
     labelsToggle.textContent = sceneLabelsVisible ? '隐藏名称' : '显示名称';
     labelsToggle.title = sceneLabelsVisible ? '仅隐藏截图上的标记名称，标记和引用保留' : '显示截图上的标记名称';
-    const count = state.sceneSnapshots.length;
+    const count = state.sceneSnapshots.length + state.dynamicSnapshots.length;
     gallery.classList.toggle('hidden', !count);
     gallery.classList.toggle('is-collapsed', collapsed);
     reveal.inert = collapsed || !count;
@@ -127,7 +127,8 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   window.addEventListener('blur', () => finish(true));
   mobile.addEventListener('change', () => { finish(true); applySplit(); });
   new ResizeObserver(applySplit).observe(workspace);
-  new ResizeObserver(sizeGallery).observe(gallery.parentElement);
+  const galleryObserver = new ResizeObserver(sizeGallery);
+  galleryObserver.observe(gallery.parentElement);
   applySplit(); applySize(); refresh();
   return {refresh, eraserRadius:() => diameter / 2, sceneLabelsVisible:() => sceneLabelsVisible};
 }

@@ -3,13 +3,10 @@ import { setupChatDock } from './chat-dock.js';
 export function setupMinimalLayout({getState}) {
   const byId = (id) => document.getElementById(id);
   const chat = setupChatDock({getState});
-  const dialogs = ['tasks-dialog', 'activity-dialog', 'references-dialog']
+  const dialogs = ['references-dialog']
     .map(byId).filter(Boolean);
   const previousFocus = new WeakMap();
   const skipFocusRestore = new WeakSet();
-  const seenAttention = new Set();
-  const pendingAttention = new Set();
-  let activeAttention = new Set();
 
   function syncDialogButtons(dialog) {
     for (const button of document.querySelectorAll('[data-open-dialog]')) {
@@ -43,23 +40,6 @@ export function setupMinimalLayout({getState}) {
     }
   }
 
-  function annotationEditorOpen() {
-    const editor = byId('text-editor');
-    return editor && !editor.classList.contains('hidden');
-  }
-
-  function showPendingAttention() {
-    for (const key of pendingAttention) {
-      if (!activeAttention.has(key)) pendingAttention.delete(key);
-    }
-    const activity = byId('activity-dialog');
-    if (activity?.open) { pendingAttention.clear(); return; }
-    if (!pendingAttention.size || annotationEditorOpen()) return;
-    if (document.querySelector('dialog[open]')) return;
-    openDialog(activity);
-    pendingAttention.clear();
-  }
-
   function refresh() {
     chat.refresh();
     const state = getState() || {};
@@ -88,12 +68,6 @@ export function setupMinimalLayout({getState}) {
           (item.status === 'failed' && !item.turn_id))) continue;
       attention.add('queue:' + (item.feedback_id || item.id || index) + ':' + item.status);
     }
-    activeAttention = attention;
-    for (const key of attention) {
-      if (seenAttention.has(key)) continue;
-      seenAttention.add(key);
-      pendingAttention.add(key);
-    }
     const count = byId('attention-count');
     if (count) {
       count.textContent = String(attention.size);
@@ -109,14 +83,13 @@ export function setupMinimalLayout({getState}) {
 
     const mode = state.mode;
     const more = byId('more-tools');
-    const moreActive = mode === 'text' || mode === 'freehand';
+    const moreActive = ['arrow','text','freehand'].includes(mode);
     if (more) {
       more.classList.toggle('active', moreActive);
       more.querySelector('summary')?.classList.toggle('active', moreActive);
     }
     const moreLabel = byId('more-tools-label');
-    if (moreLabel) moreLabel.textContent = mode === 'text' ? '字' : mode === 'freehand' ? '画笔' : '更多';
-    showPendingAttention();
+    if (moreLabel) moreLabel.textContent = mode === 'text' ? '字' : mode === 'freehand' ? '画笔' : mode === 'arrow' ? '箭头' : '更多';
   }
 
   for (const dialog of dialogs) {
@@ -131,9 +104,11 @@ export function setupMinimalLayout({getState}) {
       const skipRestore = skipFocusRestore.delete(dialog);
       const target = previousFocus.get(dialog);
       previousFocus.delete(dialog);
-      if (!skipRestore && target?.isConnected && !target.disabled) target.focus({preventScroll:true});
-      showPendingAttention();
-    });
+      if (!skipRestore && target?.isConnected && !target.disabled) {
+        const closedMenu = target.closest('details:not([open])');
+        (closedMenu?.querySelector('summary') || target).focus({preventScroll:true});
+      }
+      });
   }
 
   document.addEventListener('click', (event) => {
@@ -159,7 +134,11 @@ export function setupMinimalLayout({getState}) {
     if (event.key >= '1' && event.key <= '7') refresh();
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') closePopovers();
+    if (event.key === 'Escape') {
+      const menu = document.activeElement?.closest('details.popover[open], details#more-tools[open]');
+      closePopovers();
+      menu?.querySelector('summary')?.focus({preventScroll:true});
+    }
   });
 
   return {

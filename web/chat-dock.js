@@ -1,3 +1,4 @@
+import {createChatSectionMotion,setupChatPanelSizing} from './chat-sections.js';
 export function setupChatDock({getState}) {
   const byId = (id) => document.getElementById(id);
   const dock = byId('chat-dock');
@@ -18,6 +19,7 @@ export function setupChatDock({getState}) {
   let resizeFrame = 0;
   let lastHeightBounds = {min:1, max:window.innerHeight};
   let launcherStatus = '';
+  let sectionMotion=null,panelSizing=null;
   const visibilityTransitions = new Map();
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -117,7 +119,7 @@ export function setupChatDock({getState}) {
   }
 
   function applyHeight({restoreScroll=true}={}) {
-    if (!dock) return;
+    if (!dock || sectionMotion?.active) return;
     dock.classList.toggle('is-resized', dockHeight !== null);
     if (dockHeight === null) dock.style.removeProperty('--chat-height');
     if (collapsed) return;
@@ -238,6 +240,7 @@ export function setupChatDock({getState}) {
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
+    if(history){history.inert=historyCollapsed;history.setAttribute('aria-hidden',String(historyCollapsed));}
     historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed));
     dock?.classList.toggle('history-collapsed', historyCollapsed);
     if (resizeHandle) {
@@ -248,6 +251,7 @@ export function setupChatDock({getState}) {
     }
     const hidden = dock?.classList.contains('hidden');
     if (!collapsed) dock?.classList.remove('hidden');
+    panelSizing?.fit();
     applyHeight({restoreScroll:false});
     if (hidden) dock?.classList.add('hidden');
     updateCounts();
@@ -263,20 +267,31 @@ export function setupChatDock({getState}) {
     }
   }
 
-  function open({focus=false}={}) {
+  function open({focus=false, approval=false}={}) {
     if (collapsed) {
       collapsed = false;
       applyLayout({animate:true});
       persist();
     }
-    if (focus) byId('feedback-note')?.focus({preventScroll:true});
+    if (approval) {
+      requestAnimationFrame(async () => {
+        await Promise.allSettled((dock?.getAnimations() || []).map(animation => animation.finished));
+        if (collapsed) return;
+        const card = byId('chat-approvals')?.querySelector('.approval-card, .queue-card');
+        if (card) {
+          card.scrollIntoView({block:'nearest'});
+          card.focus({preventScroll:true});
+        } else if (focus) byId('feedback-note')?.focus({preventScroll:true});
+      });
+    } else if (focus) byId('feedback-note')?.focus({preventScroll:true});
   }
 
   function refresh() {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
-      finishResize();
+      sectionMotion?.finish();panelSizing?.finishResize();finishResize();
       sessionId = state.sessionId;
+      panelSizing?.refresh();
       collapsed = false;
       historyCollapsed = false;
       followingLatest = true;
@@ -291,6 +306,16 @@ export function setupChatDock({getState}) {
       } catch { /* Ignore an unavailable or invalid saved preference. */ }
       applyLayout();
     }
+    const pending = state.feedbackTransport === 'mcp_events' ? 0 : (state.approvals || []).length +
+      (state.queue || []).filter(item => item?.feedback_id && (['blocked_stale','delivery_uncertain'].includes(item.status) || (item.status === 'failed' && !item.turn_id))).length;
+    const waitingForApproval = pending > 0 || state.agent?.status === 'awaiting_approval';
+    const approvalPanel = byId('chat-approvals');
+    approvalPanel?.classList.toggle('hidden', !pending);
+    const count = byId('chat-approval-count');
+    if (count) count.textContent = pending > 1 ? pending + ' 项待处理' : '';
+    const review = byId('review-pending');
+    review?.classList.toggle('hidden', !pending);
+    if (review) review.textContent = '到会话中处理待确认操作' + (pending > 1 ? '（' + pending + '）' : '');
     const status = state.agent?.status || 'disconnected';
     const failed = !!state.networkError || state.sessionStatus === 'error' ||
       (state.sessionStatus !== 'connecting' && ['error', 'disconnected', 'delivery_uncertain'].includes(status));
@@ -298,12 +323,13 @@ export function setupChatDock({getState}) {
       : state.networkError ? '连接中断，正在重试'
       : state.sessionStatus === 'connecting' ? '正在连接'
       : state.sessionStatus !== 'open' ? '会话已结束'
+      : waitingForApproval ? '等待你确认'
       : state.submitting ? '正在发送'
       : ({idle:'等待反馈', running:'Codex 正在处理', awaiting_approval:'等待审批',
         waiting:'反馈已排队', disconnected:'Codex 连接中断', delivery_uncertain:'送达待核实',
         error:'Codex 执行出错', waiting_for_mcp:'等待 MCP 读取', external_idle:'等待 MCP 读取'})[status] || '正在连接';
     const compactStatus = byId('chat-status');
-    const running = !failed && state.sessionStatus === 'open' && (state.submitting || status === 'running');
+    const running = !waitingForApproval && !failed && state.sessionStatus === 'open' && (state.submitting || status === 'running');
     if (compactStatus) {
       compactStatus.textContent = label;
       compactStatus.title = state.networkError || state.agent?.error || byId('agent-status')?.textContent || label;
@@ -311,20 +337,28 @@ export function setupChatDock({getState}) {
       compactStatus.classList.toggle('running', running);
       compactStatus.classList.toggle('queued', !failed && ['awaiting_approval', 'waiting'].includes(status));
     }
-    launcher?.classList.toggle('has-attention', failed || status === 'awaiting_approval');
+    launcher?.classList.toggle('has-attention', failed || waitingForApproval);
     launcherStatus = label;
     if (launcher) {
       launcher.classList.toggle('is-running', running);
+      launcher.classList.toggle('needs-approval', waitingForApproval);
+      const launcherLabel = launcher.querySelector('[data-chat-launcher-label]');
+      if (launcherLabel) launcherLabel.textContent = waitingForApproval ? '待确认' : '展开会话';
       launcher.setAttribute('aria-busy', String(running));
       launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
     }
     updateCounts();
   }
 
+  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{applyHeight();restoreHistoryScroll();}});
+  panelSizing=setupChatPanelSizing({getState,animateChange:change=>{
+    finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
+  },beforeResize:()=>{sectionMotion.finish();finishResize();rememberScroll();},onResize:scheduleHeightUpdate});
+
   resizeHandle?.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.isPrimary === false || resizeDrag || !historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    rememberScroll();
+    sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
     resizeHandle.focus({preventScroll:true});
     resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:dock.getBoundingClientRect().height};
     dock.classList.add('resizing');
@@ -350,7 +384,7 @@ export function setupChatDock({getState}) {
   resizeHandle?.addEventListener('dblclick', (event) => {
     if (!historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    finishResize(); rememberScroll();
+    sectionMotion?.finish();panelSizing?.finishResize();finishResize(); rememberScroll();
     dockHeight = null;
     applyHeight();
     persist();
@@ -359,6 +393,7 @@ export function setupChatDock({getState}) {
     if (!historyVisible() || event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
     if (event.key === 'Escape') { finishResize(); return; }
     event.preventDefault(); event.stopPropagation();
+    sectionMotion?.finish();panelSizing?.finishResize();
     const bounds = heightBounds();
     const step = event.shiftKey ? 64 : 24;
     const next = event.key === 'Home' ? bounds.min : event.key === 'End' ? bounds.max
@@ -371,6 +406,7 @@ export function setupChatDock({getState}) {
     if (reducedMotion.matches) applyLayout();
   });
   function resizeViewport() {
+    sectionMotion?.finish();
     // A viewport change invalidates the launcher-to-panel path. Settle at the
     // requested state before fitting the new screen instead of drifting outside it.
     if ([dock, launcher].some(element => visibilityTransitions.get(element)?.animation)) applyLayout();
@@ -382,30 +418,32 @@ export function setupChatDock({getState}) {
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
     for (const element of [dock, dock?.querySelector('.chat-dock-header'),
-      dock?.querySelector('.composer'), byId('timeline-panel')]) {
+      dock?.querySelector('.composer'), byId('chat-approvals'), byId('timeline-panel')]) {
       if (element) observer.observe(element);
     }
   }
 
   byId('chat-collapse')?.addEventListener('click', () => {
-    finishResize();
+    sectionMotion?.finish();panelSizing?.finishResize();finishResize();
     rememberScroll();
     collapsed = true;
     applyLayout({animate:true});
     persist();
     launcher?.focus({preventScroll:true});
   });
-  launcher?.addEventListener('click', () => open({focus:true}));
+  launcher?.addEventListener('click', () => open({focus:true, approval:launcher.classList.contains('needs-approval')}));
+  byId('review-pending')?.addEventListener('click', () => {
+    document.dispatchEvent(new CustomEvent('workspace-sidebar-close',{detail:{afterClose:()=>open({approval:true})}}));
+  });
   historyToggle?.addEventListener('click', () => {
-    finishResize();
+    panelSizing?.finishResize();finishResize();
     rememberScroll();
-    historyCollapsed = !historyCollapsed;
-    applyLayout();
+    sectionMotion.run(()=>{historyCollapsed = !historyCollapsed;applyLayout();});
     persist();
   });
   latest?.addEventListener('click', scrollToLatest);
   conversation?.addEventListener('scroll', () => {
-    if (!historyVisible()) return;
+    if (!historyVisible() || sectionMotion?.active) return;
     savedScrollTop = conversation.scrollTop;
     followingLatest = atLatest();
     if (followingLatest) unread = 0;
