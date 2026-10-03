@@ -100,7 +100,7 @@ const ui = {
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
   frame:id('frame-button'), resetView:id('reset-button'),
-  savedSnapshot:id('saved-snapshot-button'), captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'), browse:id('browse-button'), snapshotButton:id('snapshot-button'),
+  savedSnapshot:id('saved-snapshot-button'), captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
   feedbackIntro:id('feedback-intro'),
@@ -132,7 +132,7 @@ const state = {
   alignedReferenceId:null, alignmentExact:false, restoredCameraForReference:false,
   restoredCameraSignature:null,
   annotations:[], annotationNameCounters:{}, selectedAnnotationId:null, mode:'select', toolPane:'scene', paneModes:{reference:'select',scene:'select'}, groupId:'', drag:null, textPending:null,
-  sceneSnapshots:[], snapshot:null, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
+  sceneSnapshots:[], snapshot:null, snapshotSequence:0, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
   referencePanning:null, spacePan:false,
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
   groundAxis:'auto', detectedUpAxis:'z', restoredUpAxis:null,
@@ -160,6 +160,8 @@ let immersiveWorkspace = null;
 let workspaceChrome = null;
 let feedbackEvidence = null;
 let snapshotGallery = null;
+let liveScenePreview = null;
+let livePreviewTimer = null;
 let workspaceSidebar = null;
 let clearRequest = null;
 let backgroundTransition = null;
@@ -288,7 +290,7 @@ function saveDraft() {
         up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
         alignmentExact:state.alignmentExact, freeRotation:controls.freeRotation,
         referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
-      snapshot:state.snapshot, sceneView:state.sceneView, sceneSnapshotIds:state.sceneSnapshots.map(entry => entry.id),
+      snapshot:state.snapshot, snapshotSequence:state.snapshotSequence, sceneView:state.sceneView, sceneSnapshotIds:state.sceneSnapshots.map(entry => entry.id),
       dynamicTime:state.time, activeViewId:state.activeViewId, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
       referenceZoom:state.referenceZoom, referencePan:state.referencePan,
       eventCursor:state.eventCursor
@@ -300,6 +302,7 @@ function saveDraft() {
 function restoreDraft() {
   try {
     const draft = JSON.parse(localStorage.getItem(storageKey()) || '{}');
+    state.snapshotSequence = Number.isSafeInteger(draft.snapshotSequence) && draft.snapshotSequence >= 0 && draft.snapshotSequence <= 1e9 ? draft.snapshotSequence : 0;
     let counters = {};
     try { counters = JSON.parse(localStorage.getItem('astra-annotation-names:' + state.sessionId) || '{}'); }
     catch { /* A broken naming preference must not discard the visual draft. */ }
@@ -2345,6 +2348,7 @@ async function loadScene(sceneData) {
     saveDraft();
   } finally {
     state.sceneLoading = false;
+    scheduleLiveScenePreview();
     updateSubmitLabel(); updateMode(); renderTimeline();
     renderProjectPicker();
   }
@@ -2362,6 +2366,36 @@ function captureLiveScene({includeSize=false}={}) {
   canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
   const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
   return includeSize ? {data_url:dataUrl, width:canvas.width, height:canvas.height} : dataUrl;
+}
+function scheduleLiveScenePreview() {
+  if (livePreviewTimer !== null) return;
+  livePreviewTimer = setTimeout(() => {
+    livePreviewTimer = null;
+    if (state.sceneLoading || state.sceneRevision === null) return;
+    try {
+      // Preview the actual renderer without changing the camera or saved evidence.
+      renderer.render(threeScene, camera);
+      const source=renderer.domElement, canvas=scaledCanvas(source.width,source.height,320);
+      canvas.getContext('2d').drawImage(source,0,0,canvas.width,canvas.height);
+      liveScenePreview=canvas.toDataURL('image/jpeg',.75);
+      snapshotGallery?.render();
+    } catch { /* A preview is optional; the live 3D card remains usable. */ }
+  },160);
+}
+function nextSnapshotNumber() {
+  const current=Math.max(state.snapshotSequence,0,...[...state.sceneSnapshots,...state.dynamicSnapshots].map(entry => Number.isSafeInteger(entry.navigation_order) ? entry.navigation_order : Number.isSafeInteger(entry.number) ? entry.number : 0));
+  state.snapshotSequence=current+1;
+  return state.snapshotSequence;
+}
+function restoreSnapshotNavigation() {
+  const saved=[...state.sceneSnapshots,...state.dynamicSnapshots];
+  state.snapshotSequence=Math.max(state.snapshotSequence,0,...saved.map(entry => Number.isSafeInteger(entry.navigation_order) && entry.navigation_order >= 0 ? entry.navigation_order : Number.isSafeInteger(entry.number) && entry.number >= 0 ? entry.number : 0));
+  const used=new Set();
+  for (const snapshot of saved) {
+    if (!Number.isSafeInteger(snapshot.navigation_order) || snapshot.navigation_order <= 0 || used.has(snapshot.navigation_order)) snapshot.navigation_order=++state.snapshotSequence;
+    used.add(snapshot.navigation_order);
+    if (!snapshot.name) snapshot.name='截图 '+snapshot.navigation_order;
+  }
 }
 async function openSavedSnapshot() {
   if (!editable() || state.sceneView === 'snapshot') return;
@@ -2388,9 +2422,9 @@ function freezeScene() {
   state.mode = toolMode('scene');
   settleOrbit();
   const shot = captureLiveScene({includeSize:true});
+  const number=nextSnapshotNumber();
   state.snapshot = {
-    id:newId(), name:'截图 ' + (Math.max(0, ...state.sceneSnapshots.map(entry => entry.number || 0)) + 1),
-    number:Math.max(0, ...state.sceneSnapshots.map(entry => entry.number || 0)) + 1,
+    id:newId(), name:'截图 ' + number, number, navigation_order:number,
     data_url:shot.data_url, image_width:shot.width, image_height:shot.height, comparison,
     scene_revision:state.sceneRevision,
     camera:cameraData(), selected_object_ids:state.selectedId ? [state.selectedId] : [],
@@ -2413,16 +2447,17 @@ function openSceneSnapshot(snapshotId) {
   renderSceneView(); renderAnnotations();
 }
 function galleryItems() {
-  return [...state.sceneSnapshots,...state.dynamicSnapshots].map(snapshot => {
+  return [...state.sceneSnapshots,...state.dynamicSnapshots].sort((a,b)=>(a.navigation_order || 0)-(b.navigation_order || 0)).map(snapshot => {
     const dynamic=Number.isFinite(snapshot.time_sec);
     const count=state.annotations.filter(mark=>dynamic ? markMatchesMoment(mark,snapshot) : mark.pane==='scene' && mark.snapshot_id===snapshot.id).length;
-    const name=dynamic ? shortTime(snapshot.time_sec) : snapshot.name;
+    const name=snapshot.name || '截图 '+snapshot.navigation_order;
     const viewId=snapshot.view_id || (dynamic ? referenceViewForMoment(snapshot)?.clip_id : null);
-    const title=[name,dynamic ? (snapshot.view_name || referenceViewForMoment(snapshot)?.name || '场景动画') : null,
+    const detail=dynamic ? [shortTime(snapshot.time_sec),snapshot.view_name || referenceViewForMoment(snapshot)?.name || '场景动画'].join(' · ') : '固定视角';
+    const title=[name,detail,
       dynamic && momentFrameIndex(snapshot)!==null ? '第 '+(momentFrameIndex(snapshot)+1)+' 帧' : null,'场景版本 '+snapshot.scene_revision,count+' 个标记'].filter(Boolean).join(' · ');
-    return {id:snapshot.id,dynamic,time:snapshot.time_sec,viewId,name,title,count,disabled:!editable(),
+    return {id:snapshot.id,dynamic,time:snapshot.time_sec,viewId,name,detail,title,count,disabled:!editable(),
       active:state.sceneView==='snapshot' && state.snapshot?.id===snapshot.id,
-      cover:dynamic && snapshot.reference_url || snapshot.data_url,reference:dynamic ? snapshot.reference_url : null,scene:snapshot.data_url};
+      cover:snapshot.data_url,reference:dynamic ? snapshot.reference_url : null,scene:snapshot.data_url};
   });
 }
 function removeSavedSnapshot(snapshotId) {
@@ -2591,9 +2626,7 @@ function renderSceneView({persist=true}={}) {
   const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
   if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
-  ui.browse.setAttribute('aria-pressed', String(!showingSnapshot));
-  ui.snapshotButton.setAttribute('aria-pressed', String(showingSnapshot));
-  ui.snapshotButton.title = '回到上次查看的截图；新增图片请先返回 3D';
+  ui.sceneStage.dataset.sceneView=showingSnapshot ? 'snapshot' : 'live';
   ui.savedSnapshot.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
   ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
@@ -3734,6 +3767,8 @@ function ensureDynamicMoment({showSnapshot=false}={}) {
     selected_object_ids:state.selectedId ? [state.selectedId] : [],
     selected_scene_nodes:state.selectedSceneNode ? [{...state.selectedSceneNode}] : [],
     animation_clips:[...state.animations].map(([object_id, entry]) => ({object_id, name:entry.clip.name.slice(0,160), index:entry.clips.indexOf(entry.clip)}))};
+  moment.navigation_order=nextSnapshotNumber();
+  moment.name='截图 '+moment.navigation_order;
   if (clipReference()) {
     moment.view_id = referenceView().clip_id;
     moment.view_name = referenceView().name;
@@ -3906,6 +3941,7 @@ async function restoreMomentDraft() {
         state[key] = state[key].map(entry => entry.id === state.snapshot.id ? state.snapshot : entry);
       }
     }
+    restoreSnapshotNavigation();
     state.draftMomentSignature = null;
     saveMomentDraft();
   } catch {
@@ -3913,6 +3949,7 @@ async function restoreMomentDraft() {
       state.snapshot = {...state.snapshot, name:state.snapshot.name || '截图 1', number:state.snapshot.number || 1};
       state.sceneSnapshots = [state.snapshot];
     }
+    restoreSnapshotNavigation();
   }
 }
 async function captureDynamicFrames() {
@@ -3986,7 +4023,7 @@ function updateMode() {
   renderPromptReferenceControls();
   ui.frame.disabled = !editable() || !state.selectedId;
   ui.resetView.disabled = !editable();
-  for (const button of [ui.savedSnapshot, ui.browse, ui.snapshotButton]) button.disabled = !editable();
+  ui.savedSnapshot.disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
   const context = id('snapshot-context');
@@ -4040,6 +4077,7 @@ function browseScene() {
   if (!editable()) return;
   state.sceneView = 'live'; state.selectedAnnotationId = null;
   setMode('select','scene'); renderSceneView();
+  scheduleLiveScenePreview();
 }
 function updateSelectionLevelControls() {
   document.querySelectorAll('[data-selection-level]').forEach((button) => {
@@ -5288,6 +5326,7 @@ async function clearSubmittedDraft(submission) {
   state.annotations = [];
   state.dynamicSnapshots = [];
   state.sceneSnapshots = [];
+  state.snapshotSequence = 0;
   state.snapshot = null;
   state.sceneView = 'live';
   state.selectedId = null;
@@ -5565,6 +5604,7 @@ function resizeScene() {
   }
   updateSnapshotGeometry();
   drawOverlays();
+  scheduleLiveScenePreview();
 }
 function setRendererSize(width, height) {
   renderer.getSize(rendererSize);
@@ -5620,6 +5660,8 @@ async function poll() {
 }
 function bindEvents() {
   snapshotGallery=setupSnapshotGallery({getItems:galleryItems,
+    getLive:()=>({active:state.sceneView==='live',disabled:!editable(),cover:liveScenePreview,name:'3D',title:'实时 3D · 拖动旋转、滚轮缩放'}),
+    onLive:browseScene,
     getTimeline:()=>({duration:timelineDuration(),viewId:state.referenceClip ? referenceView()?.clip_id : null}),
     onOpen:id=>state.dynamicSnapshots.some(entry=>entry.id===id) ? openMoment(id) : openSceneSnapshot(id),
     onRemove:removeSavedSnapshot,resourceURL});
@@ -5744,9 +5786,7 @@ function bindEvents() {
   ui.snapshotCompareImage.addEventListener('load', renderPromptReferenceControls);
   ui.savedSnapshot.addEventListener('click', openSavedSnapshot);
   ui.captureScene.addEventListener('click', freezeScene);
-  ui.browse.addEventListener('click', browseScene);
   ui.newSceneBadge.addEventListener('click', browseScene);
-  ui.snapshotButton.addEventListener('click', openSavedSnapshot);
   ui.compareToggle?.addEventListener('click', toggleCompare);
   ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
   for (const button of ui.comparePresets) {
@@ -5922,6 +5962,7 @@ function bindEvents() {
       updateAlignmentStatus();
     }
     saveDraft();
+    scheduleLiveScenePreview();
   });
   document.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.isComposing &&

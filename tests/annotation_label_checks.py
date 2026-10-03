@@ -142,7 +142,7 @@ def verify_annotation_label_visibility(page, screenshots):
 
     # The preference applies across snapshots and refresh, without rewriting
     # any name, coordinate, screenshot identity or user-written text.
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     expect(toggle).to_be_disabled()
     control(page, "#capture-scene-button").click()
     tool("point")
@@ -151,7 +151,7 @@ def verify_annotation_label_visibility(page, screenshots):
     saved_marks = marks()
     expect(toggle).to_have_attribute("aria-pressed", "false")
     assert not any(pixels(scene, label_box(scene, second_mark))[3::4])
-    page.locator(".snapshot-open").first.click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").first.click()
     assert draft(page)["snapshot"] == first_snapshot
     page.reload()
     wait_ready(page)
@@ -169,7 +169,7 @@ def verify_annotation_label_visibility(page, screenshots):
     control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     expect(page.locator("#annotation-count")).to_have_text("0")
-    control(page, "#browse-button").click()
+    control(page, "#scene-live-card").click()
     control(page, "#chat-launcher").click()
     expect(note).to_be_visible()
     note.fill("")

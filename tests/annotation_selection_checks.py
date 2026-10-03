@@ -19,7 +19,7 @@ def verify_annotation_selection(page, screenshots):
     scene = "#scene-annotations"
     reference = "#reference-annotations"
     note = page.locator("#feedback-note")
-    browse = page.locator("#browse-button")
+    browse = page.locator("#scene-live-card")
     dock = page.locator("#chat-dock")
 
     def tool(name):
@@ -223,7 +223,7 @@ def verify_annotation_selection(page, screenshots):
     assert replacement["name"] != second_point["name"]
     count(4)
     saved_marks = marks()
-    page.locator(".snapshot-open").first.click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").first.click()
     tool("select")
     click(scene, *scene_point_at)
     selected(scene, first_point["id"])
@@ -234,7 +234,7 @@ def verify_annotation_selection(page, screenshots):
     tool("select")
     click(scene, *scene_point_at)
     selected(scene, first_point["id"])
-    page.locator(".snapshot-open").last.click()
+    page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").last.click()
     click(scene, *scene_point_at)
     selected(scene, replacement["id"])
     snapshot_is(second_snapshot)
