@@ -1,0 +1,19 @@
+/* The gallery grows leftwards from a stationary right-hand toggle. */
+.scene-snapshots,.scene-snapshots.is-collapsed { flex-direction: row-reverse; height: 46px; }
+.scene-snapshots .snapshot-strip-toggle,.scene-snapshots.is-collapsed .snapshot-strip-toggle { width: 28px; }
+.scene-snapshots.is-collapsed { padding-left: 23px; }
+.snapshot-strip-count { pointer-events: none; left: auto; right: 30px; width: 20px; text-align: center; }
+.snapshot-strip-chevron { transform: rotate(180deg); }
+.scene-snapshots.is-collapsed .snapshot-strip-chevron { transform: rotate(0deg); }
+/* Keep the reveal anchor in place, including while the tools are fading. */
+.scene-toolbar-toggle { position: fixed; z-index: 43; top: 15px; right: 16px; width: 34px; height: 34px; display: grid; place-items: center; padding: 0; border: 1px solid var(--surface-border); border-radius: 11px; color: var(--ink); background: var(--surface-glass); backdrop-filter: blur(18px); box-shadow: 0 3px 12px #0000000a; }
+.scene-toolbar-toggle[hidden] { display: none; }
+.scene-toolbar-toggle:hover { background: var(--surface-hover); }
+.scene-toolbar-toggle svg { transition: transform 280ms cubic-bezier(.22,1,.36,1); }
+.scene-toolbar-toggle[aria-expanded=false] svg { transform: rotate(180deg); }
+[data-layout=immersive] .scene-pane > .pane-head { padding-right: 46px; transition: opacity 280ms ease,transform 360ms cubic-bezier(.22,1,.36,1),visibility 0s; }
+[data-layout=immersive][data-scene-tools-collapsed=true] .scene-pane > .pane-head { opacity: 0; transform: translateX(10px); visibility: hidden; pointer-events: none; transition: opacity 240ms ease,transform 360ms cubic-bezier(.22,1,.36,1),visibility 0s 360ms; }
+@media (prefers-reduced-motion: reduce) {
+  .scene-toolbar-toggle svg,[data-layout=immersive] .scene-pane > .pane-head { transition: none !important; }
+  .scene-snapshot-reveal,.snapshot-strip-chevron,.snapshot-strip-count { transition: none !important; }
+}

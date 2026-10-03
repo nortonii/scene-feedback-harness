@@ -1,4 +1,5 @@
 import { setupReferenceWindow } from './reference-window.js';
+import { setupSceneToolbar } from './scene-toolbar.js';
 
 // Layout preferences never alter the scene camera, snapshots or feedback evidence.
 export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasActiveGesture=()=>false}={}) {
@@ -17,6 +18,7 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
   let referenceAnimation = null;
   let measuring = false;
   const referenceWindow = setupReferenceWindow({onChange:onLayoutChange});
+  const sceneToolbar=setupSceneToolbar();
 
   function measure() {
     if (!immersive) return;
@@ -30,6 +32,7 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
   }
   function refresh() {
     root.dataset.layout = immersive ? 'immersive' : 'compare';
+    sceneToolbar.refresh();
     root.dataset.referenceVisible = String(referenceVisible);
     toggle.setAttribute('aria-pressed', String(immersive));
     compareToggle.setAttribute('aria-pressed', String(!immersive));
@@ -58,7 +61,10 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
         {opacity:value ? 1 : 0, transform:value ? 'none' : 'translateY(8px) scale(.985)'}
       ], {duration:320, easing:'cubic-bezier(.22,1,.36,1)'});
     }
-    if (focus || (!value && reference.contains(document.activeElement))) referenceToggle.focus({preventScroll:true});
+    if (focus || (!value && reference.contains(document.activeElement))) {
+      if(document.querySelector('.scene-pane > .pane-head').inert)sceneToolbar.focus();
+      else referenceToggle.focus({preventScroll:true});
+    }
   }
   function setLayout(value) {
     if (immersive === value && !transition) return;
