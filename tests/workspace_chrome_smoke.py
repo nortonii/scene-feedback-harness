@@ -191,19 +191,19 @@ def main():
                 expect(page.locator('#immersive-tools-toggle')).to_have_count(0)
                 for selector in ('#task-dialog-button','#activity-dialog-button','#help-button'):
                     expect(page.locator(selector)).to_be_hidden()
-                assert page.locator('.topbar button:visible, .topbar summary:visible').count() == 5
+                assert page.locator('.topbar button:visible, .topbar summary:visible').count() == 1
                 assert page.locator('#references-dialog-button').evaluate("el => !!el.closest('.scene-pane > .pane-head')")
                 control(page, '#help-button').click()
                 expect(page.locator('#help-dialog')).to_be_visible()
                 page.keyboard.press('Escape')
                 expect(page.locator('#help-dialog')).to_be_hidden()
-                expect(page.locator('#workspace-menu > summary')).to_be_focused()
+                expect(page.locator('#projects-dialog-button')).to_be_focused()
                 control(page, '#activity-dialog-button').click()
                 expect(page.locator('#activity-dialog')).to_be_visible()
                 page.keyboard.press('Escape')
                 expect(page.locator('#activity-dialog')).to_be_hidden()
-                expect(page.locator('#workspace-menu > summary')).to_be_focused()
-                print('PASS five global entries, contextual annotations at rest and accessible grouped activity/help', flush=True)
+                expect(page.locator('#projects-dialog-button')).to_be_focused()
+                print('PASS single global entry, contextual annotations at rest and accessible grouped activity/help', flush=True)
 
                 # Inspect actual open menus in both themes/layouts, including narrow screens.
                 for width,height in ((1440,900),(390,844)):
@@ -216,10 +216,10 @@ def main():
                         for theme in ('light','dark'):
                             if page.locator('html').get_attribute('data-theme') != theme:
                                 control(page, '#theme-toggle').click(); settle(page)
-                            for selector in ('#projects-dialog-button','#comparison-layout-button','#immersive-toggle','#theme-toggle','#workspace-menu > summary'):
+                            unobscured(page, '#projects-dialog-button')
+                            control(page, '#theme-toggle')
+                            for selector in ('#comparison-layout-button','#immersive-toggle','#theme-toggle','#help-button'):
                                 unobscured(page, selector)
-                            control(page, '#workspace-menu > summary').click()
-                            unobscured(page, '#help-button')
                             page.keyboard.press('Escape')
                             control(page, '#compare-panel > summary').click()
                             unobscured(page, '#compare-toggle')

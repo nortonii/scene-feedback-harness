@@ -24,6 +24,22 @@ def control(page, selector):
     locator = page.locator(selector)
     if locator.count() != 1:
         return locator
+    sidebar = page.locator('#projects-dialog')
+    in_sidebar = locator.evaluate("el => !!el.closest('#projects-dialog')")
+    if in_sidebar:
+        if not sidebar.evaluate('el => el.open'):
+            page.locator('#projects-dialog-button').click()
+        page.wait_for_function("document.querySelector('#projects-dialog').dataset.phase === 'open'")
+        view = locator.evaluate("el => el.closest('[data-sidebar-view]')?.dataset.sidebarView")
+        if view and sidebar.get_attribute('data-page') != view:
+            if sidebar.get_attribute('data-page') != 'home':
+                sidebar.locator('[data-sidebar-home]:visible').click()
+            if view != 'home':
+                sidebar.locator(f'[data-sidebar-page="{view}"]').click()
+    elif selector != '#projects-dialog-button' and sidebar.evaluate('el => el.open') and not locator.evaluate("el => !!el.closest('dialog[open]')"):
+        if sidebar.get_attribute('data-phase') != 'closing':
+            page.locator('#close-projects').click()
+        expect(sidebar).not_to_be_visible()
     if locator.evaluate("el => !!el.closest('#annotation-tool-panel')"):
         if not page.locator('#annotation-tool-panel').is_visible():
             open_annotation_tools(page)
@@ -34,7 +50,21 @@ def control(page, selector):
             continue
         if not menu.evaluate('el => el.open'):
             menu.locator(':scope > summary').click()
+    if selector in ('#theme-toggle', '#immersive-toggle', '#comparison-layout-button'):
+        return AppearanceControl(page, locator)
     return locator
+
+
+class AppearanceControl:
+    """Legacy flows return to canvas after changing appearance via the drawer."""
+    def __init__(self, page, locator):
+        self.page, self.locator = page, locator
+    def __getattr__(self, name):
+        return getattr(self.locator, name)
+    def click(self, **kwargs):
+        self.locator.click(**kwargs)
+        self.page.locator('#close-projects').click()
+        expect(self.page.locator('#projects-dialog')).not_to_be_visible()
 
 
 def choose_tool(page, name, context=None):

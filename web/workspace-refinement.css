@@ -41,7 +41,7 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 #snapshot-context:not([hidden]) ~ .scene-stage #scene-hint { bottom: 48px; }
 [data-layout=immersive] .snapshot-context { position: fixed; left: 20px; bottom: 22px; }
 #drag-reference-image, [data-layout=immersive] .reference-pane #drag-reference-image { width: auto; min-width: 32px; padding: 5px 7px; gap: 4px; }
-#drag-scene-image { width: auto; padding: 6px 9px; gap: 5px; opacity: 1; }
+#drag-scene-image, [data-layout=immersive] #drag-scene-image { width: auto; padding: 6px 9px; gap: 5px; opacity: 1; }
 .image-drag-handle span { font-size: 12px; }
 /* Menus read as solid content while outer windows keep their glass edge. */
 .popover-content, .reference-pane .import-popover .popover-content,

@@ -421,8 +421,7 @@ export function setupChatDock({getState}) {
   });
   launcher?.addEventListener('click', () => open({focus:true, approval:launcher.classList.contains('needs-approval')}));
   byId('review-pending')?.addEventListener('click', () => {
-    byId('activity-dialog')?.close();
-    open({approval:true});
+    document.dispatchEvent(new CustomEvent('workspace-sidebar-close',{detail:{afterClose:()=>open({approval:true})}}));
   });
   historyToggle?.addEventListener('click', () => {
     finishResize();

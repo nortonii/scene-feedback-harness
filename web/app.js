@@ -5,6 +5,7 @@ import { frameAtTime, nearestFrameAtTime, stepTime, feedbackScope, markMatchesMo
 import { setupMinimalLayout } from './layout.js';
 import { setupImmersive } from './immersive.js';
 import { setupTheme } from './theme.js';
+import {setupWorkspaceSidebar} from './workspace-sidebar.js';
 import {setupSnapshotGallery} from './snapshot-gallery.js';
 import { setupFeedbackEvidence, savedEvidence } from './feedback-evidence.js';
 import { setupActionIcons, setActionIcon } from './action-icons.js';
@@ -157,6 +158,7 @@ let immersiveWorkspace = null;
 let workspaceChrome = null;
 let feedbackEvidence = null;
 let snapshotGallery = null;
+let workspaceSidebar = null;
 let clearRequest = null;
 let backgroundTransition = null;
 let annotationReferenceDrag = null;
@@ -637,7 +639,7 @@ function updateProjectTitle() {
   const name = catalogName || state.projectName || state.sceneDisplayName || '当前场景';
   ui.sceneName.textContent = name;
   ui.projectsButton.title = name + ' · 切换或新建场景';
-  ui.projectsButton.setAttribute('aria-label', '场景：' + name + '，切换或新建场景');
+  ui.projectsButton.setAttribute('aria-label', '展开工作台侧栏，当前场景：' + name);
 }
 function projectBusyReason({allowCreation=false}={}) {
   if (state.submitting) return '正在保存反馈，请稍后切换场景。';
@@ -689,6 +691,7 @@ function rememberCreatedProject(project, error=null) {
 function renderProjectPicker() {
   updateProjectTitle();
   ui.createProjectPanel.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  id('sidebar-new-project').hidden=state.feedbackTransport==='mcp_events';
   if (!ui.projectsDialog.open) return;
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const busy = projectBusyReason();
@@ -703,7 +706,9 @@ function renderProjectPicker() {
       const name = document.createElement('strong'); name.textContent = project.name || '未命名场景';
       const current = project.project_id === state.projectId;
       const unavailable = project.creation_status === 'unavailable';
-      const label = document.createElement('span'); label.textContent = unavailable ? '不可用' : current ? '当前' : '打开 ↗';
+      button.classList.toggle('is-current',current);
+      if(current) button.setAttribute('aria-current','page');
+      const label = document.createElement('span'); label.textContent = unavailable ? '不可用' : current ? '当前' : '';
       heading.append(name, label);
       const detail = document.createElement('div'); detail.className = 'project-detail';
       detail.textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
@@ -798,6 +803,7 @@ function renderCreateProject() {
   else if (!state.projectCreationSupported) ui.createProjectHelp.textContent = '当前服务未启用场景创建，请启用 Codex CLI 或连接 Codex Desktop。';
   else if (!state.canSetPermissions) ui.createProjectHelp.textContent = '正在读取创建任务所需的模型和权限选项。';
   else ui.createProjectHelp.textContent = '创建空白场景和独立的 Codex 任务，然后进入新场景。';
+  id('project-options-summary').textContent='更多设置 · '+(ui.projectEffort.selectedOptions[0]?.textContent || '模型默认')+' · '+ui.projectPermissions.selectedOptions[0].textContent.split(' · ')[0];
 }
 async function loadProjects() {
   if (state.loadingProjects) return;
@@ -873,12 +879,14 @@ async function createSceneProject() {
   } finally { state.creatingProject = false; renderProjectPicker(); updateSubmitLabel(); updateMode(); renderTimeline(); }
 }
 function openProjectsDialog() {
-  for (const dialog of document.querySelectorAll('dialog[open]')) if (dialog !== ui.projectsDialog) dialog.close();
-  if (!ui.projectsDialog.open) ui.projectsDialog.showModal();
-  ui.projectsButton.setAttribute('aria-expanded', 'true'); renderProjectPicker();
+  workspaceSidebar.toggle();
+}
+function loadSidebarProjects() {
+  renderProjectPicker();
   loadProjects().catch(() => {});
   if (state.feedbackTransport !== 'mcp_events') loadModels({forProjects:true}).catch(() => {});
 }
+
 function renderCreateTarget() {
   const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
   if (!models.some((item) => item.model === state.modelChoice)) {
@@ -1113,7 +1121,7 @@ function renderWorkspace(workspace) {
   ui.eventDeliveryStatusHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
   ui.directDeliveryHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
   ui.eventDeliveryHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
-  if (state.feedbackTransport === 'mcp_events' && ui.tasksDialog.open) ui.tasksDialog.close();
+  if (state.feedbackTransport === 'mcp_events' && workspaceSidebar?.page==='tasks') workspaceSidebar.showPage('home');
   renderProjectPicker();
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
@@ -5457,6 +5465,7 @@ function bindEvents() {
     onOpen:id=>state.dynamicSnapshots.some(entry=>entry.id===id) ? openMoment(id) : openSceneSnapshot(id),
     onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
+  workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}}});
   minimalLayout = setupMinimalLayout({getState:() => state});
   setupTheme({onChange:applyTheme});
   immersiveWorkspace = setupImmersive({onResize:() => { resizeScene(); updateReferenceGeometry(); }, onLayoutChange:() => workspaceChrome?.layoutChanged(), hasActiveGesture:() => !!(state.drag || annotationReferenceDrag || state.textPending || state.poseEditDrag)});
@@ -5470,16 +5479,6 @@ function bindEvents() {
     onError:(message) => announce(message,true)});
   restoreProjectRequest();
   ui.projectsButton.addEventListener('click', openProjectsDialog);
-  id('close-projects').addEventListener('click', () => ui.projectsDialog.close());
-  ui.projectsDialog.addEventListener('close', () => {
-    ui.projectsButton.setAttribute('aria-expanded', 'false');
-    ui.projectsButton.focus({preventScroll:true});
-  });
-  ui.projectsDialog.addEventListener('click', (event) => {
-    if (event.target !== ui.projectsDialog) return;
-    const bounds = ui.projectsDialog.getBoundingClientRect();
-    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) ui.projectsDialog.close();
-  });
   ui.refreshProjects.addEventListener('click', () => {
     loadProjects().catch(() => {});
     if (state.modelLoadError) loadModels({forProjects:true}).catch(() => {});
@@ -5491,6 +5490,7 @@ function bindEvents() {
   ui.projectModel.addEventListener('change', () => {
     state.projectModelChoice = ui.projectModel.value || null; state.projectEffortChoice = ''; renderCreateProject();
   });
+  ui.projectPermissions.addEventListener('change', renderCreateProject);
   ui.projectEffort.addEventListener('change', () => { state.projectEffortChoice = ui.projectEffort.value || ''; renderCreateProject(); });
   ui.createProjectForm.addEventListener('submit', (event) => { event.preventDefault(); createSceneProject(); });
   ui.openCreatedProject.addEventListener('click', () => navigateProject(state.projectCreationResult));
@@ -5630,8 +5630,9 @@ function bindEvents() {
   id('clear-round').addEventListener('click', () => askClear('round'));
   ui.cancelClear.addEventListener('click', () => ui.clearDialog.close());
   ui.clearDialog.addEventListener('close', () => {
-    const pane = clearRequest?.pane; const global = clearRequest?.scope === 'round'; clearRequest = null;
-    if (global) id('workspace-menu').querySelector('summary').focus({preventScroll:true});
+    const pane = clearRequest?.pane; const global = clearRequest?.scope === 'round'; const confirmed=clearRequest?.confirmed; clearRequest = null;
+    if (global && confirmed) workspaceSidebar.close();
+    else if (global) id('close-projects').focus({preventScroll:true});
     else {
       workspaceChrome?.open(pane || state.toolPane);
       (ui.clearAnnotations.disabled ? ui.undoAnnotation : ui.clearAnnotations).focus({preventScroll:true});
@@ -5649,6 +5650,7 @@ function bindEvents() {
     } else state.annotations = state.annotations.filter(mark => !clearRequest.ids.has(mark.id));
     if (!state.annotations.some(mark => mark.id === state.selectedAnnotationId)) state.selectedAnnotationId = null;
     recordAnnotationEdit(before); renderTimeline(); renderAnnotations(); drawOverlays(); saveDraft();
+    clearRequest.confirmed=true;
     ui.clearDialog.close(); announce('已清除，可撤销恢复。');
   });
   ui.undoAnnotation.addEventListener('click', undoAnnotationEdit);
@@ -5724,9 +5726,6 @@ function bindEvents() {
     if (event.key === 'Enter') { event.preventDefault(); saveTextAnnotation(); }
     if (event.key === 'Escape') { event.preventDefault(); hideTextEditor(); }
   });
-  id('help-button').addEventListener('click', () => id('help-dialog').showModal());
-  id('close-help').addEventListener('click', () => id('help-dialog').close());
-  id('help-dialog').addEventListener('close', () => id('workspace-menu').querySelector('summary').focus({preventScroll:true}));
   renderer.domElement.addEventListener('pointerdown', (event) => {
     pointerDown = {x:event.clientX, y:event.clientY, button:event.button};
   });

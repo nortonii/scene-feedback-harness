@@ -3,7 +3,7 @@ import { setupChatDock } from './chat-dock.js';
 export function setupMinimalLayout({getState}) {
   const byId = (id) => document.getElementById(id);
   const chat = setupChatDock({getState});
-  const dialogs = ['tasks-dialog', 'activity-dialog', 'references-dialog']
+  const dialogs = ['references-dialog']
     .map(byId).filter(Boolean);
   const previousFocus = new WeakMap();
   const skipFocusRestore = new WeakSet();

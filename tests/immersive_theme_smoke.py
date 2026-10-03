@@ -246,8 +246,8 @@ def main():
                     page.set_viewport_size({'width':width, 'height':height})
                     settle(page)
                     assert_full_scene(page)
-                    for selector in ('#immersive-toggle', '#theme-toggle',
-                                     '#immersive-reference-toggle', '#workspace-menu > summary', '#browse-button',
+                    for selector in ('#projects-dialog-button',
+                                     '#immersive-reference-toggle', '#browse-button',
                                      '#capture-scene-button', '.view-popover summary', '#chat-launcher'):
                         assert_inside(page, selector)
                     control(page, '#immersive-reference-toggle').click()
@@ -282,7 +282,8 @@ def main():
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
                 page.emulate_media(reduced_motion='no-preference')
                 page.evaluate('document.startViewTransition = undefined')
-                control(page, '#comparison-layout-button').click()
+                control(page, '#comparison-layout-button')
+                page.locator('#comparison-layout-button').click()
                 expect(page.locator('html')).to_have_attribute('data-layout', 'compare')
                 assert page.locator('#scene-stage').evaluate('el => el.getAnimations().some(a => a.effect.getTiming().duration === 500)')
                 settle(page)

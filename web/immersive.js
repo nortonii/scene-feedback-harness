@@ -20,8 +20,7 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
 
   function measure() {
     if (!immersive) return;
-    const header = document.querySelector('.topbar').getBoundingClientRect();
-    const sceneTop = header.bottom + 10;
+    const sceneTop = 12;
     root.style.setProperty('--immersive-scene-top', `${sceneTop}px`);
     const sceneHead = document.querySelector('.scene-pane > .pane-head').getBoundingClientRect();
     root.style.setProperty('--immersive-content-top', `${sceneTop + sceneHead.height + 12}px`);

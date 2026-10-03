@@ -50,7 +50,7 @@ def main():
     assert page.evaluate('__appearanceCheck.state.annotations.map(a=>a.type)')==['point','point']
     assert page.evaluate('__appearanceCheck.state.sceneView')=='snapshot'
     control(page,'#undo-annotation').click()
-    control(page,'#clear-round').click();expect(page.locator('#clear-annotations-description')).to_contain_text('1 张截图');expect(page.locator('#clear-annotations-description')).to_contain_text('3 个标记');control(page,'#confirm-clear-annotations').click()
+    control(page,'#clear-round').click();expect(page.locator('#clear-annotations-description')).to_contain_text('1 张截图');expect(page.locator('#clear-annotations-description')).to_contain_text('3 个标记');control(page,'#confirm-clear-annotations').click();expect(page.locator('#projects-dialog')).to_be_hidden()
     assert page.evaluate('__appearanceCheck.state.annotations.length + __appearanceCheck.state.sceneSnapshots.length')==0
     page.keyboard.press('Control+z');page.wait_for_function('__appearanceCheck.state.annotations.length===3')
     print('PASS image-local clear, cancellation, preserved other-pane marks and snapshots, global scope and undo',flush=True)

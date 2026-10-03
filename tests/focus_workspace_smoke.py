@@ -268,7 +268,7 @@ def verify_clear_confirmation(page, screenshots):
         else:
             page.keyboard.press(action)
         expect(dialog).to_be_hidden()
-        expect(page.locator("#workspace-menu > summary")).to_be_focused()
+        expect(page.locator("#close-projects")).to_be_focused()
         assert draft(page) == before
     control(page, "#clear-round").click()
     page.set_viewport_size({"width": 340, "height": 844})
@@ -280,7 +280,7 @@ def verify_clear_confirmation(page, screenshots):
     after = draft(page)
     assert not after["annotations"] and not after["sceneSnapshotIds"] and not after["snapshot"]
     expect(clear).to_be_disabled()
-    expect(page.locator("#workspace-menu > summary")).to_be_focused()
+    expect(page.locator("#projects-dialog-button")).to_be_focused()
     control(page, "#undo-annotation").click()
     for key in ("annotations", "sceneSnapshotIds", "snapshot", "sceneView", "note"):
         assert draft(page).get(key) == before.get(key), key
@@ -305,6 +305,7 @@ def verify_scene_modes(page, screenshots):
     control(page, "#chat-collapse").click()
     expect(annotate).to_have_text("截图库")
     empty = draft(page)
+    expect(page.locator("#projects-dialog")).to_be_hidden()
     annotate.click()
     mode(False)
     expect(page.locator("#toast")).to_contain_text("当前还没有截图")
@@ -435,6 +436,7 @@ def verify_scene_modes(page, screenshots):
     verify_clear_confirmation(page, screenshots)
     control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
+    expect(page.locator("#projects-dialog")).to_be_hidden()
     annotate.click()
     mode(False)
     expect(page.locator("#toast")).to_contain_text("当前还没有截图")
@@ -923,7 +925,7 @@ def verify_project_isolation(page, server, screenshots):
         page.reload()
         wait_ready(page)
         control(page, "#projects-dialog-button").click()
-        control(page, "#create-project-panel summary").click()
+        control(page, "#sidebar-new-project").click()
         page.locator("#project-name").fill("隔离新场景 B")
         expect(page.locator("#project-model")).to_have_value("fixture-model")
         expect(page.locator("#create-project")).to_be_enabled()
@@ -1344,7 +1346,8 @@ def main():
                 control(page, "#activity-dialog-button").click()
                 expect(page.locator("#activity-dialog")).to_be_visible()
                 expect(page.locator("#queue-list")).to_contain_text("针对场景版本")
-                control(page, '[data-close-dialog="activity-dialog"]').click()
+                control(page, '#close-projects').click()
+                expect(page.locator('#projects-dialog')).to_be_hidden()
                 control(page, "#chat-collapse").click()
                 expect(page.locator("#chat-dock")).to_be_hidden()
                 control(page, "#more-tools summary").click()
