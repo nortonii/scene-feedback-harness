@@ -1,0 +1,32 @@
+/* One quiet header for history and evidence; details stay within the dock. */
+.chat-dock-header { gap: 6px; }
+.chat-evidence-toggle { flex: none; }
+.chat-history-toggle > [aria-hidden] { transition: transform 320ms cubic-bezier(.22,.68,.2,1); }
+#chat-dock-body,.history-collapsed #chat-dock-body { padding-top: 8px; }
+#feedback-evidence { position: relative; flex: none; margin: 0 0 8px; border-bottom: 1px solid var(--line); }
+#feedback-evidence-scroll { box-sizing: border-box; height: 180px; min-height: 0; max-height: none; padding: 10px 3px 12px; overflow-y: auto; scrollbar-width: thin; }
+.feedback-evidence-body > p { font-size: 12px; }
+.chat-section-resize { height: 14px; flex: none; cursor: ns-resize; touch-action: none; user-select: none; position: relative; border-radius: 7px; }
+.chat-section-resize::after { content: ''; position: absolute; top: 5px; left: 50%; transform: translateX(-50%); width: 26px; height: 3px; border-radius: 4px; background: var(--muted); opacity: .35; transition: width 160ms,opacity 160ms; }
+.chat-section-resize:hover::after,.chat-section-resize:focus-visible::after,.chat-section-resize.is-resizing::after { width: 40px; opacity: .75; }
+.chat-section-resize:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+#prompt-resize-handle { position: absolute; z-index: 1; top: -5px; left: 35%; right: 35%; height: 17px; }
+#prompt-resize-handle::after { top: 5px; }
+.prompt-input #feedback-note { height: 44px; min-height: 44px; max-height: none; padding: 11px 14px 9px; resize: none; }
+.panel-resizing,.panel-resizing * { cursor: ns-resize !important; user-select: none; }
+.sections-animating { overflow: hidden; }
+.sections-animating #chat-dock-body { overflow: hidden; }
+.sections-animating .chat-history,.sections-animating #feedback-evidence { min-height: 0; }
+@media (max-width: 640px) {
+  .chat-dock-header { gap: 3px; padding-left: 8px; padding-right: 8px; }
+  .chat-history-toggle,.chat-collapse { font-size: 12px; gap: 4px; padding-left: 4px; padding-right: 4px; }
+  .chat-status:not(.running):not(.error):not(.queued) { display: none; }
+  .chat-message-count { max-width: 48px; }
+}
+@media (max-width: 380px) {
+  #chat-message-count:not(.has-unread) { display: none; }
+  .chat-status { max-width: 32px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-history-toggle > [aria-hidden],.chat-section-resize::after { transition: none; }
+}

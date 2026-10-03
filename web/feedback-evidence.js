@@ -68,11 +68,14 @@ export function setupFeedbackEvidence({getDraft,api,resourceURL}) {
   function refresh() {
     const draft=getDraft();const next=JSON.stringify(draft,(key,value)=>key==='url' && typeof value==='string' && value.startsWith('data:') ? value.slice(0,24)+value.length : value);
     if(next===signature) return;signature=next;
-    summary.textContent='本次反馈 · '+draft.summary;
+    summary.setAttribute('aria-label','本次反馈 · '+draft.summary);
+    summary.title=draft.summary;
+    byId('feedback-evidence-count').textContent=draft.rows.length || '';
+    byId('feedback-evidence-count').hidden=!draft.rows.length;
     byId('feedback-evidence-description').textContent=draft.description;
-    if(details.open) renderRows(list,draft.rows);
+    if(summary.getAttribute('aria-expanded')==='true') renderRows(list,draft.rows);
   }
-  details.addEventListener('toggle',()=> {if(details.open) {signature='';refresh();}});
+  details.addEventListener('evidence-visibility',()=> {if(summary.getAttribute('aria-expanded')==='true') {signature='';refresh();}});
   function rememberSaved(result) {
     if(result?.feedback_id) {cache.set(result.feedback_id,result);if(cache.size>100) cache.delete(cache.keys().next().value);}
   }

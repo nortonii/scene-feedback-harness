@@ -2,7 +2,7 @@
 Runs only against temporary data with Codex disabled.
 """
 from pathlib import Path
-import sys,tempfile,threading,base64,json
+import sys,tempfile,threading,base64,json,re
 ROOT=Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'backend'),str(ROOT/'examples/room_demo')]
 from core import SceneStore
@@ -60,14 +60,14 @@ def main():
     page.keyboard.press('Escape');expect(page.locator('#reference-pane')).to_be_hidden()
     print('PASS Escape cancels an eraser gesture before closing the reference window',flush=True)
     control(page,'#comparison-layout-button').click();settle(page);control(page,'#chat-launcher').click();page.locator('#feedback-note').fill('调整图中桌子的位置')
-    expect(page.locator('#feedback-evidence-summary')).to_contain_text('1 张截图');expect(page.locator('#feedback-evidence-summary')).to_contain_text('3 个标记')
-    page.locator('#feedback-evidence > summary').click();expect(page.locator('#feedback-evidence-list .evidence-card')).to_have_count(2)
-    page.locator('#feedback-evidence > summary').click()
+    expect(page.locator('#feedback-evidence-summary')).to_have_attribute('aria-label',re.compile('1 张截图'));expect(page.locator('#feedback-evidence-summary')).to_have_attribute('aria-label',re.compile('3 个标记'))
+    page.locator('#feedback-evidence-summary').click();expect(page.locator('#feedback-evidence-list .evidence-card')).to_have_count(2)
+    page.locator('#feedback-evidence-summary').click()
     # A failed save retains exactly the frozen evidence for retry.
     page.route('**/api/sessions/*/feedback*',lambda route:route.fulfill(status=503,content_type='application/json',body=json.dumps({'error':'isolated temporary save failure'})),times=1)
     control(page,'#submit-button').click();page.wait_for_function('__appearanceCheck.state.pendingSubmission && !__appearanceCheck.state.submitting')
     expect(page.locator('#feedback-evidence-description')).to_contain_text('冻结')
-    expect(page.locator('#feedback-evidence-summary')).to_contain_text('3 个标记')
+    expect(page.locator('#feedback-evidence-summary')).to_have_attribute('aria-label',re.compile('3 个标记'))
     assert not store.state['feedback']
     control(page,'#submit-button').click();page.wait_for_function('__appearanceCheck.state.feedbackCount===1 && !__appearanceCheck.state.submitting',timeout=30000)
     page.evaluate('__appearanceCheck.refreshWorkspace()')

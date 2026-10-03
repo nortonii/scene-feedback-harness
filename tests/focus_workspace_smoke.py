@@ -150,6 +150,7 @@ def verify_chat_resize(page, store, submissions, screenshots):
 
     preferred_height = saved_height()
     control(page, "#chat-history-toggle").click()
+    page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
     expect(page.locator("#chat-history")).to_be_hidden()
     expect(handle).to_be_hidden()
     assert handle.evaluate("el => el.tabIndex") == -1
@@ -182,6 +183,7 @@ def verify_chat_resize(page, store, submissions, screenshots):
     if screenshots:
         page.screenshot(path=str(screenshots / "history-collapsed-no-handle.png"))
     control(page, "#chat-history-toggle").click()
+    page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
     expect(handle).to_be_visible()
     assert handle.evaluate("el => el.tabIndex") == 0
     assert abs(dock.bounding_box()["height"] - enlarged["height"]) < 2
@@ -698,6 +700,7 @@ def verify_workspace_controls(page, screenshots):
 
 def verify_selection_panel(page, screenshots):
     control(page, "#chat-history-toggle").click()
+    page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
     composer_before = page.locator("#feedback-note").bounding_box()
     dock_before = page.locator("#chat-dock").bounding_box()
     control(page, '[data-selection-level="part"]').click()
@@ -732,6 +735,7 @@ def verify_selection_panel(page, screenshots):
     page.locator("#feedback-note").fill("")
     control(page, '[data-selection-level="item"]').click()
     control(page, "#chat-history-toggle").click()
+    page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
 
 
 def verify_overlay_toolbar(page, store, screenshots):
@@ -856,6 +860,7 @@ def verify_compact_header(page, store, screenshots):
         control(page, "#chat-launcher").click()
     if page.locator("#chat-history").is_visible():
         control(page, "#chat-history-toggle").click()
+        page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
     for index in range(123):
         store.workspace_event("assistant_message", {"text": f"窄屏计数检查 {index + 1}"})
     expect(page.locator("#conversation")).to_contain_text("窄屏计数检查 123", timeout=10000)
@@ -878,6 +883,7 @@ def verify_compact_header(page, store, screenshots):
             expect(page.locator("#references-dialog")).to_be_visible()
             control(page, '[data-close-dialog="references-dialog"]').click()
     control(page, "#chat-history-toggle").click()
+    page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
 
 
 def verify_project_isolation(page, server, screenshots):
@@ -1126,6 +1132,7 @@ def main():
                 before = geometry(page)
                 previous = draft(page)
                 control(page, "#chat-history-toggle").click()
+                page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
                 expect(page.locator("#chat-history")).to_be_hidden()
                 expect(page.locator("#feedback-note")).to_be_visible()
                 assert geometry(page) == before
@@ -1153,6 +1160,7 @@ def main():
                 expect(page.locator("#chat-history")).to_be_hidden()
                 expect(page.locator("#feedback-note")).to_have_value(previous["note"])
                 control(page, "#chat-history-toggle").click()
+                page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
                 expect(page.locator("#conversation")).to_contain_text("已调整柜子位置")
                 passed("collapsed preferences and draft survive reload independently of recorded history")
 
@@ -1215,6 +1223,7 @@ def main():
                 passed("incoming recorded messages display unread count without interrupting a collapsed workspace")
 
                 control(page, "#chat-history-toggle").click()
+                page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
                 expect(page.locator("#chat-history")).to_be_hidden()
                 page.locator("#feedback-note").focus()
                 store.workspace_event("assistant_message", {"text": "仅收起记录时的新回复"})
@@ -1224,6 +1233,7 @@ def main():
                 expect(page.locator("#chat-history")).to_be_hidden()
                 expect(page.locator("#feedback-note")).to_be_focused()
                 control(page, "#chat-history-toggle").click()
+                page.wait_for_function("!document.querySelector('#chat-dock').classList.contains('sections-animating')")
                 expect(page.locator("#chat-message-count")).not_to_contain_text("新")
                 passed("history-only collapse indicates unread replies without moving input focus")
 

@@ -1,3 +1,4 @@
+import {createChatSectionMotion,setupChatPanelSizing} from './chat-sections.js';
 export function setupChatDock({getState}) {
   const byId = (id) => document.getElementById(id);
   const dock = byId('chat-dock');
@@ -18,6 +19,7 @@ export function setupChatDock({getState}) {
   let resizeFrame = 0;
   let lastHeightBounds = {min:1, max:window.innerHeight};
   let launcherStatus = '';
+  let sectionMotion=null,panelSizing=null;
   const visibilityTransitions = new Map();
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -117,7 +119,7 @@ export function setupChatDock({getState}) {
   }
 
   function applyHeight({restoreScroll=true}={}) {
-    if (!dock) return;
+    if (!dock || sectionMotion?.active) return;
     dock.classList.toggle('is-resized', dockHeight !== null);
     if (dockHeight === null) dock.style.removeProperty('--chat-height');
     if (collapsed) return;
@@ -238,6 +240,7 @@ export function setupChatDock({getState}) {
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
+    if(history){history.inert=historyCollapsed;history.setAttribute('aria-hidden',String(historyCollapsed));}
     historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed));
     dock?.classList.toggle('history-collapsed', historyCollapsed);
     if (resizeHandle) {
@@ -248,6 +251,7 @@ export function setupChatDock({getState}) {
     }
     const hidden = dock?.classList.contains('hidden');
     if (!collapsed) dock?.classList.remove('hidden');
+    panelSizing?.fit();
     applyHeight({restoreScroll:false});
     if (hidden) dock?.classList.add('hidden');
     updateCounts();
@@ -285,8 +289,9 @@ export function setupChatDock({getState}) {
   function refresh() {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
-      finishResize();
+      sectionMotion?.finish();panelSizing?.finishResize();finishResize();
       sessionId = state.sessionId;
+      panelSizing?.refresh();
       collapsed = false;
       historyCollapsed = false;
       followingLatest = true;
@@ -345,10 +350,15 @@ export function setupChatDock({getState}) {
     updateCounts();
   }
 
+  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{applyHeight();restoreHistoryScroll();}});
+  panelSizing=setupChatPanelSizing({getState,animateChange:change=>{
+    finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
+  },beforeResize:()=>{sectionMotion.finish();finishResize();rememberScroll();},onResize:scheduleHeightUpdate});
+
   resizeHandle?.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.isPrimary === false || resizeDrag || !historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    rememberScroll();
+    sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
     resizeHandle.focus({preventScroll:true});
     resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:dock.getBoundingClientRect().height};
     dock.classList.add('resizing');
@@ -374,7 +384,7 @@ export function setupChatDock({getState}) {
   resizeHandle?.addEventListener('dblclick', (event) => {
     if (!historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    finishResize(); rememberScroll();
+    sectionMotion?.finish();panelSizing?.finishResize();finishResize(); rememberScroll();
     dockHeight = null;
     applyHeight();
     persist();
@@ -383,6 +393,7 @@ export function setupChatDock({getState}) {
     if (!historyVisible() || event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
     if (event.key === 'Escape') { finishResize(); return; }
     event.preventDefault(); event.stopPropagation();
+    sectionMotion?.finish();panelSizing?.finishResize();
     const bounds = heightBounds();
     const step = event.shiftKey ? 64 : 24;
     const next = event.key === 'Home' ? bounds.min : event.key === 'End' ? bounds.max
@@ -395,6 +406,7 @@ export function setupChatDock({getState}) {
     if (reducedMotion.matches) applyLayout();
   });
   function resizeViewport() {
+    sectionMotion?.finish();
     // A viewport change invalidates the launcher-to-panel path. Settle at the
     // requested state before fitting the new screen instead of drifting outside it.
     if ([dock, launcher].some(element => visibilityTransitions.get(element)?.animation)) applyLayout();
@@ -412,7 +424,7 @@ export function setupChatDock({getState}) {
   }
 
   byId('chat-collapse')?.addEventListener('click', () => {
-    finishResize();
+    sectionMotion?.finish();panelSizing?.finishResize();finishResize();
     rememberScroll();
     collapsed = true;
     applyLayout({animate:true});
@@ -424,15 +436,14 @@ export function setupChatDock({getState}) {
     document.dispatchEvent(new CustomEvent('workspace-sidebar-close',{detail:{afterClose:()=>open({approval:true})}}));
   });
   historyToggle?.addEventListener('click', () => {
-    finishResize();
+    panelSizing?.finishResize();finishResize();
     rememberScroll();
-    historyCollapsed = !historyCollapsed;
-    applyLayout();
+    sectionMotion.run(()=>{historyCollapsed = !historyCollapsed;applyLayout();});
     persist();
   });
   latest?.addEventListener('click', scrollToLatest);
   conversation?.addEventListener('scroll', () => {
-    if (!historyVisible()) return;
+    if (!historyVisible() || sectionMotion?.active) return;
     savedScrollTop = conversation.scrollTop;
     followingLatest = atLatest();
     if (followingLatest) unread = 0;
