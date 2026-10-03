@@ -40,16 +40,22 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   }
   function positionMenus() {
     const safeTop = Math.max(10,document.querySelector('.topbar').getBoundingClientRect().bottom+8);
-    for (const details of document.querySelectorAll('.view-popover[open], #compare-panel[open]')) {
+    for (const details of document.querySelectorAll('.view-popover, #compare-panel')) {
       const popup = details.querySelector('.popover-content');
-      if (root.dataset.layout !== 'compare' || innerWidth > 640) continue;
-      const anchor = details.querySelector('summary').getBoundingClientRect();
-      const above = Math.max(0,anchor.top-safeTop-8), below = Math.max(0,innerHeight-anchor.bottom-18);
-      const useAbove = above > below;
-      popup.style.setProperty('--workspace-menu-height', `${Math.max(80,useAbove ? above : below)}px`);
-      const height = popup.getBoundingClientRect().height;
-      const top = useAbove ? anchor.top-height-8 : anchor.bottom+8;
-      popup.style.setProperty('--workspace-menu-top', `${Math.max(safeTop,Math.min(innerHeight-height-10,top))}px`);
+      popup.style.setProperty('--workspace-menu-shift-x','0px');
+      if (!details.open || innerWidth > 640) continue;
+      if (root.dataset.layout === 'compare') {
+        const anchor = details.querySelector('summary').getBoundingClientRect();
+        const above = Math.max(0,anchor.top-safeTop-8), below = Math.max(0,innerHeight-anchor.bottom-18);
+        const useAbove = above > below;
+        popup.style.setProperty('--workspace-menu-height', `${Math.max(80,useAbove ? above : below)}px`);
+        const height = popup.getBoundingClientRect().height;
+        const top = useAbove ? anchor.top-height-8 : anchor.bottom+8;
+        popup.style.setProperty('--workspace-menu-top', `${Math.max(safeTop,Math.min(innerHeight-height-10,top))}px`);
+      }
+      const rect = popup.getBoundingClientRect();
+      const dx = Math.min(0,innerWidth-12-rect.right)+Math.max(0,12-rect.left);
+      popup.style.setProperty('--workspace-menu-shift-x', `${Math.round(dx)}px`);
     }
     for (const popup of document.querySelectorAll('.import-popover[open] > .popover-content')) {
       popup.style.setProperty('--panel-max-height', `${Math.max(80,innerHeight-safeTop-10)}px`);
@@ -70,8 +76,9 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     root.dataset.toolsVisible = String(opened);
     dock.inert = !opened;
     dock.setAttribute('aria-hidden', String(!opened));
-    dock.setAttribute('aria-label', target === 'reference' ? '参考图标注工具' : '场景截图标注工具');
-    byId('annotation-context-label').textContent = target === 'reference' ? '参考' : '截图';
+    const liveScene = target === 'scene' && getState().sceneView === 'live';
+    dock.setAttribute('aria-label', target === 'reference' ? '参考图标注工具' : liveScene ? '场景标注工具' : '场景截图标注工具');
+    byId('annotation-context-label').textContent = target === 'reference' ? '参考' : liveScene ? '场景' : '截图';
     refButton.setAttribute('aria-expanded', String(opened && target === 'reference'));
     sceneButton.setAttribute('aria-expanded', String(opened && target === 'scene'));
     byId('scene-labels-toggle').hidden = target !== 'scene';
@@ -102,16 +109,19 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   }
   function syncState() {
     const state = getState();
-    sceneButton.hidden = state.sceneView !== 'snapshot';
+    sceneButton.hidden = false;
+    sceneButton.title = state.sceneView === 'live' ? '展开场景标注工具，开始绘制时自动固定当前视角' : '展开当前截图的标注工具';
     document.querySelector('.selection-popover').hidden = state.sceneView !== 'live';
     byId('selection-level-label').textContent = state.selectionLevel === 'part' ? '部件' : '物体';
     document.querySelector('.selection-popover > summary').setAttribute('aria-label', `选择层级：${state.selectionLevel === 'part' ? '部件' : '物体'}`);
     refButton.disabled = !state.workspaceReady || !state.activeReferenceId;
-    const newSnapshot = state.sceneView === 'snapshot' && previousView !== state.sceneView;
+    const viewChanged = previousView !== state.sceneView;
+    const newSnapshot = state.sceneView === 'snapshot' && viewChanged;
     const newTool = state.mode !== 'select' && previousMode !== state.mode;
     previousView = state.sceneView; previousMode = state.mode;
     if (newSnapshot) open('scene');
     else if (newTool && !opened) open(state.toolPane === 'reference' && !reference.inert ? 'reference' : 'scene');
+    else if (viewChanged) render();
     schedulePosition();
   }
   function layoutChanged() {

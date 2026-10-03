@@ -3735,13 +3735,13 @@ function referencePixelsReady() {
   const ref = activeReference();
   return !ref || imageReadyAtUrl(ui.referenceImage, ref.url);
 }
-function ensureDynamicMoment({showSnapshot=false}={}) {
+function ensureDynamicMoment({showSnapshot=false,reuseExisting=true}={}) {
   if (!editable()) return null;
   if (state.seeking || state.pendingViewId) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
   pauseTimeline();
   if (!referencePixelsReady()) { announce('参考帧正在加载，请稍后再标注。', true); return null; }
   const candidates=[state.snapshot,...state.dynamicSnapshots.filter(entry=>entry.id!==state.snapshot?.id)].filter(Boolean);
-  const matching = candidates.find((entry) => Number.isFinite(entry.time_sec) &&
+  const matching = reuseExisting && candidates.find((entry) => Number.isFinite(entry.time_sec) &&
     entry.clip_id === (state.referenceClip?.clip_id || null) && entry.reference_id === (activeReference()?.id || null) &&
     Math.abs(entry.time_sec - state.time) < 1e-6 &&
     (state.sceneView === 'snapshot' || (entry.scene_revision === state.sceneRevision && comparisonMatchesLive(entry) &&
@@ -4029,6 +4029,7 @@ function updateMode() {
   ui.frame.disabled = !editable() || !state.selectedId;
   ui.resetView.disabled = !editable();
   ui.savedSnapshot.disabled = !editable();
+  id('scene-annotation-toggle').disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
   const context = id('snapshot-context');
@@ -4036,7 +4037,7 @@ function updateMode() {
   context.textContent = state.sceneView === 'snapshot' ? (state.snapshot?.time_sec!==undefined ? `固定截图 · ${snapshotTimeLabel(state.snapshot.time_sec)}` : `${state.snapshot?.name || '截图'} · 固定视角`) : '';
   renderSceneSnapshots();
   document.body.dataset.tool = state.mode;
-  ui.referenceCanvas.dataset.tool = toolMode('reference'); ui.sceneCanvas.dataset.tool = toolMode('scene');
+  ui.referenceCanvas.dataset.tool = toolMode('reference'); ui.sceneCanvas.dataset.tool = renderer.domElement.dataset.tool = toolMode('scene');
   workspaceChrome?.syncState();
   minimalLayout?.refresh();
   document.querySelectorAll('.tool-button').forEach((button) => button.classList.toggle('active', button.dataset.tool === state.mode));
@@ -4045,7 +4046,7 @@ function updateMode() {
   ui.sceneCanvas.style.pointerEvents = editable() && state.sceneView === 'snapshot' ? 'auto' : 'none';
   ui.referenceCanvas.style.cursor = cursor('reference');
   ui.sceneCanvas.style.cursor = cursor('scene');
-  renderer.domElement.style.cursor = state.sceneView === 'live' && toolMode('scene') !== 'select' ? 'crosshair' : '';
+  renderer.domElement.style.cursor = state.sceneView === 'live' && toolMode('scene') !== 'select' ? cursor('scene') : '';
   updateAnnotationSelectionHint();
   controls.enabled = editable() && toolMode('scene') === 'select' && state.sceneView === 'live';
   id('camera-navigation').classList.toggle('hidden', state.sceneView !== 'live' || toolMode('scene') !== 'select');
@@ -4154,15 +4155,8 @@ function addAnnotation(annotation) {
 }
 function prepareSceneAnnotation() {
   if (state.sceneView === 'snapshot' && state.snapshot) return true;
-  if (dynamicEnabled()) return !!ensureDynamicMoment({showSnapshot:true});
-  settleOrbit();
-  const snapshot = state.snapshot;
-  const reusable = snapshot && comparisonMatchesLive(snapshot) && snapshot.scene_revision === state.sceneRevision &&
-    JSON.stringify(snapshot.camera) === JSON.stringify(cameraData()) &&
-    JSON.stringify(snapshot.selected_object_ids) === JSON.stringify(state.selectedId ? [state.selectedId] : []) &&
-    JSON.stringify(snapshot.selected_scene_nodes) === JSON.stringify(state.selectedSceneNode ? [state.selectedSceneNode] : []);
-  if (reusable) { state.sceneView = 'snapshot'; renderSceneView(); return true; }
-  // A different camera gets its own screenshot; previous views and marks stay intact.
+  if (dynamicEnabled()) return !!ensureDynamicMoment({showSnapshot:true,reuseExisting:false});
+  // Starting another drawing from live keeps previous screenshots and marks intact.
   freezeScene();
   return state.sceneView === 'snapshot' && !!state.snapshot;
 }
@@ -4315,7 +4309,9 @@ function annotationPointerDown(event, pane) {
     showTextEditor(pane, point, event.clientX, event.clientY);
     return;
   }
-  canvas.setPointerCapture(event.pointerId);
+  // The renderer is hidden after freezing. Continue this same gesture on the
+  // visible screenshot canvas, including moves outside its bounds.
+  (pane === 'scene' ? ui.sceneCanvas : canvas).setPointerCapture(event.pointerId);
   state.drag = {pane, type:mode, start:point, end:point, pointerId:event.pointerId,
     points:mode === 'freehand' ? [point] : null};
   drawOverlays();

@@ -473,7 +473,7 @@ dialog::backdrop { background: #17171522; }
 /* Saved camera views float over the canvas without changing its aspect ratio. */
 
 .eraser-icon { flex: none; }
-body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annotations { cursor: var(--eraser-cursor, crosshair); }
+#reference-annotations[data-tool=erase], #scene-annotations[data-tool=erase], #viewport canvas[data-tool=erase] { cursor: var(--eraser-cursor, crosshair); }
 @media (max-width: 640px) {
   .tool-list { flex-wrap: wrap; max-width: 100%; min-width: 0; }
   .eraser-tool > span { display: none; }

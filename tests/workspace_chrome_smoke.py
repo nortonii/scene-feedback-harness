@@ -155,6 +155,91 @@ def verify_reference_window(page, store, session):
     control(page,'#comparison-layout-button').click();settle(page)
     print('PASS floating reference drag/resize and keyboard controls, dock following, Escape cancel, saved reopening/reload, viewport clamp, split restoration and unchanged evidence/camera',flush=True)
 
+def verify_live_scene_annotation(browser, server, store):
+    """Start real drawing gestures on the renderer, without an explicit capture."""
+    image = 'data:image/png;base64,' + base64.b64encode((ROOT/'examples/room_demo/reference.png').read_bytes()).decode()
+    for dynamic, layout, width in [(False,'compare',1440), (True,'immersive',390)]:
+        session = store.create_session(reference_images=[str(ROOT/'examples/room_demo/reference.png')])
+        workspace = server.workspace_gateway.ensure(session['session_id'])
+        session = store.get_session(workspace['session_id'])
+        if dynamic:
+            store.set_reference_clip(session['session_id'], {'name':'Live drawing video','fps':2,
+                'frames':[{'name':f'frame-{i}.png','time_sec':i*.5,'data_url':image} for i in range(2)]})
+        store.workspace_agent(status='idle')
+        context = browser.new_context(viewport={'width':width,'height':900 if width>640 else 844})
+        page = context.new_page(); errors=[]; page.on('pageerror',lambda error:errors.append(str(error)))
+        page.route('**/app.js',lambda route:route.fulfill(status=200,content_type='text/javascript',
+            body=(ROOT/'web/app.js').read_text()+HOOK))
+        page.goto(server.browser_url(session['session_id']));wait_ready(page);settle(page)
+        control(page,'#chat-collapse').click()
+        if dynamic:
+            control(page,'#timeline-next').click();page.wait_for_function('__appearanceCheck.state.time===.5 && !__appearanceCheck.state.seeking')
+        if layout=='immersive':
+            control(page,'#immersive-toggle').click();settle(page)
+            if page.locator('#immersive-reference-toggle').get_attribute('aria-expanded')=='true':
+                control(page,'#immersive-reference-toggle').click();settle(page)
+        expect(page.locator('#scene-annotation-toggle')).to_be_visible()
+        control(page,'#scene-annotation-toggle').click()
+        for tool in ['point','rectangle','line','arrow','text','freehand','erase','select']:
+            choose_tool(page,tool,'scene')
+            assert page.evaluate('__appearanceCheck.state.sceneView')=='live'
+            expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(0)
+        first=None;previous=None
+        for index,tool in enumerate(['point','rectangle','line','arrow','text','freehand']):
+            if index: control(page,'#scene-live-card').click()
+            choose_tool(page,tool,'scene')
+            before=page.evaluate('__appearanceCheck.state.annotations.length')
+            r=bounds(page,'#viewport canvas');x=r['x']+r['width']*.28;y=r['y']+r['height']*.51
+            page.mouse.move(x,y);page.mouse.down()
+            page.wait_for_function("__appearanceCheck.state.sceneView==='snapshot'")
+            expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(index+1)
+            if tool!='text':
+                assert page.evaluate('document.querySelector("#scene-annotations").hasPointerCapture(1)')
+            if tool not in ['point','text']:
+                page.mouse.move(r['x']+r['width']*.63,r['y']+r['height']*.66,steps=12)
+            page.mouse.up()
+            if tool=='text':
+                page.locator('#annotation-text').fill('自动保存此视角');control(page,'#save-text').click()
+            page.wait_for_function('(n)=>__appearanceCheck.state.annotations.length===n+1',arg=before)
+            mark=page.evaluate('__appearanceCheck.state.annotations.at(-1)')
+            assert mark['type']==tool and abs(mark['coordinates']['x']-.28)<.01 and abs(mark['coordinates']['y']-.51)<.01,mark
+            assert page.evaluate('__appearanceCheck.state.drag') is None
+            current=page.evaluate('__appearanceCheck.state.snapshot')
+            assert mark['snapshot_id']==current['id']
+            if dynamic:assert mark['time_sec']==current['time_sec']==.5 and current['reference_time_sec']==.5
+            if previous:
+                assert current['id']!=previous['id']
+                saved=page.evaluate('(id)=>[...__appearanceCheck.state.sceneSnapshots,...__appearanceCheck.state.dynamicSnapshots].find(s=>s.id===id)',previous['id'])
+                assert saved==previous,'Starting another live drawing changed saved evidence'
+            if first is None:
+                first=current;choose_tool(page,'point','scene');point(page,'#scene-annotations',.45,.55)
+                expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(1)
+                assert page.evaluate('__appearanceCheck.state.snapshot.id')==first['id']
+            previous=current
+        # Returning to selection restores actual camera dragging without capturing.
+        control(page,'#scene-live-card').click();choose_tool(page,'select','scene')
+        pose=page.evaluate('__appearanceCheck.pose()');r=bounds(page,'#viewport canvas')
+        page.mouse.move(r['x']+r['width']*.25,r['y']+r['height']*.55);page.mouse.down()
+        page.mouse.move(r['x']+r['width']*.42,r['y']+r['height']*.6,steps=10);page.mouse.up();page.wait_for_timeout(250)
+        assert page.evaluate('__appearanceCheck.pose()')!=pose
+        expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(6)
+        choose_tool(page,'arrow','scene');r=bounds(page,'#viewport canvas')
+        page.mouse.move(r['x']+r['width']*.3,r['y']+r['height']*.52);page.mouse.down()
+        # Capture must survive crossing the original renderer's bounds.
+        page.mouse.move(r['x']-25,r['y']+r['height']*.62,steps=15);page.mouse.up()
+        page.wait_for_function('__appearanceCheck.state.annotations.at(-1).type==="arrow" && !__appearanceCheck.state.drag')
+        expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(7)
+        assert page.evaluate('__appearanceCheck.state.annotations.at(-1).coordinates.x2')==0
+        saved=page.evaluate('(id)=>[...__appearanceCheck.state.sceneSnapshots,...__appearanceCheck.state.dynamicSnapshots].find(s=>s.id===id)',first['id'])
+        assert saved==first
+        control(page,'#scene-live-card').click();choose_tool(page,'erase','scene')
+        r=bounds(page,'#viewport canvas');page.mouse.click(r['x']+r['width']*.3,r['y']+r['height']*.55)
+        expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(7)
+        assert page.evaluate('__appearanceCheck.state.sceneView')=='live'
+        assert not errors,errors
+        print(f'PASS live {"video" if dynamic else "static"} {layout}/{width}: all tools, automatic first capture, same-gesture coordinates/capture, saved evidence, selection rotation and outside release',flush=True)
+        context.close()
+
 def main():
     with tempfile.TemporaryDirectory(prefix='workspace-chrome-', dir=ROOT.parent / 'tmp') as directory:
         tmp = Path(directory)
@@ -295,7 +380,7 @@ def main():
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 control(page, '#scene-live-card').click()
                 expect(page.locator('#annotation-tool-panel')).to_be_hidden()
-                expect(page.locator('#scene-annotation-toggle')).to_be_hidden()
+                expect(page.locator('#scene-annotation-toggle')).to_be_visible()
                 unobscured(page, '#viewport canvas')
                 assert page.evaluate('__appearanceCheck.model()') == model
                 print('PASS reference/scene context follows real marks; closing dock preserves screenshot, polling respects collapse and live browse restores clear canvas', flush=True)
@@ -319,6 +404,7 @@ def main():
                 expect(page.locator('#chat-approvals')).to_be_visible()
                 assert not errors, errors
                 print('PASS approval attention remains on collapsed chat and opens the actual pending action with no browser errors', flush=True)
+                verify_live_scene_annotation(browser, server, store)
                 browser.close()
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=3)

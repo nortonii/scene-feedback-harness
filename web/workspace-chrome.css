@@ -556,8 +556,11 @@
 
 /* On a stacked phone workspace, settings open inside the viewport instead of
    below a scene header that may already be near the bottom of the screen. */
-.view-popover .popover-content, .compare-settings { max-height: calc(100dvh - 120px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.view-popover .popover-content, .compare-settings { translate: var(--workspace-menu-shift-x,0px) 0; max-height: calc(100dvh - 120px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 @media (max-width: 640px) {
+  /* Anchor to the full toolbar so the first paint is already within the screen. */
+  [data-layout=immersive] .scene-pane .view-popover,
+  [data-layout=immersive] .scene-pane .compare-popover { position: static; }
   [data-layout=compare] .scene-pane .view-popover .popover-content,
   [data-layout=compare] .scene-pane .compare-settings {
     position: fixed;
