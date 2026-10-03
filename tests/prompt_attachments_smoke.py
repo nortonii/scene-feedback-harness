@@ -53,9 +53,12 @@ def main():
        plus.click();expect(menu).to_be_visible();r=bounds(page,'#prompt-attach-menu');assert r['x']>=0 and r['y']>=0 and r['x']+r['width']<=width+1 and r['y']+r['height']<=height+1
        page.wait_for_function("Number(getComputedStyle(document.querySelector('#prompt-attach-menu')).opacity)>.99");page.screenshot(path=str(out/f'{layout}-{theme}-{width}.png'));page.locator('#prompt-attach-saved').click();r=bounds(page,'#prompt-attach-menu');assert r['y']>=0 and r['y']+r['height']<=height+1
        page.keyboard.press('Escape');expect(menu).to_be_hidden();assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
-      control(page,'#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden();control(page,'.view-popover > summary').click();page.locator('.camera-help summary').click() if not page.locator('.camera-help').evaluate('el=>el.open') else None
-      expect(page.locator('#scene-hint')).to_be_visible();page.keyboard.press('Escape');control(page,'#chat-launcher').click();settle(page)
-    print('PASS desktop and narrow-screen day/night menus fit above composer; camera instructions are available only in the camera menu',flush=True)
+      control(page,'#chat-collapse').click();expect(page.locator('#chat-dock')).to_be_hidden()
+      for selector in ('#compare-opacity','#ground-axis','#align-reference-button'):
+       expect(page.locator(selector)).to_be_visible()
+       r=bounds(page,selector);assert r['x']>=0 and r['x']+r['width']<=width+1
+      control(page,'#chat-launcher').click();settle(page)
+    print('PASS desktop and narrow-screen day/night attachment menus fit above composer and direct view controls stay reachable',flush=True)
     page.set_viewport_size({'width':1440,'height':960});control(page,'#comparison-layout-button').click();settle(page)
     refs=page.evaluate('__appearanceCheck.citedImages()');assert len(refs)==3
     for _ in range(5):control(page,'#drag-reference-image').click();expect(menu).to_be_hidden()

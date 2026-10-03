@@ -155,7 +155,7 @@ def main():
                 expect(page.locator('#annotation-tool-panel')).to_be_hidden()
                 assert page.locator('#annotation-tool-panel').evaluate('el => el.inert')
                 control(page, '#immersive-reference-toggle').click()
-                control(page, '#annotate-reference-button').click()
+                open_annotation_tools(page, 'reference')
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
                 assert not page.locator('#annotation-tool-panel').evaluate('el => el.inert')
                 expect(page.locator('button[data-tool="point"]')).to_be_visible()
@@ -178,7 +178,7 @@ def main():
                 dark_background = page.evaluate('__appearanceCheck.background()')
                 assert dark_background != light_background
                 assert int(dark_background[0:2], 16) < int(light_background[0:2], 16)
-                for selector in ('#theme-toggle', '#immersive-toggle', '.view-popover > summary'):
+                for selector in ('#theme-toggle', '#immersive-toggle', '#ground-axis'):
                     colors = contrast(page, selector)
                     assert colors['contrast'] >= 4.5, (selector, colors)
                     assert colors['bg'] < .15, (selector, colors)
@@ -200,7 +200,7 @@ def main():
                 settle(page)
                 assert not page.locator('.reference-pane').evaluate('el => el.inert')
                 assert_inside(page, '.reference-pane')
-                control(page, '#annotate-reference-button').click()
+                open_annotation_tools(page, 'reference')
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
                 assert not page.locator('#annotation-tool-panel').evaluate('el => el.inert')
                 control(page, 'button[data-tool="point"]').click()
@@ -250,16 +250,15 @@ def main():
                     assert_full_scene(page)
                     for selector in ('#projects-dialog-button',
                                      '#immersive-reference-toggle', '#scene-live-card',
-                                     '#capture-scene-button', '.view-popover > summary', '#chat-launcher'):
+                                     '#capture-scene-button', '#ground-axis', '#chat-launcher'):
                         assert_inside(page, selector)
                     control(page, '#immersive-reference-toggle').click()
                     settle(page)
                     assert_inside(page, '.reference-pane')
                     page.screenshot(path=str(out / ('mobile-reference.png' if width == 390 else 'desktop-reference.png')))
                     control(page, '#immersive-reference-toggle').click()
-                    control(page, '.view-popover > summary').click()
-                    assert_inside(page, '.view-popover .popover-content')
-                    control(page, '.view-popover > summary').click()
+                    assert_inside(page, '#compare-opacity')
+                    assert_inside(page, '#align-reference-button')
                 control(page, '#theme-toggle').click()
                 settle(page)
                 expect(page.locator('html')).to_have_attribute('data-theme', 'light')
@@ -336,14 +335,15 @@ def main():
                 control(page, '#scene-live-card').click()
                 page.mouse.move(40,650);page.wait_for_timeout(200)
                 expect(page.locator('#scene-stage #scene-hint')).to_have_count(0)
-                control(page,'.view-popover > summary').click()
-                page.locator('.camera-help summary').click()
-                hint=bounds(page,'#scene-hint')
-                assert hint['x'] >= 0 and hint['x']+hint['width'] <= 1440
-                assert page.locator('#scene-hint').evaluate("el => getComputedStyle(el).transform === 'none'")
-                expect(page.locator('#scene-hint')).to_contain_text('左拖旋转')
-                page.screenshot(path=str(out/'camera-help.png'))
-                page.keyboard.press('Escape')
+                assert_inside(page,'#ground-axis')
+                assert_inside(page,'#compare-opacity')
+                before=page.evaluate('__appearanceCheck.pose()')
+                viewport=bounds(page,'#viewport canvas')
+                px=viewport['x']+viewport['width']*.47;py=viewport['y']+viewport['height']*.52
+                page.mouse.move(px,py);page.mouse.down();page.mouse.move(px+65,py+35,steps=8);page.mouse.up()
+                page.wait_for_timeout(250)
+                assert page.evaluate('__appearanceCheck.pose()')!=before
+                page.screenshot(path=str(out/'direct-camera-controls.png'))
                 control(page, '#comparison-layout-button').click();settle(page)
                 expect(page.locator('#reference-pane > #timeline-panel')).to_be_visible()
                 assert bounds(page,'#timeline-panel')['width'] < 740

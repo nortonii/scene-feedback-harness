@@ -13,9 +13,11 @@ def open_annotation_tools(page, context=None):
     if context == 'scene':
         page.locator('#scene-annotation-toggle').click()
     else:
-        if page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#annotate-reference-button').is_visible():
+        if page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#reference-media').is_visible():
             page.locator('#immersive-reference-toggle').click()
-        page.locator('#annotate-reference-button').click()
+        page.locator('#reference-media').hover()
+        expect(panel).to_be_visible()
+        panel.hover()
     expect(panel).to_be_visible()
 
 

@@ -96,6 +96,12 @@ def main():
     control(page,'#annotation-tools-close').click() if page.locator('#annotation-tool-panel').is_visible() else None
     # Construct a restored mixed draft: capture through the real still-image UI,
     # then restore its existing video moments without offering a new capture mode.
+    # Keep the temporary server's source of truth in sync while constructing
+    # mixed still/video draft evidence. A background poll must not reattach the
+    # clip between the two static captures. Restore the exact clip IDs after.
+    with store.lock:
+     store.state['sessions'][session['session_id']]['reference_clip']=None
+     store._save()
     page.evaluate('__appearanceCheck.setReferenceClip(null)')
     def capture_restored_static():
         control(page,'#scene-live-card').click()
@@ -116,6 +122,9 @@ def main():
     expected_order=[static,first_id,second_id,third_id,later_static]
     def card_order():return page.locator('.snapshot-card:not([data-kind=live])').evaluate_all('cards=>cards.map(c=>c.dataset.snapshotId)')
     assert card_order()==expected_order
+    with store.lock:
+     store.state['sessions'][session['session_id']]['reference_clip']=clip
+     store._save()
     page.evaluate('(clip)=>__appearanceCheck.setReferenceClip(clip)',clip)
     page.locator(f'.snapshot-open[data-snapshot-id="{second_id}"]').click()
     expect(gallery).to_be_visible();expect(page.locator('#scene-snapshot-strip')).to_be_visible()

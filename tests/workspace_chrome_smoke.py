@@ -15,7 +15,7 @@ from server import make_server
 from build_scene import build
 from playwright.sync_api import sync_playwright, expect, TimeoutError as PlaywrightTimeoutError
 from immersive_theme_smoke import HOOK, wait_ready, settle, assert_inside, assert_full_scene, point, bounds
-from workspace_ui_helpers import control, choose_tool
+from workspace_ui_helpers import control, open_annotation_tools, choose_tool
 
 
 def unobscured(page, selector):
@@ -55,7 +55,7 @@ def verify_reference_window(page, store, session):
     check_pose('enter immersive')
     if page.locator('#immersive-reference-toggle').get_attribute('aria-expanded') != 'true':
         control(page, '#immersive-reference-toggle').click(); settle(page)
-    control(page, '#annotate-reference-button').click()
+    open_annotation_tools(page, 'reference')
     before = bounds(page, '#reference-pane')
     dock_before = bounds(page, '#annotation-tool-panel')
     title = bounds(page, '#reference-title')
@@ -67,6 +67,8 @@ def verify_reference_window(page, store, session):
     assert abs(moved['x']-before['x']-150) < 2, (before,moved)
     assert abs(moved['y']-before['y']-80) < 2, (before,moved)
     assert abs(moved['width']-before['width']) < 1
+    expect(page.locator('#annotation-tool-panel')).to_be_hidden()
+    open_annotation_tools(page, 'reference')
     assert bounds(page,'#annotation-tool-panel')['x'] > dock_before['x']+100
     handle = bounds(page, '[data-reference-resize="se"]')
     x,y=handle['x']+handle['width']/2,handle['y']+handle['height']/2
@@ -76,6 +78,7 @@ def verify_reference_window(page, store, session):
     resized = bounds(page, '#reference-pane')
     assert abs(resized['width']-moved['width']-120) < 2, (moved,resized)
     assert abs(resized['height']-moved['height']-65) < 2, (moved,resized)
+    open_annotation_tools(page, 'reference')
     assert_inside(page,'#annotation-tool-panel')
     # Keyboard alternatives also update the actual window, without modifying the camera.
     page.locator('#reference-pane > .pane-head').focus()
@@ -102,6 +105,7 @@ def verify_reference_window(page, store, session):
     expect(page.locator('#reference-pane')).to_be_visible()
     assert bounds(page,'#reference-pane') == saved
     assert page.evaluate("localStorage.getItem('astra-reference-window:v1')") == preference
+    open_annotation_tools(page, 'reference')
     control(page,'#annotation-tools-close').click()
     control(page,'#immersive-reference-toggle').click();settle(page)
     control(page,'#immersive-reference-toggle').click();settle(page)
@@ -240,6 +244,72 @@ def verify_live_scene_annotation(browser, server, store):
         print(f'PASS live {"video" if dynamic else "static"} {layout}/{width}: all tools, automatic first capture, same-gesture coordinates/capture, saved evidence, selection rotation and outside release',flush=True)
         context.close()
 
+
+def verify_reference_entry(browser, server, store):
+    """The image itself exposes the same drawing dock for pointer, key and touch."""
+    session = store.create_session(reference_images=[str(ROOT / 'examples/room_demo/reference.png')])
+    server.workspace_gateway.ensure(session['session_id'])
+    store.workspace_agent(status='idle')
+    for touch in (False, True):
+        context = browser.new_context(viewport={'width':390 if touch else 1280, 'height':844 if touch else 900},
+                                      has_touch=touch, is_mobile=touch)
+        page = context.new_page()
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.route('**/app.js', lambda route: route.fulfill(status=200,
+            content_type='text/javascript', body=(ROOT / 'web/app.js').read_text() + HOOK))
+        page.goto(server.browser_url(session['session_id']))
+        wait_ready(page)
+        if page.locator('#chat-dock').is_visible():
+            control(page, '#chat-collapse').click()
+        panel = page.locator('#annotation-tool-panel')
+        expect(panel).to_be_hidden()
+        reference = page.locator('#reference-media')
+        if touch:
+            box = bounds(page, '#reference-media')
+            page.touchscreen.tap(box['x'] + box['width'] * .48, box['y'] + box['height'] * .45)
+            expect(panel).to_be_visible()
+            expect(page.locator('#annotation-context-label')).to_have_text('参考')
+            choose_tool(page, 'point', 'reference')
+            box = bounds(page, '#reference-annotations')
+            page.touchscreen.tap(box['x'] + box['width'] * .42, box['y'] + box['height'] * .5)
+            page.wait_for_function('__appearanceCheck.state.annotations.length === 1')
+            assert page.evaluate('__appearanceCheck.state.annotations[0].pane') == 'reference'
+            print('PASS touch reference tap opens drawing dock and creates a mark', flush=True)
+        else:
+            reference.hover()
+            expect(panel).to_be_visible()
+            expect(page.locator('#annotation-context-label')).to_have_text('参考')
+            panel.hover()
+            expect(panel).to_be_visible()
+            page.locator('#scene-stage').hover()
+            expect(panel).to_be_hidden()
+            page.keyboard.press('Tab')
+            page.locator('#reference-annotations').focus()
+            expect(panel).to_be_visible()
+            point_tool = page.locator('button[data-tool="point"]')
+            point_tool.focus(); point_tool.press('Enter')
+            assert page.evaluate('__appearanceCheck.state.paneModes.reference') == 'point'
+            point(page, '#reference-annotations', .48, .44)
+            page.wait_for_function('__appearanceCheck.state.annotations.length === 1')
+            choose_tool(page, 'rectangle', 'reference')
+            box = bounds(page, '#reference-annotations')
+            page.mouse.move(box['x'] + box['width']*.24, box['y'] + box['height']*.31)
+            page.mouse.down()
+            page.mouse.move(box['x'] + box['width']*.68, box['y'] + box['height']*.66, steps=10)
+            page.mouse.up()
+            page.wait_for_function('__appearanceCheck.state.annotations.length === 2')
+            choose_tool(page, 'text', 'reference')
+            point(page, '#reference-annotations', .38, .54)
+            expect(page.locator('#text-editor')).to_be_visible()
+            page.locator('#annotation-text').fill('查看这一处')
+            control(page, '#save-text').click()
+            page.wait_for_function('__appearanceCheck.state.annotations.length === 3')
+            assert [mark['type'] for mark in page.evaluate('__appearanceCheck.state.annotations')] == ['point','rectangle','text']
+            print('PASS pointer hover-to-dock/leave, keyboard focus and real image point/drag/text gestures', flush=True)
+        assert not errors, errors
+        context.close()
+
 def main():
     with tempfile.TemporaryDirectory(prefix='workspace-chrome-', dir=ROOT.parent / 'tmp') as directory:
         tmp = Path(directory)
@@ -306,23 +376,25 @@ def main():
                             for selector in ('#comparison-layout-button','#immersive-toggle','#theme-toggle','#help-button'):
                                 unobscured(page, selector)
                             page.keyboard.press('Escape')
-                            control(page, '#compare-panel > summary').click()
-                            unobscured(page, '#compare-toggle')
-                            assert_inside(page, '#compare-panel .popover-content')
-                            page.keyboard.press('Escape')
-                            control(page, '.view-popover > summary').click()
-                            unobscured(page, '[data-camera-view="front"]')
-                            assert_inside(page, '.view-popover .popover-content')
-                            page.keyboard.press('Escape')
+                            unobscured(page, '#compare-opacity')
+                            unobscured(page, '#align-reference-button')
+                            unobscured(page, '#ground-axis')
                             control(page, '.selection-popover > summary').click()
                             unobscured(page, '[data-selection-level="part"]')
                             page.keyboard.press('Escape')
-                        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
+                        scroll = page.evaluate('''() => ({
+                          actual:document.documentElement.scrollWidth,expected:innerWidth,
+                          offenders:[...document.querySelectorAll('body *')].filter(el => {
+                            const r=el.getBoundingClientRect(),s=getComputedStyle(el);
+                            return r.width>0 && r.right>innerWidth+1 && s.position!=='fixed' && s.visibility!=='hidden';
+                          }).slice(0,12).map(el => [el.id || el.className, Math.round(el.getBoundingClientRect().right)])
+                        })''')
+                        assert scroll['actual'] <= scroll['expected'] + 1, (width,height,layout,theme,scroll)
                 assert page.evaluate('__appearanceCheck.model()') == model
                 actual_pose = page.evaluate('__appearanceCheck.pose()')
                 assert max(abs(a-b) for key in pose for a,b in zip(pose[key],actual_pose[key])) < 1e-8, (pose,actual_pose)
                 assert page.evaluate('__appearanceCheck.evidence()') == evidence
-                print('PASS desktop/mobile day/night menus remain unobscured in both layouts without changing scene or evidence', flush=True)
+                print('PASS desktop/mobile day/night direct comparison, alignment and ground-axis controls stay reachable without changing scene or evidence', flush=True)
 
                 page.set_viewport_size({'width':1440,'height':900})
                 control(page, '#comparison-layout-button').click(); settle(page)
@@ -344,17 +416,19 @@ def main():
                 control(page, '#chat-collapse').click()
                 expect(page.locator('#chat-dock')).to_be_hidden()
                 print('PASS reference corner zoom/reset and image-reference button receive real pointer clicks', flush=True)
-                control(page, '#annotate-reference-button').click()
+                open_annotation_tools(page, 'reference')
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
-                expect(page.locator('#annotate-reference-button')).to_have_attribute('aria-expanded','true')
+                # The floating dock stays available when the pointer moves from
+                # the reference image to its controls, then retreats on leave.
+                page.locator('#annotation-tool-panel').hover()
+                expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 choose_tool(page, 'point')
                 point(page, '#reference-annotations', .52, .45)
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 1')
                 control(page, '#capture-scene-button').click()
                 expect(page.locator('#annotation-context-label')).to_have_text('截图')
                 expect(page.locator('#scene-annotation-toggle')).to_have_attribute('aria-expanded','true')
-                expect(page.locator('#annotate-reference-button')).to_have_attribute('aria-expanded','false')
                 choose_tool(page, 'point')
                 point(page, '#scene-annotations', .63, .55)
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 2')
@@ -367,7 +441,7 @@ def main():
                 expect(page.locator('#annotation-tool-panel')).to_be_hidden()
                 control(page, '#scene-annotation-toggle').click()
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
-                control(page, '#annotate-reference-button').click()
+                open_annotation_tools(page, 'reference')
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
                 choose_tool(page, 'point', 'scene')
                 point(page, '#scene-annotations', .72, .42)
@@ -405,6 +479,7 @@ def main():
                 assert not errors, errors
                 print('PASS approval attention remains on collapsed chat and opens the actual pending action with no browser errors', flush=True)
                 verify_live_scene_annotation(browser, server, store)
+                verify_reference_entry(browser, server, store)
                 browser.close()
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=3)

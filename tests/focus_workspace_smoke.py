@@ -456,8 +456,8 @@ def verify_scene_modes(page, screenshots):
     mode(False)
     expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(0)
     browse.click()
-    control(page, ".view-popover > summary").click()
-    control(page, "#reset-button").click()
+    page.locator('#scene-stage').click(position={'x':10,'y':10})
+    page.keyboard.press('f')
     control(page, "#chat-launcher").click()
     mode(False)
 
@@ -717,41 +717,52 @@ def verify_selection_panel(page, screenshots):
 def verify_overlay_toolbar(page, store, screenshots):
     # Live comparison preferences and each saved screenshot have independent settings.
     control(page, "#scene-live-card").click()
-    toggle = page.locator("#compare-toggle")
-    panel = page.locator("#compare-panel")
     slider = page.locator("#compare-opacity")
     overlay = page.locator("#compare-image")
+    def set_opacity(value):
+        assert slider.is_enabled(), page.evaluate('''() => ({
+          sceneView:__referenceCheck.state.sceneView,
+          workspaceReady:__referenceCheck.state.workspaceReady,
+          sessionStatus:__referenceCheck.state.sessionStatus,
+          pendingSubmission:!!__referenceCheck.state.pendingSubmission,
+          submitting:__referenceCheck.state.submitting,
+          uploading:__referenceCheck.state.uploading,
+          sliderDisabled:document.querySelector('#compare-opacity').disabled,
+          status:document.querySelector('#compare-status').textContent,
+          session:document.querySelector('#session-pill').textContent,
+          submitDisabled:document.querySelector('#submit-button').disabled
+        })''')
+        slider.focus()
+        current = int(slider.input_value())
+        direction = "ArrowRight" if value > current else "ArrowLeft"
+        for _ in range(abs(value - current)):
+            slider.press(direction)
+        expect(slider).to_have_value(str(value))
+
     control(page, 'button[data-tool="select"]').click()
     original = draft(page)
-    expect(toggle).to_be_enabled()
-    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(slider).to_be_enabled()
+    expect(overlay).to_be_visible()
     expect(slider).to_have_value("45")
-    panel.locator("summary").click()
     for opacity in (25, 45, 75):
-        control(page, f'[data-compare-opacity="{opacity}"]').click()
-        expect(slider).to_have_value(str(opacity))
+        set_opacity(opacity)
         expect(overlay).to_have_css("opacity", str(opacity / 100))
-        assert panel.evaluate("el => el.open"), "Selecting a preset closed the opacity popover"
     slider.focus()
     slider.press("ArrowRight")
     expect(slider).to_have_value("76")
     expect(overlay).to_have_css("opacity", "0.76")
-    assert panel.evaluate("el => el.open")
-    control(page, '[data-compare-opacity="75"]').click()
+    set_opacity(75)
     if screenshots:
-        page.screenshot(path=str(screenshots / "overlay-popover.png"))
-    panel.locator("summary").click()
+        page.screenshot(path=str(screenshots / "overlay-direct-slider.png"))
     assert draft(page) == original, "Display-only opacity controls changed the visual feedback draft"
-    control(page, '#compare-toggle').click()
-    expect(toggle).to_have_attribute("aria-pressed", "false")
+    set_opacity(0)
     expect(overlay).to_be_hidden()
-    control(page, '#compare-toggle').click()
-    expect(toggle).to_have_attribute("aria-pressed", "true")
+    set_opacity(75)
     expect(overlay).to_be_visible()
     expect(overlay).to_have_css("opacity", "0.75")
     page.reload()
     wait_ready(page)
-    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(overlay).to_be_visible()
     expect(slider).to_have_value("75")
 
     # Reopen the existing marked screenshot, preserving its original evidence.
@@ -759,18 +770,14 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(overlay).to_be_hidden()
     frozen_overlay = page.locator("#snapshot-compare-image")
     expect(frozen_overlay).to_be_visible()
-    expect(toggle).to_be_enabled()
-    expect(toggle).to_have_attribute("aria-pressed", "true")
     expect(slider).to_be_enabled()
     frozen_before = draft(page)["snapshot"]
-    panel.locator("summary").click()
-    control(page, '[data-compare-opacity="25"]').click()
-    panel.locator("summary").click()
+    set_opacity(25)
     expect(frozen_overlay).to_have_css("opacity", "0.25")
     assert draft(page)["snapshot"]["comparison"]["opacity"] == 25
-    control(page, '#compare-toggle').click()
+    set_opacity(0)
     expect(frozen_overlay).to_be_hidden()
-    control(page, '#compare-toggle').click()
+    set_opacity(25)
     expect(frozen_overlay).to_be_visible()
     page.reload()
     wait_ready(page)
@@ -786,39 +793,34 @@ def verify_overlay_toolbar(page, store, screenshots):
     assert preference["enabled"] is True and preference["opacity"] == 75
     control(page, 'button[data-tool="select"]').click()
     control(page, "#scene-live-card").click()
-    expect(toggle).to_be_enabled()
-    expect(toggle).to_have_attribute("aria-pressed", "true")
+    expect(slider).to_be_enabled()
     expect(overlay).to_be_visible()
     expect(overlay).to_have_css("opacity", "0.75")
     for field in ("note", "annotations", "camera", "referencedSceneNodes"):
         assert draft(page).get(field) == original.get(field), field
     assert draft(page)["snapshot"]["data_url"] == original["snapshot"]["data_url"]
 
-    panel.locator("summary").click()
     slider.focus()
     slider.press("Home")
     expect(slider).to_have_value("0")
-    expect(toggle).to_have_attribute("aria-pressed", "false")
     expect(overlay).to_be_hidden()
     page.reload()
     wait_ready(page)
     expect(slider).to_have_value("0")
-    control(page, '#compare-toggle').click()
-    expect(slider).to_have_value("75")
+    set_opacity(75)
     expect(overlay).to_be_visible()
     expect(overlay).to_have_css("opacity", "0.75")
-    control(page, '#compare-toggle').click()
+    set_opacity(0)
     image_url = "data:image/png;base64," + base64.b64encode(
         (ROOT / "examples/room_demo/reference.png").read_bytes()).decode()
     store.add_reference(store.workspace()["session_id"], "alternate-reference.png", image_url)
     page.reload()
     wait_ready(page)
-    expect(toggle).to_have_attribute("aria-pressed", "false")
-    expect(slider).to_have_value("75")
+    expect(slider).to_have_value("0")
     expect(overlay).to_be_hidden()
     page.get_by_role("button", name="查看 alternate-reference.png", exact=True).click()
     expect(page.locator("#reference-title")).to_have_text("alternate-reference.png")
-    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(slider).to_have_value("0")
     expect(overlay).to_be_hidden()
     page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open").last.click()
     expect(frozen_overlay).to_be_visible()
@@ -827,7 +829,7 @@ def verify_overlay_toolbar(page, store, screenshots):
     expect(slider).to_have_value("25")
     control(page, "#scene-live-card").click()
     page.get_by_role("button", name="查看 reference.png", exact=True).click()
-    expect(toggle).to_have_attribute("aria-pressed", "false")
+    expect(slider).to_have_value("0")
     expect(overlay).to_be_hidden()
 
 
@@ -930,7 +932,6 @@ def verify_project_isolation(page, server, screenshots):
         assert child.gateway.adapter is None and len(created_tasks) == 1
         assert child.store.scene()["objects"] == []
         expect(page.locator("#reference-empty")).to_be_visible()
-        expect(page.locator("#compare-toggle")).to_be_disabled()
         expect(page.locator("#compare-opacity")).to_be_disabled()
         expect(page.locator("#compare-opacity")).to_have_value("45")
         expect(page.locator("#compare-image")).to_be_hidden()
@@ -955,8 +956,7 @@ def verify_project_isolation(page, server, screenshots):
         expect(page.locator("#feedback-note")).to_have_value(root_note)
         assert abs(page.locator("#chat-dock").bounding_box()["height"] - root_dock_height) < 2
         expect(page.locator("#reference-view-select")).to_be_visible()
-        expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
-        expect(page.locator("#compare-opacity")).to_have_value("75")
+        expect(page.locator("#compare-opacity")).to_have_value("0")
         expect(page.locator("#compare-image")).to_be_hidden()
         expect(page.locator("#conversation")).to_contain_text(root_event_marker)
         assert root.store.list_all_feedback() == original_feedback
@@ -983,6 +983,7 @@ def main():
     parser.add_argument("--selection-only", action="store_true", help="Run only annotation selection and referencing checks.")
     parser.add_argument("--controls-only", action="store_true", help="Run only workspace size and layout controls.")
     parser.add_argument("--eraser-only", action="store_true", help="Run only the eraser interaction regression.")
+    parser.add_argument("--overlay-only", action="store_true", help="Run only direct comparison opacity and saved screenshot checks.")
     parser.add_argument("--baseline", action="store_true", help="Report original geometry only.")
     args = parser.parse_args()
     screenshots = args.screenshots
@@ -1035,7 +1036,7 @@ def main():
                         if request.method == "POST" and "/api/sessions/" in request.url
                         and request.url.endswith("/feedback") else None)
                 page.route("**/app.js", lambda route: route.fulfill(status=200, content_type="text/javascript",
-                    body=(ROOT / "web/app.js").read_text() + "\nwindow.__referenceCheck={promptText};"))
+                    body=(ROOT / "web/app.js").read_text() + "\nwindow.__referenceCheck={promptText,state};"))
                 page.goto(url)
                 wait_ready(page)
                 if args.baseline:
@@ -1069,6 +1070,21 @@ def main():
                     verify_eraser(page, screenshots)
                     assert not errors, errors
                     passed("eraser interaction and cleared overlay pixels")
+                    browser.close()
+                    return
+                if args.overlay_only:
+                    control(page, "#capture-scene-button").click()
+                    choose_tool(page, "rectangle", "scene")
+                    stage = page.locator("#scene-stage").bounding_box()
+                    page.mouse.move(stage["x"] + stage["width"] * .30, stage["y"] + stage["height"] * .35)
+                    page.mouse.down()
+                    page.mouse.move(stage["x"] + stage["width"] * .50, stage["y"] + stage["height"] * .55, steps=8)
+                    page.mouse.up()
+                    expect(page.locator("#annotation-count")).to_have_text("1")
+                    control(page, "#scene-live-card").click()
+                    verify_overlay_toolbar(page, store, screenshots)
+                    assert not errors, errors
+                    passed("direct opacity slider preserves live and saved screenshot comparison independently")
                     browser.close()
                     return
                 verify_scene_modes(page, screenshots)
@@ -1187,7 +1203,7 @@ def main():
                 verify_chat_resize(page, store, submissions, screenshots)
                 passed("pointer and keyboard resizing preserve draft and height; collapsed history disables resize until explicitly reopened, including after reload")
                 verify_overlay_toolbar(page, store, screenshots)
-                passed("overlay toolbar preserves independent live/screenshot opacity and marks across toggle, reload and reference changes")
+                passed("direct opacity slider preserves independent live/screenshot settings and marks across reload and reference changes")
 
                 control(page, "#chat-collapse").click()
                 store.workspace_event("assistant_message", {"text": "收起时的新回复：标记已收到。"})
@@ -1353,10 +1369,9 @@ def main():
                 expect(page.locator('button[data-tool="freehand"]')).to_be_visible()
                 page.keyboard.press("Escape")
                 expect(page.locator('button[data-tool="freehand"]')).to_be_hidden()
-                control(page, ".view-popover > summary").click()
-                expect(page.locator("#reset-button")).to_be_visible()
-                expect(page.locator("#frame-button")).to_be_visible()
-                page.keyboard.press("Escape")
+                expect(page.locator("#ground-axis")).to_be_visible()
+                expect(page.locator("#align-reference-button")).to_be_visible()
+                expect(page.locator("#compare-opacity")).to_be_visible()
                 control(page, "#annotation-tools-close").click()
                 control(page, "#chat-launcher").click()
                 passed("activity dialog, drawing tools and contextual view controls remain usable")
@@ -1429,14 +1444,13 @@ def main():
                 expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
                 expect(page.locator("#reference-title")).to_have_text("同步侧面机位")
                 expect(page.locator("#reference-frame-label")).to_contain_text("2 /")
-                expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
+                expect(page.locator("#compare-opacity")).to_have_value("0")
                 expect(page.locator("#compare-image")).to_be_hidden()
                 assert page.locator("#timeline-seek").input_value() == before_view_time
                 page.reload()
                 wait_ready(page)
                 expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
-                expect(page.locator("#compare-toggle")).to_have_attribute("aria-pressed", "false")
-                expect(page.locator("#compare-opacity")).to_have_value("75")
+                expect(page.locator("#compare-opacity")).to_have_value("0")
                 expect(page.locator("#compare-image")).to_be_hidden()
                 assert page.locator("#timeline-seek").input_value() == before_view_time
                 passed("synchronized reference views preserve active time, selected camera and disabled overlay across reload")

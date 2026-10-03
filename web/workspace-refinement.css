@@ -112,3 +112,18 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .evidence-card.is-expanded { grid-column: 1 / -1; }
 .evidence-card.is-expanded .evidence-image { cursor: zoom-out; }
 .evidence-card.is-expanded img { max-height: 70dvh; }
+
+/* Direct scene controls stay available without opening another menu. */
+.scene-pane .pane-actions { min-width: 0; flex-wrap: wrap; row-gap: 4px; }
+.scene-pane .compare-inline { display: inline-flex; align-items: center; flex: none; gap: 5px; padding: 0 3px; border: 0; }
+.scene-pane .compare-inline #compare-opacity { width: 88px; min-width: 0; height: 26px; margin: 0; accent-color: var(--ink); cursor: pointer; }
+.scene-pane .compare-inline #compare-opacity:disabled { cursor: default; }
+.scene-pane .compare-inline #opacity-value { min-width: 31px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.scene-pane .ground-axis-label { display: inline-flex; align-items: center; flex: none; gap: 4px; padding: 0; margin: 0; font-size: 12px; }
+.scene-pane .ground-axis-label select { max-width: 104px; padding: 4px 6px; min-height: 30px; }
+@media (max-width: 640px) {
+  .scene-pane > .pane-head > .pane-actions { min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+  .scene-pane .compare-inline #compare-opacity { width: 68px; }
+  .scene-pane .ground-axis-label { font-size: 11px; }
+  .scene-pane .ground-axis-label select { max-width: 93px; min-height: 28px; padding: 3px 5px; }
+}

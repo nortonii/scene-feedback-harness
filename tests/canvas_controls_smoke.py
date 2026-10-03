@@ -44,8 +44,8 @@ def main():
     assert page.evaluate('({evidence:__appearanceCheck.evidence(),pose:__appearanceCheck.pose()})')==before
     print('PASS permanent live/saved gallery stays reachable in both layouts, themes and desktop/narrow widths',flush=True)
     page.set_viewport_size({'width':1440,'height':900});settle(page)
-    control(page,'.view-popover > summary').click();expect(page.locator('.view-popover')).to_have_attribute('open','')
-    button_box=toolbar.bounding_box();toolbar.click();expect(head).to_be_hidden();assert head.evaluate('el=>el.inert');assert not page.locator('.view-popover').evaluate('el=>el.open');assert toolbar.bounding_box()==button_box
+    control(page,'.selection-popover > summary').click();expect(page.locator('.selection-popover')).to_have_attribute('open','')
+    button_box=toolbar.bounding_box();toolbar.click();expect(head).to_be_hidden();assert head.evaluate('el=>el.inert');assert not page.locator('.selection-popover').evaluate('el=>el.open');assert toolbar.bounding_box()==button_box
     toolbar.press('Tab');assert not page.evaluate('document.querySelector("#scene-toolbar").contains(document.activeElement)')
     expect(gallery).to_be_visible();expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(3)
     page.screenshot(path=str(out/'collapsed-dark-1440.png'))

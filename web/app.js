@@ -72,10 +72,9 @@ const ui = {
   timelineSource:id('timeline-source'), animationChoices:id('animation-choices'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
-  compareImage:id('compare-image'), snapshotCompareImage:id('snapshot-compare-image'), compareToggle:id('compare-toggle'),
+  compareImage:id('compare-image'), snapshotCompareImage:id('snapshot-compare-image'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
-  compareSummary:id('compare-summary'), compareStatus:id('compare-status'),
-  comparePresets:[...document.querySelectorAll('[data-compare-opacity]')],
+  compareStatus:id('compare-status'),
   targetPicker:id('target-picker'), currentTarget:id('current-target'), targetSelect:id('target-select'),
   targetChoiceDetails:id('target-choice-details'),
   switchTarget:id('switch-target'), refreshTargets:id('refresh-targets'), targetHelp:id('target-help'),
@@ -99,8 +98,7 @@ const ui = {
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
   referenceHint:id('reference-hint'), groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
-  frame:id('frame-button'), resetView:id('reset-button'),
-  savedSnapshot:id('saved-snapshot-button'), captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'),
+  captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
   newSceneBadge:id('new-scene-badge'), stop:id('stop-button'), agentStatus:id('agent-status'),
   feedbackIntro:id('feedback-intro'),
@@ -2063,8 +2061,10 @@ function referenceCamera(ref) {
 function updateAlignmentStatus() {
   const ref = activeReference();
   const pose = referenceCamera(ref);
-  ui.alignReference.disabled = !pose;
-  ui.alignReference.classList.toggle('aligned', !!pose && state.alignedReferenceId === ref?.id && state.alignmentExact);
+  ui.alignReference.disabled = !editable() || !pose;
+  const aligned = !!pose && state.alignedReferenceId === ref?.id && state.alignmentExact;
+  ui.alignReference.classList.toggle('aligned', aligned);
+  ui.alignReference.setAttribute('aria-pressed', String(aligned));
   if (!ref) {
     ui.alignReference.textContent = '对齐';
     ui.alignReference.title = '请先选择参考图';
@@ -2078,7 +2078,7 @@ function updateAlignmentStatus() {
     return;
   }
   const current = state.alignedReferenceId === ref.id;
-  ui.alignReference.textContent = current && state.alignmentExact ? '✓ 机位' : '对齐';
+  ui.alignReference.textContent = '对齐';
   ui.alignReference.title = current ? '重新应用这张参考图的相机位姿' : '切换到这张参考图的拍摄机位';
   const caveats = [];
   if (pose.raw?.calibration_status?.includes('proxy')) caveats.push('内参为近似值');
@@ -2229,7 +2229,6 @@ function renderSelection() {
     ui.clearSelection.classList.add('hidden');
   }
   renderObjectList();
-  ui.frame.disabled = !editable() || !state.selectedId;
   promptMentions?.refresh();
 }
 function renderObjectList() {
@@ -2529,10 +2528,10 @@ function renderCompareControls() {
   const available = compareAvailable();
   const {enabled=false, opacity=45} = currentComparison() || {};
   const visible = available && enabled && opacity > 0;
-  const summary = !available ? '—' : visible ? opacity + '%' : '关';
+  const displayedOpacity = visible ? opacity : 0;
   const status = !available ? (frozen ? '这张截图没有保存叠图参考；请回到 3D 新增截图。' : '先添加参考图，再使用叠图对比。')
     : frozen ? '本图参考：' + state.snapshot.comparison.reference_name + '；叠图设置和标记将随反馈发送。'
-    : visible ? '调整透明度，对照参考图与实时场景。' : '叠图已关闭，点击「叠图」开启。';
+    : visible ? '调整透明度，对照参考图与实时场景；0% 隐藏叠图。' : '叠图已隐藏，向右拖动透明度恢复。';
   ui.compareImage.classList.toggle('hidden', frozen || !visible);
   ui.compareImage.style.opacity = comparePreferences.opacity / 100;
   const overlay = ui.snapshotCompareImage;
@@ -2545,22 +2544,12 @@ function renderCompareControls() {
       overlay.style[property] = comparison.rect[field] * 100 + '%';
     }
   }
-  ui.compareOpacity.disabled = !available;
-  ui.compareOpacity.value = String(opacity);
-  ui.compareOpacity.setAttribute('aria-valuetext', opacity + '%');
-  ui.opacityValue.textContent = opacity + '%';
-  ui.compareToggle.disabled = !available;
-  ui.compareToggle.setAttribute('aria-pressed', String(visible));
-  ui.compareToggle.classList.toggle('active', visible);
-  ui.compareToggle.title = !available ? status : visible ? '关闭叠图' : '开启叠图';
-  ui.compareSummary.textContent = summary;
+  ui.compareOpacity.disabled = !editable() || !available;
+  ui.compareOpacity.value = String(displayedOpacity);
+  ui.compareOpacity.setAttribute('aria-valuetext', displayedOpacity + '%');
+  ui.compareOpacity.title = status;
+  ui.opacityValue.textContent = displayedOpacity + '%';
   ui.compareStatus.textContent = status;
-  for (const button of ui.comparePresets) {
-    const selected = visible && Number(button.dataset.compareOpacity) === opacity;
-    button.disabled = !available;
-    button.setAttribute('aria-pressed', String(selected));
-    button.classList.toggle('active', selected);
-  }
 }
 function updateComparison(next) {
   if (state.sceneView === 'snapshot') {
@@ -2582,12 +2571,6 @@ function setCompareOpacity(value) {
   const opacity = Math.round(clamp(value, 0, 100));
   const current = currentComparison();
   updateComparison({...current, opacity, enabled:opacity > 0, lastPositive:opacity || current.lastPositive || 45});
-}
-function toggleCompare() {
-  if (!editable() || !compareAvailable()) return;
-  const current = currentComparison();
-  const enabled = !(current.enabled && current.opacity > 0);
-  updateComparison({...current, enabled, opacity:enabled && !current.opacity ? current.lastPositive || 45 : current.opacity});
 }
 function captureSnapshotComparison() {
   const ref = activeReference();
@@ -2627,7 +2610,6 @@ function renderSceneView({persist=true}={}) {
   if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
   ui.sceneStage.dataset.sceneView=showingSnapshot ? 'snapshot' : 'live';
-  ui.savedSnapshot.classList.toggle('hidden', !hasSnapshot || showingSnapshot);
   ui.newSceneBadge.classList.toggle('hidden', !showingSnapshot || state.snapshot.scene_revision === state.sceneRevision);
   if (hasSnapshot && state.snapshot.scene_revision !== state.sceneRevision) {
     ui.newSceneBadge.textContent = '标注 v' + state.snapshot.scene_revision + ' · 查看最新 v' + state.sceneRevision + ' ↗';
@@ -4023,12 +4005,11 @@ function updateSceneHint() {
   }
 }
 function updateMode() {
+  renderCompareControls();
+  updateAlignmentStatus();
   feedbackEvidence?.refresh();
   updateAnnotationHistory();
   renderPromptReferenceControls();
-  ui.frame.disabled = !editable() || !state.selectedId;
-  ui.resetView.disabled = !editable();
-  ui.savedSnapshot.disabled = !editable();
   id('scene-annotation-toggle').disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
@@ -4049,11 +4030,7 @@ function updateMode() {
   renderer.domElement.style.cursor = state.sceneView === 'live' && toolMode('scene') !== 'select' ? cursor('scene') : '';
   updateAnnotationSelectionHint();
   controls.enabled = editable() && toolMode('scene') === 'select' && state.sceneView === 'live';
-  id('camera-navigation').classList.toggle('hidden', state.sceneView !== 'live' || toolMode('scene') !== 'select');
-  id('camera-navigation').querySelectorAll('button').forEach(button => button.disabled = !controls.enabled);
   id('ground-axis').disabled = !controls.enabled;
-  id('free-rotation').disabled = id('upright-camera').disabled = !controls.enabled;
-  id('free-rotation').setAttribute('aria-pressed', String(controls.freeRotation));
   ui.referenceHint.classList.toggle('hidden', !activeReference());
   updateSceneHint();
   state.drag = null;
@@ -5785,14 +5762,9 @@ function bindEvents() {
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
   ui.snapshotCompareImage.addEventListener('load', renderPromptReferenceControls);
-  ui.savedSnapshot.addEventListener('click', openSavedSnapshot);
   ui.captureScene.addEventListener('click', freezeScene);
   ui.newSceneBadge.addEventListener('click', browseScene);
-  ui.compareToggle?.addEventListener('click', toggleCompare);
   ui.compareOpacity.addEventListener('input', () => setCompareOpacity(Number(ui.compareOpacity.value)));
-  for (const button of ui.comparePresets) {
-    button.addEventListener('click', () => setCompareOpacity(Number(button.dataset.compareOpacity)));
-  }
   renderCompareControls();
   for (const [canvas,pane] of [[ui.referenceCanvas,'reference'],[ui.sceneCanvas,'scene'],[renderer.domElement,'scene']]) {
     canvas.addEventListener('pointerdown', (event) => annotationPointerDown(event, pane));
@@ -5887,7 +5859,6 @@ function bindEvents() {
     else frameAll({smooth:true});
     minimalLayout?.closeReferences();
   };
-  ui.frame.addEventListener('click', focusSelection);
   renderer.domElement.addEventListener('dblclick', (event) => {
     if (!editable() || state.sceneView !== 'live' || toolMode('scene') !== 'select') return;
     const selection = pickScene(event);
@@ -5900,38 +5871,12 @@ function bindEvents() {
         event.target.closest('input, textarea, select, [contenteditable], dialog[open]') || document.querySelector('dialog[open]') || state.sceneView !== 'live') return;
     event.preventDefault(); focusSelection();
   });
-  const directions = {front:[0,-1,0], back:[0,1,0], left:[-1,0,0], right:[1,0,0], top:[0,-.0001,1], bottom:[0,-.0001,-1], iso:[1,-1.4,.95]};
-  id('camera-navigation').addEventListener('click', (event) => {
-    const button = event.target.closest('button[data-camera-view]');
-    if (!button || !editable() || state.sceneView !== 'live') return;
-    leaveReferenceCamera();
-    controls.setFree(false);
-    const direction = navigationDirection(directions[button.dataset.cameraView]).normalize();
-    controls.moveTo(controls.target.clone().addScaledVector(direction, Math.max(.3, controls.getDistance())), controls.target, {up:controls.worldUp});
-    updateMode();
-  });
   id('ground-axis').addEventListener('change', () => {
     if (!editable() || state.sceneView !== 'live') return;
     leaveReferenceCamera();
     state.groundAxis = id('ground-axis').value;
     applyGroundAxis(state.groundAxis === 'auto' ? state.detectedUpAxis : state.groundAxis);
     controls.setFree(false); frameAll({smooth:true}); updateMode(); saveDraft();
-  });
-  id('free-rotation').addEventListener('click', () => {
-    if (!editable() || state.sceneView !== 'live') return;
-    leaveReferenceCamera(); controls.setFree(!controls.freeRotation); updateMode(); saveDraft();
-  });
-  id('upright-camera').addEventListener('click', () => {
-    if (!editable() || state.sceneView !== 'live') return;
-    leaveReferenceCamera(); controls.setFree(false); updateMode(); saveDraft();
-  });
-  id('frame-all').addEventListener('click', () => {
-    if (!editable() || state.sceneView !== 'live') return;
-    controls.setFree(false); frameAll({smooth:true}); updateMode();
-  });
-  ui.resetView.addEventListener('click', () => {
-    if (!editable()) return;
-    browseScene(); controls.setFree(false); frameAll({smooth:true}); updateMode(); minimalLayout?.closeReferences();
   });
   id('save-text').addEventListener('click', saveTextAnnotation);
   id('cancel-text').addEventListener('click', hideTextEditor);

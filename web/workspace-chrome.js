@@ -3,9 +3,11 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   const byId = id => document.getElementById(id);
   const root = document.documentElement;
   const dock = byId('annotation-tool-panel');
-  const refButton = byId('annotate-reference-button');
   const sceneButton = byId('scene-annotation-toggle');
   const reference = byId('reference-pane');
+  const referenceMedia = byId('reference-media');
+  const referenceCanvas = byId('reference-annotations');
+  const textEditor = byId('text-editor');
   const scene = document.querySelector('.scene-pane');
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let target = 'scene';
@@ -14,6 +16,41 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   let previousView = 'live';
   let animation = null;
   let frame = 0;
+  let referenceCloseTimer = null, referenceTouch = false, referenceDismissed = false, suppressReferenceFocus = false;
+  const activePointers = new Set();
+
+  function referenceReady() {
+    const state = getState();
+    return state.workspaceReady && state.activeReferenceId && !reference.inert && !referenceMedia.classList.contains('hidden');
+  }
+  function gestureActive() {
+    const state = getState();
+    return activePointers.size || state.drag || state.referencePanning || state.poseEditDrag || state.textPending;
+  }
+  function inReferenceArea(element) {
+    return !!element && (referenceMedia.contains(element) || dock.contains(element) || textEditor.contains(element));
+  }
+  function referenceAreaActive() {
+    const focused = document.activeElement;
+    return referenceMedia.matches(':hover') || dock.matches(':hover') || textEditor.matches(':hover') ||
+      (focused?.matches(':focus-visible') && inReferenceArea(focused));
+  }
+  function cancelReferenceClose() { clearTimeout(referenceCloseTimer); referenceCloseTimer = null; }
+  function scheduleReferenceClose() {
+    cancelReferenceClose();
+    if (!opened || target !== 'reference' || referenceTouch) return;
+    referenceCloseTimer = setTimeout(() => {
+      referenceCloseTimer = null;
+      if (!opened || target !== 'reference' || referenceTouch || referenceAreaActive()) return;
+      if (gestureActive()) { scheduleReferenceClose(); return; }
+      close({resetTool:false});
+    },220);
+  }
+  function openReferenceAutomatically() {
+    if (!referenceReady() || gestureActive() || referenceDismissed) return;
+    cancelReferenceClose();
+    if (!opened || target !== 'reference') open('reference');
+  }
 
   function position() {
     if (!opened) return;
@@ -40,23 +77,6 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   }
   function positionMenus() {
     const safeTop = Math.max(10,document.querySelector('.topbar').getBoundingClientRect().bottom+8);
-    for (const details of document.querySelectorAll('.view-popover, #compare-panel')) {
-      const popup = details.querySelector('.popover-content');
-      popup.style.setProperty('--workspace-menu-shift-x','0px');
-      if (!details.open || innerWidth > 640) continue;
-      if (root.dataset.layout === 'compare') {
-        const anchor = details.querySelector('summary').getBoundingClientRect();
-        const above = Math.max(0,anchor.top-safeTop-8), below = Math.max(0,innerHeight-anchor.bottom-18);
-        const useAbove = above > below;
-        popup.style.setProperty('--workspace-menu-height', `${Math.max(80,useAbove ? above : below)}px`);
-        const height = popup.getBoundingClientRect().height;
-        const top = useAbove ? anchor.top-height-8 : anchor.bottom+8;
-        popup.style.setProperty('--workspace-menu-top', `${Math.max(safeTop,Math.min(innerHeight-height-10,top))}px`);
-      }
-      const rect = popup.getBoundingClientRect();
-      const dx = Math.min(0,innerWidth-12-rect.right)+Math.max(0,12-rect.left);
-      popup.style.setProperty('--workspace-menu-shift-x', `${Math.round(dx)}px`);
-    }
     for (const popup of document.querySelectorAll('.import-popover[open] > .popover-content')) {
       popup.style.setProperty('--panel-max-height', `${Math.max(80,innerHeight-safeTop-10)}px`);
       popup.style.setProperty('--panel-shift-x','0px');
@@ -79,7 +99,6 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     const liveScene = target === 'scene' && getState().sceneView === 'live';
     dock.setAttribute('aria-label', target === 'reference' ? '参考图标注工具' : liveScene ? '场景标注工具' : '场景截图标注工具');
     byId('annotation-context-label').textContent = target === 'reference' ? '参考' : liveScene ? '场景' : '截图';
-    refButton.setAttribute('aria-expanded', String(opened && target === 'reference'));
     sceneButton.setAttribute('aria-expanded', String(opened && target === 'scene'));
     byId('scene-labels-toggle').hidden = target !== 'scene';
     reference.classList.toggle('is-annotation-target', opened && target === 'reference');
@@ -88,8 +107,10 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     position();
   }
   function open(pane, {toggle=false}={}) {
+    cancelReferenceClose();
     if (toggle && opened && target === pane) { close({focus:true}); return; }
     if (pane === 'reference' && reference.inert) revealReference?.();
+    if (pane !== 'reference') referenceTouch = false;
     const wasOpen = opened;
     target = pane; opened = true;
     activateToolPane?.(pane);
@@ -99,13 +120,23 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     ], {duration:240,easing:'cubic-bezier(.22,1,.36,1)'});
   }
   function close({focus=false, resetTool=true}={}) {
+    cancelReferenceClose();
     if (!opened) return;
-    const trigger = target === 'reference' ? refButton : sceneButton;
+    const referenceTarget = target === 'reference';
+    const trigger = referenceTarget ? referenceCanvas : sceneButton;
+    if (referenceTarget) {
+      referenceDismissed = referenceMedia.matches(':hover') || dock.matches(':hover');
+      referenceTouch = false;
+    }
     animation?.cancel();
     opened = false;
     if (resetTool && getState().mode !== 'select') setMode('select',target);
     render();
-    if (focus) (trigger.hidden ? byId('scene-live-card') : trigger).focus({preventScroll:true});
+    if (focus) {
+      suppressReferenceFocus = referenceTarget;
+      (trigger.hidden ? byId('scene-live-card') : trigger).focus({preventScroll:true});
+      suppressReferenceFocus = false;
+    }
   }
   function syncState() {
     const state = getState();
@@ -114,7 +145,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     document.querySelector('.selection-popover').hidden = state.sceneView !== 'live';
     byId('selection-level-label').textContent = state.selectionLevel === 'part' ? '部件' : '物体';
     document.querySelector('.selection-popover > summary').setAttribute('aria-label', `选择层级：${state.selectionLevel === 'part' ? '部件' : '物体'}`);
-    refButton.disabled = !state.workspaceReady || !state.activeReferenceId;
+    if (opened && target === 'reference' && !referenceReady()) close({resetTool:false});
     const viewChanged = previousView !== state.sceneView;
     const newSnapshot = state.sceneView === 'snapshot' && viewChanged;
     const newTool = state.mode !== 'select' && previousMode !== state.mode;
@@ -125,23 +156,52 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     schedulePosition();
   }
   function layoutChanged() {
-    if (opened && target === 'reference' && reference.inert) close();
+    if (opened && target === 'reference' && reference.inert) close({resetTool:false});
     schedulePosition();
   }
-  refButton.addEventListener('click', () => open('reference',{toggle:true}));
+  referenceMedia.addEventListener('pointerenter', event => {
+    if (event.pointerType !== 'mouse') return;
+    referenceTouch = false; openReferenceAutomatically();
+  });
+  referenceMedia.addEventListener('pointerleave', event => {
+    if (event.pointerType !== 'mouse') return;
+    referenceDismissed = false; scheduleReferenceClose();
+  });
+  referenceMedia.addEventListener('focusin', () => {
+    if (suppressReferenceFocus) return;
+    referenceDismissed = false; openReferenceAutomatically();
+  });
+  for (const element of [referenceMedia,dock,textEditor]) {
+    if (element !== referenceMedia) {
+      element.addEventListener('pointerenter', cancelReferenceClose);
+      element.addEventListener('pointerleave', event => { if (event.pointerType === 'mouse') scheduleReferenceClose(); });
+    }
+    element.addEventListener('focusin', cancelReferenceClose);
+    element.addEventListener('focusout', scheduleReferenceClose);
+  }
   sceneButton.addEventListener('click', () => open('scene',{toggle:true}));
   byId('annotation-tools-close').addEventListener('click', () => close({focus:true}));
   document.addEventListener('click', event => { if (event.target.closest('#scene-live-card')) close(); });
   // Context follows the actual clicked image, retaining cross-pane annotation.
   document.addEventListener('pointerdown', event => {
-    const pane = event.target.closest('#reference-annotations') ? 'reference'
+    if (opened && target === 'reference' && !inReferenceArea(event.target) && !gestureActive()) close({resetTool:false});
+    const pane = event.target.closest('#reference-media') ? 'reference'
       : event.target.closest('#scene-annotations, #viewport canvas') ? 'scene' : null;
-    if (!pane) return;
+    if (!pane) {
+      if (dock.contains(event.target)) activePointers.add(event.pointerId);
+      return;
+    }
     const state = getState();
-    if (pane === 'scene' && state.sceneView === 'live' && state.paneModes.scene === 'select') return;
-    if (opened || state.paneModes[pane] !== 'select') open(pane);
-
+    if (pane === 'reference') {
+      referenceDismissed = false; referenceTouch = event.pointerType !== 'mouse'; openReferenceAutomatically();
+    } else if (!(state.sceneView === 'live' && state.paneModes.scene === 'select') &&
+        (opened || state.paneModes.scene !== 'select')) open('scene');
+    activePointers.add(event.pointerId);
   }, {capture:true});
+  for (const type of ['pointerup','pointercancel']) document.addEventListener(type, event => {
+    activePointers.delete(event.pointerId); scheduleReferenceClose();
+  }, {capture:true});
+  window.addEventListener('blur', () => { activePointers.clear(); scheduleReferenceClose(); });
   for (const details of document.querySelectorAll('details.popover')) details.addEventListener('toggle', schedulePosition);
   const pill = byId('session-pill');
   const syncStatus = () => { pill.title = pill.textContent; pill.setAttribute('aria-label', pill.textContent); };
