@@ -2452,7 +2452,7 @@ function galleryItems() {
     const count=state.annotations.filter(mark=>dynamic ? markMatchesMoment(mark,snapshot) : mark.pane==='scene' && mark.snapshot_id===snapshot.id).length;
     const name=snapshot.name || '截图 '+snapshot.navigation_order;
     const viewId=snapshot.view_id || (dynamic ? referenceViewForMoment(snapshot)?.clip_id : null);
-    const detail=dynamic ? [shortTime(snapshot.time_sec),snapshot.view_name || referenceViewForMoment(snapshot)?.name || '场景动画'].join(' · ') : '固定视角';
+    const detail=dynamic ? snapshotTimeLabel(snapshot.time_sec) : '固定视角';
     const title=[name,detail,
       dynamic && momentFrameIndex(snapshot)!==null ? '第 '+(momentFrameIndex(snapshot)+1)+' 帧' : null,'场景版本 '+snapshot.scene_revision,count+' 个标记'].filter(Boolean).join(' · ');
     return {id:snapshot.id,dynamic,time:snapshot.time_sec,viewId,name,detail,title,count,disabled:!editable(),
@@ -3658,6 +3658,11 @@ function shortTime(value) {
   const minutes = Math.floor(tenths/600), seconds = Math.floor(tenths/10)%60;
   return `${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}.${tenths%10}`;
 }
+function snapshotTimeLabel(value) {
+  const milliseconds = Math.max(0, Math.round(value * 1000));
+  const minutes = Math.floor(milliseconds / 60000), seconds = Math.floor(milliseconds / 1000) % 60;
+  return `${String(minutes).padStart(2,'0')}:${String(seconds).padStart(2,'0')}.${String(milliseconds % 1000).padStart(3,'0')}`;
+}
 function renderReferenceHeading() {
   const ref=activeReference(), video=!!clipReference();
   ui.referenceTitle.textContent = video ? (referenceView()?.name || state.referenceClip.name) : ref?.name || '参考图片';
@@ -4028,7 +4033,7 @@ function updateMode() {
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
   const context = id('snapshot-context');
   context.hidden = state.sceneView !== 'snapshot';
-  context.textContent = state.sceneView === 'snapshot' ? (state.snapshot?.time_sec!==undefined ? `固定截图 · ${shortTime(state.snapshot.time_sec)}` : `${state.snapshot?.name || '截图'} · 固定视角`) : '';
+  context.textContent = state.sceneView === 'snapshot' ? (state.snapshot?.time_sec!==undefined ? `固定截图 · ${snapshotTimeLabel(state.snapshot.time_sec)}` : `${state.snapshot?.name || '截图'} · 固定视角`) : '';
   renderSceneSnapshots();
   document.body.dataset.tool = state.mode;
   ui.referenceCanvas.dataset.tool = toolMode('reference'); ui.sceneCanvas.dataset.tool = toolMode('scene');

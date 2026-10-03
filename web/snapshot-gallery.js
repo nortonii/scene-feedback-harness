@@ -15,9 +15,8 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
   placeGallery();
   const ticks=document.getElementById('timeline-marks');
   const preview=document.createElement('div');preview.className='snapshot-preview';preview.hidden=true;
-  preview.id='snapshot-gallery-preview';preview.setAttribute('role','tooltip');document.body.append(preview);
-  let signature='',tickSignature='',activeKey=null,timer=null,hoverTimer=null,anchor=null,locked=false,suppressFocusPreview=false;
-  const hover=matchMedia('(hover: hover)');
+  preview.id='snapshot-gallery-preview';preview.setAttribute('role','group');preview.setAttribute('aria-label','选择此时刻的截图');document.body.append(preview);
+  let signature='',tickSignature='',activeKey=null,anchor=null;
   function el(tag,text,cls) {const node=document.createElement(tag);if(text) node.textContent=text;if(cls) node.className=cls;return node;}
   function liveItem() {
     const live=getLive() || {};
@@ -31,9 +30,8 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
     path.setAttribute('d','m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5M12 12v9');svg.append(path);
     return svg;
   }
-  function hide({keepHover=false}={}) {
-    clearTimeout(timer);if(!keepHover) {clearTimeout(hoverTimer);hoverTimer=null;}
-    preview.hidden=true;anchor?.removeAttribute('aria-describedby');anchor=null;locked=false;
+  function hide() {
+    preview.hidden=true;anchor?.removeAttribute('aria-describedby');anchor=null;
   }
   function position() {
     if(!anchor?.isConnected) {hide();return;}
@@ -42,36 +40,23 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
     const below=r.bottom+8;
     preview.style.top=Math.max(8,below+p.height<innerHeight-8 ? below : r.top-p.height-8)+'px';
   }
-  function show(button,items,{choose=false}={}) {
-    clearTimeout(timer);clearTimeout(hoverTimer);hoverTimer=null;if(document.querySelector('dialog[open]')) return;
-    anchor?.removeAttribute('aria-describedby');anchor=button;locked=choose;
+  function showChooser(button,items) {
+    if(document.querySelector('dialog[open]')) return;
+    anchor?.removeAttribute('aria-describedby');anchor=button;
     preview.replaceChildren();
     for(const item of items) {
       const section=el('div',null,'snapshot-preview-item');
-      if(choose) {const open=el('button',item.title,'compact-button');open.type='button';open.addEventListener('click',()=>{hide();onOpen(item.id);});section.append(open);}
-      else section.append(el('strong',item.name));
+      const open=el('button',item.title,'compact-button');open.type='button';open.addEventListener('click',()=>{hide();onOpen(item.id);});section.append(open);
       section.append(el('small',item.title));
       const pair=el('div',null,'snapshot-preview-pair');
-      for(const [label,url] of [['参考帧',item.reference],[item.live?'实时 3D 预览':'场景截图',item.scene]]) {
+      for(const [label,url] of [['参考帧',item.reference],['场景截图',item.scene]]) {
         if(!url) continue;
         const figure=el('figure'),img=el('img');img.src=resourceURL(url);img.alt=label;img.addEventListener('load',position,{once:true});figure.append(img,el('figcaption',label));pair.append(figure);
       }
       section.append(pair);preview.append(section);
     }
-    preview.setAttribute('role',choose?'group':'tooltip');preview.setAttribute('aria-label',choose?'选择此时刻的截图':'截图预览');
     preview.hidden=false;button.setAttribute('aria-describedby',preview.id);position();
-    if(choose) preview.querySelector('button')?.focus({preventScroll:true});
-  }
-  function scheduleHide() {if(!locked) {clearTimeout(timer);clearTimeout(hoverTimer);hoverTimer=null;timer=setTimeout(hide,160);}}
-  function bindPreview(button,items) {
-    const currentItems=()=>typeof items==='function' ? items() : items;
-    button.addEventListener('pointerenter',()=>{if(hover.matches && !locked) {
-      clearTimeout(timer);clearTimeout(hoverTimer);
-      hoverTimer=setTimeout(()=>{hoverTimer=null;if(button.isConnected && button.matches(':hover')) show(button,currentItems());},240);
-    }});
-    button.addEventListener('pointerleave',scheduleHide);
-    button.addEventListener('focus',()=>{if(!suppressFocusPreview && button.matches(':focus-visible')) show(button,currentItems());});
-    button.addEventListener('blur',scheduleHide);
+    preview.querySelector('button')?.focus({preventScroll:true});
   }
   function render() {
     const items=getItems();
@@ -92,7 +77,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
         if(!item.live) card.dataset.snapshotId=item.id;
         const open=el('button',null,'snapshot-open');open.type='button';open.disabled=item.disabled;
         if(item.live) open.id='scene-live-card';else open.dataset.snapshotId=item.id;
-        open.setAttribute('aria-pressed',String(!!item.active));open.setAttribute('aria-label',item.title);open.title=item.title;
+        open.setAttribute('aria-pressed',String(!!item.active));open.setAttribute('aria-label',item.title);
         const thumb=el('span',null,'snapshot-thumb'),img=el('img');img.alt='';thumb.append(img);
         if(item.live) {
           const placeholder=el('span',null,'snapshot-live-placeholder');placeholder.append(cube());thumb.append(placeholder);
@@ -103,7 +88,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
         if(item.count) thumb.append(el('span',String(item.count),'snapshot-mark-count'));
         const meta=el('span',null,'snapshot-card-meta');
         meta.append(el('strong',item.name,'snapshot-name'),el('small',item.detail || (item.dynamic?'视频保留时刻':'固定视角'),'snapshot-source'));
-        open.append(thumb,meta);bindPreview(open,item.live ? ()=>[liveItem()] : [item]);
+        open.append(thumb,meta);
         open.addEventListener('click',()=>{hide();if(item.live) onLive();else onOpen(item.id);});card.append(open);
         if(!item.live) {
           const remove=el('button','×','snapshot-remove');remove.type='button';remove.disabled=item.disabled;remove.title='删除'+item.name+'及其标记，可撤销';remove.setAttribute('aria-label',remove.title);
@@ -122,8 +107,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
       const card=[...strip.children].find(card=>card.dataset.galleryKey===nextActive);
       card?.querySelector('.snapshot-open')?.scrollIntoView({block:'nearest',inline:'nearest'});
     });
-    // Updating the live preview must not rebuild saved cards, reset their
-    // keyboard focus or close a hovered evidence preview.
+    // Updating the live cover must not rebuild saved cards or reset their focus.
     const liveThumb=strip.querySelector('[data-kind="live"] .snapshot-thumb');
     const liveImage=liveThumb?.querySelector('img'),placeholder=liveThumb?.querySelector('.snapshot-live-placeholder');
     if(liveImage) {
@@ -143,8 +127,8 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
     for(const entries of groups.values()) {
       const item=entries[0],button=el('button',null,'timeline-mark');button.type='button';button.disabled=item.disabled;
       button.style.left=(duration ? item.time/duration*100 : 0)+'%';button.setAttribute('aria-label',item.name+' · '+entries.length+' 张保存截图');button.setAttribute('aria-pressed',String(entries.some(entry=>entry.active)));
-      button.dataset.snapshotId=item.id;bindPreview(button,entries);
-      button.addEventListener('click',()=> {if(entries.length===1) {hide();onOpen(item.id);} else show(button,entries,{choose:true});});ticks.append(button);
+      button.dataset.snapshotId=item.id;
+      button.addEventListener('click',()=> {if(entries.length===1) {hide();onOpen(item.id);} else showChooser(button,entries);});ticks.append(button);
     }
     ticks.hidden=!groups.size;
   }
@@ -156,14 +140,10 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
     event.preventDefault();buttons[next].focus({preventScroll:true});buttons[next].scrollIntoView({block:'nearest',inline:'nearest'});
   });
   new ResizeObserver(()=>document.documentElement.style.setProperty('--scene-gallery-height',gallery.getBoundingClientRect().height+'px')).observe(gallery);
-  preview.addEventListener('pointerenter',()=>clearTimeout(timer));preview.addEventListener('pointerleave',scheduleHide);
   preview.addEventListener('focusout',event=>{if(!preview.contains(event.relatedTarget)) hide();});
   document.addEventListener('pointerdown',event=>{if(!preview.contains(event.target) && event.target!==anchor) hide();},{capture:true});
-  document.addEventListener('keydown',event=> {if(event.key==='Escape' && !preview.hidden) {const target=anchor,wasLocked=locked;hide();if(wasLocked) {suppressFocusPreview=true;target?.focus({preventScroll:true});suppressFocusPreview=false;}event.stopImmediatePropagation();event.preventDefault();}},{capture:true});
-  // Auto scrolling a large card into view can dispatch scroll immediately
-  // after pointerenter. Close an existing preview without cancelling the new
-  // target's pending hover; pointerleave still cancels it if the card moves away.
-  document.addEventListener('scroll',event=>{if(!preview.hidden && !preview.contains(event.target)) hide({keepHover:true});},{capture:true,passive:true});
+  document.addEventListener('keydown',event=> {if(event.key==='Escape' && !preview.hidden) {const target=anchor;hide();target?.focus({preventScroll:true});event.stopImmediatePropagation();event.preventDefault();}},{capture:true});
+  document.addEventListener('scroll',event=>{if(!preview.hidden && !preview.contains(event.target)) hide();},{capture:true,passive:true});
   window.addEventListener('resize',hide);
   return {render,hide};
 }

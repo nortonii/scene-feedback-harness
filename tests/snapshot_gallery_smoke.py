@@ -41,10 +41,12 @@ def main():
     control(page,'#chat-collapse').click();control(page,'#capture-scene-button').click();static=page.evaluate('__appearanceCheck.state.snapshot.id');control(page,'#scene-live-card').click()
     image='data:image/png;base64,'+base64.b64encode((ROOT/'examples/room_demo/reference.png').read_bytes()).decode()
     frames=[{'name':f'frame-{n}.png','data_url':image,'time_sec':n*.5} for n in range(4)]
-    clip=store.set_reference_clip(session['session_id'],{'name':'正面视频','fps':2,'frames':frames})['reference_clip'];page.reload();page.wait_for_function('window.__appearanceCheck?.state.workspaceReady && !__appearanceCheck.state.sceneLoading && __appearanceCheck.state.referenceClip');settle(page)
+    clip=store.set_reference_clip(session['session_id'],{'name':'正面视频 10–20 秒','fps':2,'frames':frames})['reference_clip'];page.reload();page.wait_for_function('window.__appearanceCheck?.state.workspaceReady && !__appearanceCheck.state.sceneLoading && __appearanceCheck.state.referenceClip');settle(page)
     control(page,'#capture-scene-button').click();first=page.evaluate('__appearanceCheck.state.snapshot');first_id=first['id']
     gallery=page.locator('#scene-snapshots');expect(page.locator('#moment-strip')).to_have_count(0);expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(2)
-    expect(page.locator('.snapshot-card[data-kind=moment] .snapshot-open')).to_contain_text('00:00.0');expect(page.locator('.snapshot-card[data-kind=moment] .snapshot-open')).to_contain_text('正面视频')
+    moment_card=page.locator('.snapshot-card[data-kind=moment] .snapshot-open')
+    expect(moment_card.locator('.snapshot-source')).to_have_text('00:00.000');expect(moment_card).not_to_contain_text('正面视频');expect(moment_card).not_to_contain_text('10–20')
+    assert moment_card.get_attribute('title') is None
     assert gallery.evaluate("el=>el.parentElement.matches('.scene-pane') && el.nextElementSibling?.id==='scene-stage' && getComputedStyle(el).position!=='absolute'")
     choose_tool(page,'point','scene');point(page,'#scene-annotations',.63,.45);page.wait_for_function('__appearanceCheck.state.annotations.length===1')
     first_pixels=page.locator('#scene-snapshot-image').get_attribute('src')
@@ -59,21 +61,29 @@ def main():
     expect(page.locator('#timeline-marks button')).to_have_count(2)
     print('PASS unified cards and counts; seeking and reference marking retain the fixed right screenshot and correct per-frame evidence',flush=True)
     control(page,'#annotation-tools-close').click()
-    second=page.locator(f'.snapshot-open[data-snapshot-id="{second_id}"]');second.hover();expect(page.locator('#snapshot-gallery-preview')).to_be_visible();expect(page.locator('#snapshot-gallery-preview img')).to_have_count(2)
-    page.wait_for_function('Array.from(document.querySelectorAll("#snapshot-gallery-preview img")).every(img=>img.complete && img.naturalWidth>0)')
-    page.keyboard.press('Escape');expect(page.locator('#snapshot-gallery-preview')).to_be_hidden()
+    second=page.locator(f'.snapshot-open[data-snapshot-id="{second_id}"]');preview=page.locator('#snapshot-gallery-preview')
+    live_card=page.locator('#scene-live-card');static_card=page.locator(f'.snapshot-open[data-snapshot-id="{static}"]');first_card=page.locator(f'.snapshot-open[data-snapshot-id="{first_id}"]')
+    first_tick=page.locator(f'#timeline-marks [data-snapshot-id="{first_id}"]')
+    for target in [live_card,static_card,second,first_tick]:
+     target.hover();page.wait_for_timeout(350);expect(preview).to_be_hidden()
+    second.focus();second.press('Home');expect(live_card).to_be_focused()
+    for target in [live_card,static_card,first_card,second]:
+     expect(target).to_be_focused();page.wait_for_timeout(350);expect(preview).to_be_hidden()
+     if target is not second:target.press('ArrowRight')
+    first_tick.focus();assert first_tick.evaluate("el=>el.matches(':focus-visible')")
+    page.wait_for_timeout(350);expect(preview).to_be_hidden();expect(preview.locator('img')).to_have_count(0)
     second.click();page.wait_for_function(f'__appearanceCheck.state.snapshot.id==="{second_id}"');expect(page.locator('#timeline-seek')).to_have_value('0.5');expect(page.locator('#snapshot-context')).to_contain_text('00:00.5')
     control(page,'#timeline-play').click();page.wait_for_function('__appearanceCheck.state.playing');page.wait_for_function('__appearanceCheck.state.time>1');control(page,'#timeline-play').click() if page.evaluate('__appearanceCheck.state.playing') else None
     assert page.evaluate('__appearanceCheck.state.snapshot.id')==second_id;assert page.evaluate('__appearanceCheck.state.sceneView')=='snapshot';assert page.evaluate('__appearanceCheck.state.dynamicSnapshots.length')==2
     page.locator(f'#timeline-marks [data-snapshot-id="{first_id}"]').click();page.wait_for_function('__appearanceCheck.state.time===0');assert page.evaluate('__appearanceCheck.state.snapshot.id')==first_id
     page.locator(f'.snapshot-card[data-snapshot-id="{second_id}"] .snapshot-remove').click();assert page.evaluate('__appearanceCheck.state.annotations.length')==2;assert page.evaluate('__appearanceCheck.state.snapshot.id')==first_id
     page.keyboard.press('Control+z');page.wait_for_function('__appearanceCheck.state.dynamicSnapshots.length===2');assert page.evaluate('__appearanceCheck.state.annotations.length')==4
-    print('PASS paired hover preview, playback without new captures, timeline navigation, scoped deletion and undo',flush=True)
+    print('PASS timestamp-only cards, no hover/focus preview, keyboard navigation, playback, timeline navigation, scoped deletion and undo',flush=True)
     control(page,'#scene-live-card').click();r=bounds(page,'#viewport canvas');page.mouse.move(r['x']+r['width']*.5,r['y']+r['height']*.5);page.mouse.down();page.mouse.move(r['x']+r['width']*.65,r['y']+r['height']*.48,steps=10);page.mouse.up();page.wait_for_timeout(250)
     control(page,'#capture-scene-button').click();third_id=page.evaluate('__appearanceCheck.state.snapshot.id');assert third_id!=first_id
     control(page,'#annotation-tools-close').click();page.locator('#timeline-marks button').first.click();expect(page.locator('#snapshot-gallery-preview[role=group]')).to_be_visible();expect(page.locator('#snapshot-gallery-preview button')).to_have_count(2)
     expect(page.locator('#snapshot-gallery-preview button').first).to_be_focused()
-    page.keyboard.press('Escape');expect(page.locator('#snapshot-gallery-preview')).to_be_hidden();page.locator('#timeline-marks button').first.click()
+    page.keyboard.press('Escape');expect(page.locator('#snapshot-gallery-preview')).to_be_hidden();expect(page.locator('#timeline-marks button').first).to_be_focused();page.wait_for_timeout(350);expect(preview).to_be_hidden();page.locator('#timeline-marks button').first.click()
     page.locator('#snapshot-gallery-preview button').first.click();page.wait_for_function(f'__appearanceCheck.state.snapshot.id==="{first_id}"')
     clip=store.set_reference_clip(session['session_id'],{'name':'侧面视频','fps':2,'frames':frames,'append_view':True})['reference_clip'];page.evaluate('__appearanceCheck.refreshWorkspace()');page.wait_for_function('__appearanceCheck.state.referenceClip.views?.length===1');side=clip['views'][0]['clip_id']
     page.locator('#reference-view-select').select_option(side);page.wait_for_function(f'__appearanceCheck.state.activeViewId==="{side}"');expect(page.locator('#timeline-marks button')).to_have_count(0)
@@ -131,6 +141,10 @@ def main():
     expect(gallery).to_be_visible();page.unroute('**/api/sessions/*/feedback',reject)
     control(page,'#submit-button').click();page.wait_for_function('__appearanceCheck.state.feedbackCount===1 && !__appearanceCheck.state.submitting',timeout=30000)
     saved=store.state['feedback'][-1];assert len(saved['dynamic_frames'])==3 and len(saved['scene_snapshots'])==2 and len(saved['annotations'])==4
+    assert 'scope' not in saved['timeline']
+    for frame in saved['dynamic_frames']:
+     assert 'time_sec' in frame and 'reference_time_sec' in frame
+     assert not {'scope','start_sec','end_sec','range','time_range','duration_sec'}.intersection(frame)
     for mark in saved['annotations']:assert mark['time_sec']==(0 if mark['pane']=='scene' else .5)
     expect(gallery).to_be_visible();expect(page.locator('#scene-live-card')).to_have_attribute('aria-pressed','true');expect(page.locator('.snapshot-card:not([data-kind=live])')).to_have_count(0);expect(page.locator('#timeline-marks button')).to_have_count(0)
     page.reload();page.wait_for_function('window.__appearanceCheck?.state.workspaceReady && !__appearanceCheck.state.sceneLoading');settle(page)
