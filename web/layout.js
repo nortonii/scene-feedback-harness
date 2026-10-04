@@ -83,13 +83,13 @@ export function setupMinimalLayout({getState}) {
 
     const mode = state.mode;
     const more = byId('more-tools');
-    const moreActive = ['arrow','text','freehand'].includes(mode);
+    const moreActive = ['text','freehand'].includes(mode);
     if (more) {
       more.classList.toggle('active', moreActive);
       more.querySelector('summary')?.classList.toggle('active', moreActive);
     }
     const moreLabel = byId('more-tools-label');
-    if (moreLabel) moreLabel.textContent = mode === 'text' ? '字' : mode === 'freehand' ? '画笔' : mode === 'arrow' ? '箭头' : '更多';
+    if (moreLabel) moreLabel.textContent = mode === 'text' ? '字' : mode === 'freehand' ? '画笔' : '更多';
   }
 
   for (const dialog of dialogs) {

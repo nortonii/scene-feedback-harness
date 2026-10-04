@@ -69,7 +69,7 @@ const ui = {
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
   viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
-  timelineSource:id('timeline-source'), animationChoices:id('animation-choices'),
+  animationChoices:id('animation-choices'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
   compareImage:id('compare-image'), snapshotCompareImage:id('snapshot-compare-image'),
@@ -96,7 +96,7 @@ const ui = {
   imagePreviewToggle:id('prompt-image-preview-toggle'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
-  referenceHint:id('reference-hint'), groupSelect:id('group-select'),
+  groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
   captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
@@ -2726,7 +2726,6 @@ function showActiveReference() {
   const hasReference = !!ref;
   ui.referenceMedia.classList.toggle('hidden', !hasReference);
   ui.referenceEmpty.classList.toggle('hidden', hasReference);
-  ui.referenceHint.classList.toggle('hidden', !hasReference || toolMode('reference') === 'select');
   renderReferenceHeading();
   updateAlignmentStatus();
   renderHumanPosePanel();
@@ -3701,10 +3700,7 @@ function renderTimeline({moments=true}={}) {
   ui.time.title = `${displayedTime.toFixed(3)} / ${duration.toFixed(3)} 秒`;
   renderReferenceHeading();
   setActionIcon(ui.play,state.playing ? 'pause' : 'play',state.playing ? '暂停' : '播放');
-  ui.timelineSource.textContent = state.referenceClip
-    ? referenceView().name + ' · ' + referenceView().frames.length + ' 帧 · ' + referenceView().fps + ' fps · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
-    : 'GLB 动画 · ' + timelineFps() + ' fps';
-  for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), id('save-moment'), ui.clipInput]) {
+  for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), ui.clipInput]) {
     element.disabled = !editable() || (element !== ui.clipInput && duration <= 0);
   }
   renderReferenceViews();
@@ -3859,7 +3855,6 @@ function bindTimelineEvents() {
   ui.viewSelect.addEventListener('change', () => seekTimeline(state.timelineTarget ?? state.time, {viewId:ui.viewSelect.value, preserveTime:true}));
   id('timeline-prev').addEventListener('click', () => stepReferenceTimeline(-1));
   id('timeline-next').addEventListener('click', () => stepReferenceTimeline(1));
-  id('save-moment').addEventListener('click', () => ensureDynamicMoment({showSnapshot:true}));
 }
 function momentDatabase() {
   return new Promise((resolve,reject) => {
@@ -4031,7 +4026,6 @@ function updateMode() {
   updateAnnotationSelectionHint();
   controls.enabled = editable() && toolMode('scene') === 'select' && state.sceneView === 'live';
   id('ground-axis').disabled = !controls.enabled;
-  ui.referenceHint.classList.toggle('hidden', !activeReference());
   updateSceneHint();
   state.drag = null;
   drawOverlays();
@@ -4153,10 +4147,6 @@ function selectedAnnotation() {
 }
 function updateAnnotationSelectionHint() {
   const mark = selectedAnnotation();
-  ui.referenceHint.textContent = toolMode('reference') === 'erase' ? '划过标记擦除整条 · 可撤销'
-    : toolMode('reference') !== 'select' ? '在图片上圈出想让 Codex 注意的地方'
-    : mark?.pane === 'reference' ? mark.name + ' · Backspace 删除 · 拖到会话引用'
-    : '点击标记选中 · 拖到会话引用 · 空白处拖动平移';
   for (const button of ui.annotationList.querySelectorAll('[data-annotation-id]')) {
     button.setAttribute('aria-pressed', String(button.dataset.annotationId === mark?.id));
   }

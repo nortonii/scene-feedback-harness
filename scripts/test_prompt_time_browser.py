@@ -67,7 +67,7 @@ def main():
                 page.on('request',lambda r:posts.append(r.post_data_json) if r.method=='POST' and r.url.endswith('/feedback') else None)
                 page.goto(f'http://127.0.0.1:{server.server_port}/');ready(page);field=page.locator('#feedback-note')
                 assert page.locator('#feedback-scope,#feedback-range,#range-start,#range-end').count()==0
-                assert '范围' not in page.locator('.timeline-options > summary').inner_text()
+                assert page.locator('.timeline-options').count()==0
                 query(page,note='前面 ')
                 assert page.locator('.prompt-mention-option[data-mention-kind="time"]').count()>=2
                 choose(page,'当前参考帧')
