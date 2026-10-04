@@ -64,11 +64,12 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 1px
 .tool-button.active { border-color: var(--ink); }
 .tool-icon { font-size: 17px; line-height: 1; min-width: 14px; text-align: center; }
 [data-tool=point] .tool-icon { font-size: 24px; line-height: .7; }
-.selection-level-section, .selection-level-buttons { display: flex; align-items: center; gap: 0; }
-.selection-level-section { gap: 10px; padding-left: 22px; border-left: 1px solid var(--line); }
-.selection-level-button { border: 1px solid var(--line); padding: 6px 10px; font-size: var(--text-control); font-weight: 500; }
-.selection-level-button + .selection-level-button { border-left: 0; }
-.selection-level-button.active { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.selection-level-switch { display: inline-flex; align-items: center; flex: none; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.selection-level-switch[hidden] { display: none; }
+.selection-level-button { flex: none; min-width: 44px; min-height: 28px; padding: 4px 9px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--muted); font-size: var(--text-control); font-weight: 500; white-space: nowrap; }
+.selection-level-button:hover:not(.active):not([aria-pressed=true]) { color: var(--ink); background: var(--paper); }
+.selection-level-button:is(.active,[aria-pressed=true]) { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.selection-level-button:focus-visible { position: relative; z-index: 1; outline: 2px solid var(--ink); outline-offset: 2px; }
 .popover { position: relative; font-size: var(--text-control); }
 .popover > summary { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 5px 8px; list-style: none; font-weight: 500; white-space: nowrap; }
 .popover > summary::-webkit-details-marker { display: none; }
@@ -428,8 +429,7 @@ dialog::backdrop { background: #17171522; }
   .tool-button { padding: 4px 7px; min-height: 30px; gap: 4px; }
   .tool-icon { font-size: 14px; }
   .more-tools summary { padding: 4px 6px; }
-  .selection-level-section { padding-left: 0; border: 0; gap: 8px; }
-  .selection-level-button { padding: 4px 10px; }
+  .selection-level-button { padding-inline: 8px; }
   .workspace { grid-template-columns: minmax(0,1fr); grid-template-rows: auto auto; gap: 14px; }
   .workspace:has(.timeline-panel:not(.hidden):not(.reference-timeline)) { grid-template-rows: auto auto auto; }
   .visual-pane { min-height: 364px; }

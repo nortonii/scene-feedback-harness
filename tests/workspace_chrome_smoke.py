@@ -379,7 +379,6 @@ def main():
                             unobscured(page, '#compare-opacity')
                             unobscured(page, '#align-reference-button')
                             unobscured(page, '#ground-axis')
-                            control(page, '.selection-popover > summary').click()
                             unobscured(page, '[data-selection-level="part"]')
                             page.keyboard.press('Escape')
                         scroll = page.evaluate('''() => ({

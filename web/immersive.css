@@ -62,7 +62,6 @@ html[data-layout=immersive] { overflow: hidden; }
 [data-layout=immersive][data-reference-visible=true] .reference-pane { visibility: visible; opacity: 1; pointer-events: auto; }
 [data-layout=immersive] .reference-pane .pane-head { gap: 4px; padding-bottom: 8px; }
 [data-layout=immersive] .reference-pane .stage { min-height: 0; border-radius: 12px; }
-[data-layout=immersive] .reference-pane .pane-actions { gap: 0; }
 [data-layout=immersive] .reference-pane .pane-heading { flex: 1; }
 [data-layout=immersive] .reference-pane #drag-reference-image { display: none; }
 [data-layout=immersive] .reference-pane #reference-title { max-width: 120px; }

@@ -75,20 +75,9 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
       popup.style.setProperty('--annotation-popover-top', `${Math.round(dy)}px`);
     }
   }
-  function positionMenus() {
-    const safeTop = Math.max(10,document.querySelector('.topbar').getBoundingClientRect().bottom+8);
-    for (const popup of document.querySelectorAll('.import-popover[open] > .popover-content')) {
-      popup.style.setProperty('--panel-max-height', `${Math.max(80,innerHeight-safeTop-10)}px`);
-      popup.style.setProperty('--panel-shift-x','0px');
-      popup.style.setProperty('--panel-shift-y','0px');
-      const rect = popup.getBoundingClientRect();
-      popup.style.setProperty('--panel-shift-x', `${Math.min(0,innerWidth-10-rect.right)+Math.max(0,10-rect.left)}px`);
-      popup.style.setProperty('--panel-shift-y', `${Math.min(0,innerHeight-10-rect.bottom)+Math.max(0,safeTop-rect.top)}px`);
-    }
-  }
   function schedulePosition() {
     if (frame) return;
-    frame = requestAnimationFrame(() => { frame = 0; position(); positionMenus(); });
+    frame = requestAnimationFrame(() => { frame = 0; position(); });
   }
   function render() {
     dock.dataset.context = target;
@@ -142,9 +131,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     const state = getState();
     sceneButton.hidden = false;
     sceneButton.title = state.sceneView === 'live' ? '展开场景标注工具，开始绘制时自动固定当前视角' : '展开当前截图的标注工具';
-    document.querySelector('.selection-popover').hidden = state.sceneView !== 'live';
-    byId('selection-level-label').textContent = state.selectionLevel === 'part' ? '部件' : '物体';
-    document.querySelector('.selection-popover > summary').setAttribute('aria-label', `选择层级：${state.selectionLevel === 'part' ? '部件' : '物体'}`);
+    byId('selection-level-switch').hidden = state.sceneView !== 'live';
     if (opened && target === 'reference' && !referenceReady()) close({resetTool:false});
     const viewChanged = previousView !== state.sceneView;
     const newSnapshot = state.sceneView === 'snapshot' && viewChanged;
