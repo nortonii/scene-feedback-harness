@@ -30,7 +30,7 @@ export function setupActionIcons() {
     if(symbol) symbol.replaceWith(actionIcon(button.dataset.tool));
   }
   for(const [selector,name] of [['#undo-annotation > [aria-hidden]','undo'],['#redo-annotation > [aria-hidden]','redo']]) document.querySelector(selector)?.replaceWith(actionIcon(name));
-  for(const [selector,name] of [['#eraser-settings > summary','chevron'],['#workspace-menu > summary','more'],['#annotation-tools-close','close'],['#reference-window-reset','reset'],['#timeline-prev','prev'],['#timeline-next','next']]) {
+  for(const [selector,name] of [['#workspace-menu > summary','more'],['#annotation-tools-close','close'],['#reference-window-reset','reset'],['#timeline-prev','prev'],['#timeline-next','next']]) {
     const el=document.querySelector(selector);if(el) setActionIcon(el,name);
   }
   for(const element of document.querySelectorAll('[data-icon]')) element.replaceWith(actionIcon(element.dataset.icon));

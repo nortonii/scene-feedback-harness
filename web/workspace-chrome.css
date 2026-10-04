@@ -368,8 +368,7 @@
 #annotation-tools-close:hover { background: var(--surface-hover); color: var(--ink); }
 #annotation-tools-close svg { width: 12px; height: 12px; }
 #annotation-tool-panel .tool-list { display: flex; flex-direction: column; align-items: stretch; gap: 2px; flex-wrap: nowrap; }
-#annotation-tool-panel .tool-list > .tool-button,
-#annotation-tool-panel .eraser-tool {
+#annotation-tool-panel .tool-list > .tool-button {
   display: flex;
   justify-content: center;
   min-width: 0;
@@ -387,12 +386,7 @@
 #annotation-tool-panel .tool-icon { flex: none; min-width: 14px; font-size: 16px; }
 #annotation-tool-panel [data-tool=point] .tool-icon { font-size: 22px; }
 #annotation-tool-panel .eraser-icon { width: 14px; height: 14px; }
-#annotation-tool-panel .eraser-controls { position: relative; width: 100%; }
-#annotation-tool-panel .eraser-tool { justify-content: flex-start; gap: 1px; padding-left: 1px; padding-right: 9px; }
-#annotation-tool-panel .eraser-tool > span { display: inline; font-size: 10px; letter-spacing: -.025em; }
-#annotation-tool-panel .eraser-settings { position: absolute; right: 0; top: 0; bottom: 0; }
-#annotation-tool-panel .eraser-settings > summary { width: 14px; height: 100%; padding: 0; font-size: 12px; border-radius: 6px; }
-#annotation-tool-panel .eraser-settings > summary:hover { background: var(--surface-hover); text-decoration: none; }
+#annotation-tool-panel .eraser-tool > span { font-size: 10px; letter-spacing: -.025em; }
 #annotation-tool-panel #more-tools > summary {
   min-height: 30px;
   justify-content: center;
@@ -424,7 +418,6 @@
   -webkit-backdrop-filter: blur(24px);
 }
 #annotation-tool-panel .popover-content .tool-button { min-height: 32px; border-radius: 8px; font-size: var(--text-caption); }
-#annotation-tool-panel .eraser-settings .popover-content { right: calc(100% + 58px); }
 #annotation-tool-panel .annotation-history-tools {
   display: flex;
   flex-direction: column;
@@ -522,25 +515,17 @@
 @media (max-height: 700px) {
   :root { --annotation-dock-width: 56px; }
   #annotation-tool-panel { gap: 3px; padding: 5px; }
-  #annotation-tool-panel .tool-list > .tool-button,
-  #annotation-tool-panel .eraser-tool { min-height: 29px; height: 29px; padding: 3px; }
+  #annotation-tool-panel .tool-list > .tool-button { min-height: 29px; height: 29px; padding: 3px; }
   #annotation-tool-panel .tool-list > .tool-button > span:not(.tool-icon),
-  #annotation-tool-panel .eraser-tool > span,
   #annotation-tool-panel .annotation-history-tools .compact-button > span:last-child { display: none; }
-  #annotation-tool-panel .eraser-tool { justify-content: center; padding-right: 9px; }
-  #annotation-tool-panel .eraser-settings .popover-content { right: calc(100% + 42px); }
   #annotation-tool-panel .annotation-history-tools .compact-button { min-height: 25px; height: 25px; padding: 2px; }
   #annotation-tool-panel #more-tools > summary { min-height: 26px; padding: 3px; }
   .annotation-dock-heading { min-height: 23px; }
 }
 #annotation-tool-panel.is-compact { --annotation-dock-width: 56px; gap: 3px; padding: 5px; }
-#annotation-tool-panel.is-compact .tool-list > .tool-button,
-#annotation-tool-panel.is-compact .eraser-tool { min-height: 29px; height: 29px; padding: 3px; }
+#annotation-tool-panel.is-compact .tool-list > .tool-button { min-height: 29px; height: 29px; padding: 3px; }
 #annotation-tool-panel.is-compact .tool-list > .tool-button > span:not(.tool-icon),
-#annotation-tool-panel.is-compact .eraser-tool > span,
 #annotation-tool-panel.is-compact .annotation-history-tools .compact-button > span:last-child { display: none; }
-#annotation-tool-panel.is-compact .eraser-tool { justify-content: center; padding-right: 9px; }
-#annotation-tool-panel.is-compact .eraser-settings .popover-content { right: calc(100% + 42px); }
 #annotation-tool-panel.is-compact .annotation-history-tools .compact-button { min-height: 25px; height: 25px; padding: 2px; }
 #annotation-tool-panel.is-compact #more-tools > summary { min-height: 26px; padding: 3px; }
 #annotation-tool-panel.is-compact .annotation-dock-heading { min-height: 23px; }

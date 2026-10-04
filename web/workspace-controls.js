@@ -5,18 +5,17 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   const byId = id => document.getElementById(id);
   const workspace = document.querySelector('.workspace');
   const divider = byId('workspace-divider');
-  const size = byId('eraser-size');
-  const sizeValue = byId('eraser-size-value');
   const labelsToggle = byId('scene-labels-toggle');
   const mobile = matchMedia('(max-width: 640px)');
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-  let sessionId = null, ratio = .5, diameter = ERASER_RADIUS * 2;
+  const diameter = ERASER_RADIUS * 2;
+  let sessionId = null, ratio = .5;
   let sceneLabelsVisible = true;
   let drag = null;
 
   function save() {
     if (!sessionId) return;
-    try { localStorage.setItem('astra-visual-workspace:' + sessionId, JSON.stringify({ratio, diameter, sceneLabelsVisible})); }
+    try { localStorage.setItem('astra-visual-workspace:' + sessionId, JSON.stringify({ratio, sceneLabelsVisible})); }
     catch { /* Controls still work without browser storage. */ }
   }
   function limits() {
@@ -34,10 +33,7 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
     divider.setAttribute('aria-valuenow', String(Math.round(visible * 100)));
     divider.setAttribute('aria-valuetext', `参考图 ${Math.round(visible*100)}%，场景 ${Math.round((1-visible)*100)}%`);
   }
-  function applySize() {
-    size.value = String(diameter);
-    sizeValue.value = diameter + ' px';
-    size.setAttribute('aria-valuetext', '直径 ' + diameter + ' 像素');
+  function applyEraserCursor() {
     const side = diameter + 4, center = side / 2;
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${side}" height="${side}"><circle cx="${center}" cy="${center}" r="${diameter/2}" fill="none" stroke="white" stroke-width="3"/><circle cx="${center}" cy="${center}" r="${diameter/2}" fill="none" stroke="#171715" stroke-width="1"/></svg>`;
     document.body.style.setProperty('--eraser-cursor', `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${center} ${center}, crosshair`);
@@ -45,14 +41,13 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   function refresh() {
     const state = getState();
     if (state.sessionId && sessionId !== state.sessionId) {
-      sessionId = state.sessionId; ratio = .5; diameter = ERASER_RADIUS * 2; sceneLabelsVisible = true;
+      sessionId = state.sessionId; ratio = .5; sceneLabelsVisible = true;
       try {
         const stored = JSON.parse(localStorage.getItem('astra-visual-workspace:' + sessionId) || 'null');
         if (Number.isFinite(stored?.ratio)) ratio = clamp(stored.ratio, .2, .8);
         if (typeof stored?.sceneLabelsVisible === 'boolean') sceneLabelsVisible = stored.sceneLabelsVisible;
-        if (Number.isFinite(stored?.diameter)) diameter = clamp(Math.round(stored.diameter / 2) * 2, 8, 96);
       } catch { /* Ignore invalid preferences. */ }
-      applySplit(); applySize();
+      applySplit();
     }
     labelsToggle.disabled = state.sceneView !== 'snapshot' || !state.snapshot;
     labelsToggle.setAttribute('aria-pressed', String(sceneLabelsVisible));
@@ -62,7 +57,6 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   labelsToggle.addEventListener('click', () => {
     sceneLabelsVisible = !sceneLabelsVisible; refresh(); save(); onLabelsChange();
   });
-  size.addEventListener('input', () => { diameter = Number(size.value); applySize(); save(); });
   divider.addEventListener('pointerdown', event => {
     if (event.button !== 0 || mobile.matches) return;
     event.preventDefault(); divider.focus({preventScroll:true});
@@ -101,6 +95,6 @@ export function setupWorkspaceControls({getState, onLabelsChange=() => {}}) {
   window.addEventListener('blur', () => finish(true));
   mobile.addEventListener('change', () => { finish(true); applySplit(); });
   new ResizeObserver(applySplit).observe(workspace);
-  applySplit(); applySize(); refresh();
+  applySplit(); applyEraserCursor(); refresh();
   return {refresh, eraserRadius:() => diameter / 2, sceneLabelsVisible:() => sceneLabelsVisible};
 }

@@ -69,7 +69,7 @@ const ui = {
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
   viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
-  timelineSource:id('timeline-source'), animationChoices:id('animation-choices'),
+  animationChoices:id('animation-choices'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
   compareImage:id('compare-image'), snapshotCompareImage:id('snapshot-compare-image'),
@@ -3700,10 +3700,7 @@ function renderTimeline({moments=true}={}) {
   ui.time.title = `${displayedTime.toFixed(3)} / ${duration.toFixed(3)} 秒`;
   renderReferenceHeading();
   setActionIcon(ui.play,state.playing ? 'pause' : 'play',state.playing ? '暂停' : '播放');
-  ui.timelineSource.textContent = state.referenceClip
-    ? referenceView().name + ' · ' + referenceView().frames.length + ' 帧 · ' + referenceView().fps + ' fps · ' + (state.clipEnabled ? '同步参考帧' : '正在看静态参考')
-    : 'GLB 动画 · ' + timelineFps() + ' fps';
-  for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), id('save-moment'), ui.clipInput]) {
+  for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), ui.clipInput]) {
     element.disabled = !editable() || (element !== ui.clipInput && duration <= 0);
   }
   renderReferenceViews();
@@ -3858,7 +3855,6 @@ function bindTimelineEvents() {
   ui.viewSelect.addEventListener('change', () => seekTimeline(state.timelineTarget ?? state.time, {viewId:ui.viewSelect.value, preserveTime:true}));
   id('timeline-prev').addEventListener('click', () => stepReferenceTimeline(-1));
   id('timeline-next').addEventListener('click', () => stepReferenceTimeline(1));
-  id('save-moment').addEventListener('click', () => ensureDynamicMoment({showSnapshot:true}));
 }
 function momentDatabase() {
   return new Promise((resolve,reject) => {
