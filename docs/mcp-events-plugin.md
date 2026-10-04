@@ -34,7 +34,7 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 保留完整 MCP、技能、详细介绍、图标，以及 `.codex-plugin/plugin.json` 和
 `.mcp.json` 兼容文件。仓库及配置出的本地安装目录仍可使用本地市场清单。
 
-请使用 `0.1.20` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
+请使用 `0.1.21` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
 上传请求的响应；本地 `plugin/read` 成功不能代替云端归档导入验证。
 官方 [包结构说明](https://developers.openai.com/plugins/build/plugins) 区分了
 单插件分发包和本地市场目录；[上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)
@@ -113,8 +113,9 @@ ZIP 内只有一个 `scene-feedback-harness/` 目录，包含插件身份、技�
 ```
 
 `--mcp-events` 使用外部审图模式并关闭原有 Codex adapter；默认启动方式继续使用
-原投递方式。现有队列不会自动迁移。需要局域网访问时可沿用 README 的监听地址
-和浏览器访问链接配置；云端 MCP 入口仍需公共 HTTPS。
+原投递方式。现有队列不会自动迁移。需要局域网访问时可沿用 README 的监听地址与公开地址配置：
+`--lan-access open` 可直接访问，默认 `link` 模式使用授权链接。浏览器 LAN 模式不改变 MCP 认证；
+云端 MCP 入口仍需公共 HTTPS。
 
 服务的 MCP 入口是 `/p/<project_id>/mcp`，工具和事件方法使用同一个经过认证的
 入口（Bearer 控制令牌）。宿主通过 `server/discover`、`events/list` 发现能力，通过

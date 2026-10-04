@@ -269,12 +269,16 @@ THREAD_ID=your-existing-codex-task-uuid
 LAN_IP=192.168.1.10
 "$REPO/.venv/bin/python" "$REPO/backend/server.py" \
   --project-dir "$PROJECT" --data-dir "$DATA" --port 18768 --external-review \
-  --listen-host 0.0.0.0 --public-base-url "http://$LAN_IP:18768"
+  --listen-host 0.0.0.0 --public-base-url "http://$LAN_IP:18768" --lan-access open
 ```
 
-终端启动信息或 MCP 的 `request_visual_feedback` / `workspace_open` 结果会给出带 `access_token` 的完整链接。首次必须把**整个链接**在另一台设备的浏览器中打开；页面验证后会清除地址栏中的令牌，并保存有效期 30 天的访问 Cookie，访问已授权的工作台主页会续期。可以收藏清除令牌后的链接。清除 Cookie、更换浏览器或主机地址、使用应用的隔离浏览器上下文时，仍需原授权链接；未发送草稿只保存在当前浏览器和主机地址下，不随链接转移。首次不要只输入 `http://$LAN_IP:18768/`，也不要把访问链接发到公开位置。默认工作台模式也可加这两个参数，使用原来的端口和数据目录，并省略 `--external-review`。需要常驻时，可用 systemd 用户服务运行同一条启动命令。局域网开放的是工作台网页及其受保护的 API；MCP 仍由工程主机上的 Codex 经 `127.0.0.1` 在本机调用。如果连接不通，检查主机防火墙是否允许所选 TCP 端口；HTTP 局域网模式适合可信网络。
+上例的 `--lan-access open` 使用开放模式：直接打开并收藏发布的 LAN 地址，无需 Cookie 或 `access_token`。所有能连接该端口的局域网用户都可以浏览、提交反馈并控制当前工作台。
 
-Codex 与服务在同一主机时，可收藏本机固定入口 `http://127.0.0.1:18768/p/<project_id>/open`（替换项目 ID，可附原 `session_id`）。它会自动授权并回到配置的 LAN 页面，保留该浏览器在原地址的草稿。此入口只接受本机访问；其他电脑不能使用这个 localhost 链接，仍须先打开完整授权链接。
+`--lan-access link` 是默认的链接授权模式。终端启动信息或 MCP 的 `request_visual_feedback` / `workspace_open` 结果会给出带 `access_token` 的完整链接。首次必须把**整个链接**在另一台设备的浏览器中打开；页面验证后会清除地址栏中的令牌，并保存有效期 30 天的访问 Cookie，访问已授权的工作台主页会续期。可以收藏清除令牌后的链接。清除 Cookie、更换浏览器或主机地址、使用应用的隔离浏览器上下文时，仍需原授权链接；首次不要只输入 `http://$LAN_IP:18768/`，也不要把访问链接发到公开位置。
+
+在 `link` 模式下，Codex 与服务在同一主机时，可收藏本机固定入口 `http://127.0.0.1:18768/p/<project_id>/open`（替换项目 ID，可附原 `session_id`）。它会自动授权并回到配置的 LAN 页面，保留该浏览器在原地址的草稿。此入口只接受本机访问；其他电脑不能使用这个 localhost 链接，仍须先打开完整授权链接。
+
+未发送草稿只保存在当前浏览器和主机地址下，不随链接转移。 默认工作台模式也可加同样的 LAN 参数，使用原来的端口和数据目录，并省略 `--external-review`。需要常驻时，可用 systemd 用户服务运行同一条启动命令。局域网提供工作台网页及相关 API；MCP 仍由工程主机上的 Codex 经 `127.0.0.1` 在本机调用。如果连接不通，检查主机防火墙是否允许所选 TCP 端口；HTTP 局域网模式适合可信网络。
 
 使用上述桌面任务绑定方式时，在局域网启动命令中同时保留 `--shared-thread-id "$THREAD_ID"`。浏览器可位于局域网的其他设备；连接 Codex Desktop 的服务仍须运行在该桌面任务所在的同一主机和用户下。
 
@@ -314,6 +318,6 @@ Codex 与服务在同一主机时，可收藏本机固定入口 `http://127.0.0.
 
 App Server 的真实联调已用两张不同的本地图像完成：Codex 在第一轮识别红图，关闭并重启 stdio 后，在**同一 thread** 的第二轮识别蓝图；`thread/read` 历史记录包含两轮的 `localImage` 项。这验证了图片确实进入模型，不只是传了图片路径。完整浏览器验收中，人在参考图和场景图上分别画编号框并点击发送；Codex 收到五张实际图像，修改演示场景源文件并导出 GLB，经页面审批后两次成功调用 `workspace_publish_scene`，工作台自动从场景版本 2 刷新到版本 4。随后在网页再次画参考线并发送；Codex 在**同一 thread** 收到第二轮的五张图像并确认，没有修改文件或重复发布。
 
-默认服务只监听 `127.0.0.1`；显式启用上述局域网参数后，页面需要访问链接及 Cookie，提交操作仍需浏览器 capability。为访问本机 MCP Gateway，Codex 的 `workspace-write` 回合设置 `networkAccess: true`。执行审批由用户在页面决定，工作台不会自动批准。运行数据和演示输出均不进入 Git。
+默认服务只监听 `127.0.0.1`。LAN 的 `open` 模式无需访问凭据，`link` 模式需要完整授权链接与 Cookie。两种模式均保留 Host/Origin 和内部写入权限检查，浏览器自动取得写入能力；私有 control 接口和 MCP Bearer 认证保持不变。为访问本机 MCP Gateway，Codex 的 `workspace-write` 回合设置 `networkAccess: true`。执行审批由用户在页面决定，工作台不会自动批准。运行数据和演示输出均不进入 Git。
 
 项目代码使用 [MIT 许可证](LICENSE)。仓库里的 Three.js 文件保留其[原始 MIT 许可证](web/vendor/three/LICENSE)。

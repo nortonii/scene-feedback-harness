@@ -59,7 +59,7 @@ class ProjectTests(unittest.TestCase):
         gateway.store.workspace_thread(thread_id)
         return {"thread_id": thread_id, "workspace": gateway.state()}
 
-    def start_server(self, *, lan=False):
+    def start_server(self, *, lan=False, lan_access="link"):
         options = {}
         port = 0
         if lan:
@@ -68,7 +68,8 @@ class ProjectTests(unittest.TestCase):
                 port = sock.getsockname()[1]
             options = {"listen_host": "0.0.0.0", "public_base_url": f"http://127.0.0.1:{port}"}
         self.server = server_module.make_server(port=port, data_dir=self.data, web_dir=self.web,
-                                               project_dir=self.project, external_review=True, **options)
+                                               project_dir=self.project, external_review=True,
+                                               lan_access=lan_access, **options)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.root_context = self.server.project_registry.root
@@ -338,6 +339,46 @@ class ProjectTests(unittest.TestCase):
         status, page, _ = self.request("GET", bootstrap["Location"], cookie=cookie)
         self.assertEqual((status, page), (200, b"<html>viewer</html>"))
         self.assertEqual(self.request("GET", prefix + "/api/workspace/state", cookie=cookie)[1]["session_id"], session_id)
+
+    def test_open_lan_root_and_child_require_no_cookie_but_keep_project_capabilities(self):
+        _, created, _ = self.create(name="Water Tanker")
+        project_id = created["project"]["project_id"]
+        self.stop_server()
+        self.start_server(lan=True, lan_access="open")
+        child = self.server.project_registry.get(project_id)
+        self.assertNotEqual(self.root_context.store.browser_token, child.store.browser_token)
+        prefix = "/p/" + project_id
+
+        for route, context in (("", self.root_context), (prefix, child)):
+            with self.subTest(route=route):
+                status, _, page_headers = self.request("GET", route + "/")
+                self.assertEqual(status, 200)
+                self.assertNotIn("Set-Cookie", page_headers)
+                status, health, _ = self.request("GET", route + "/api/health")
+                self.assertEqual((status, health["lan_access"]), (200, "open"))
+                status, state, _ = self.request("GET", route + "/api/workspace/state")
+                self.assertEqual((status, state["lan_access"]), (200, "open"))
+                self.assertEqual(state["project_id"], context.project_id)
+                self.assertEqual(state["browser_capability"], context.store.browser_token)
+                generated = urlsplit(state["browser_url"])
+                self.assertEqual(generated.path, route + "/")
+                self.assertEqual(parse_qs(generated.query), {"session_id": [state["session_id"]]})
+                self.assertEqual(parse_qs(urlsplit(self.server.browser_url(state["session_id"], context.project_id)).query),
+                                 {"session_id": [state["session_id"]]})
+
+        child_session = child.store.workspace()["session_id"]
+        status, _, headers = self.request("GET", prefix + f"/?access_token=obsolete&session_id={child_session}")
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], prefix + f"/?session_id={child_session}")
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(self.request("GET", headers["Location"])[0], 200)
+
+        self.assertEqual(self.request("POST", prefix + "/api/projects", {"request_id": uuid.uuid4().hex},
+                                      capability=self.root_context.store.browser_token)[0], 403)
+        self.assertEqual(self.request("POST", prefix + "/api/workspace/publish", {},
+                                      capability=child.store.browser_token)[0], 403)
+        self.assertEqual(self.request("POST", prefix + "/mcp", {})[0], 401)
+        self.assertEqual(self.request("GET", prefix + "/api/health", origin="https://other.test")[0], 403)
 
     def test_closed_registry_rejects_new_creations(self):
         self.server.project_registry.close()
