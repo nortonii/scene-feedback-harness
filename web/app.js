@@ -96,7 +96,7 @@ const ui = {
   imagePreviewToggle:id('prompt-image-preview-toggle'),
   submit:id('submit-button'), caption:id('submit-caption'),
   pill:id('session-pill'), toast:id('toast'), sceneHint:id('scene-hint'),
-  referenceHint:id('reference-hint'), groupSelect:id('group-select'),
+  groupSelect:id('group-select'),
   textEditor:id('text-editor'), annotationText:id('annotation-text'),
   captureScene:id('capture-scene-button'), snapshotStrip:id('scene-snapshot-strip'),
   snapshotMedia:id('scene-snapshot-media'), snapshotImage:id('scene-snapshot-image'),
@@ -2726,7 +2726,6 @@ function showActiveReference() {
   const hasReference = !!ref;
   ui.referenceMedia.classList.toggle('hidden', !hasReference);
   ui.referenceEmpty.classList.toggle('hidden', hasReference);
-  ui.referenceHint.classList.toggle('hidden', !hasReference || toolMode('reference') === 'select');
   renderReferenceHeading();
   updateAlignmentStatus();
   renderHumanPosePanel();
@@ -4031,7 +4030,6 @@ function updateMode() {
   updateAnnotationSelectionHint();
   controls.enabled = editable() && toolMode('scene') === 'select' && state.sceneView === 'live';
   id('ground-axis').disabled = !controls.enabled;
-  ui.referenceHint.classList.toggle('hidden', !activeReference());
   updateSceneHint();
   state.drag = null;
   drawOverlays();
@@ -4153,10 +4151,6 @@ function selectedAnnotation() {
 }
 function updateAnnotationSelectionHint() {
   const mark = selectedAnnotation();
-  ui.referenceHint.textContent = toolMode('reference') === 'erase' ? '划过标记擦除整条 · 可撤销'
-    : toolMode('reference') !== 'select' ? '在图片上圈出想让 Codex 注意的地方'
-    : mark?.pane === 'reference' ? mark.name + ' · Backspace 删除 · 拖到会话引用'
-    : '点击标记选中 · 拖到会话引用 · 空白处拖动平移';
   for (const button of ui.annotationList.querySelectorAll('[data-annotation-id]')) {
     button.setAttribute('aria-pressed', String(button.dataset.annotationId === mark?.id));
   }
