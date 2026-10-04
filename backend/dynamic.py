@@ -193,19 +193,23 @@ def prepare_dynamic_feedback(store: Any, session: dict[str, Any], payload: dict[
     if clip and (abs(duration - shared_duration(clip)) > 1e-4 or abs(fps - clip["fps"]) > 1e-4):
         raise APIError(400, "timeline duration/fps must match the current reference clip")
     time_sec = number(timeline.get("time_sec"), "timeline time_sec", maximum=duration)
-    scope = timeline.get("scope", {"kind": "frame"})
-    if not isinstance(scope, dict) or scope.get("kind") not in {"frame", "range", "clip"}:
-        raise APIError(400, "timeline scope must be frame, range or clip")
-    normalized_scope = {"kind": scope["kind"]}
-    if scope["kind"] == "range":
-        start = number(scope.get("start_sec"), "scope start_sec", maximum=duration)
-        end = number(scope.get("end_sec"), "scope end_sec", maximum=duration)
-        if start >= end:
-            raise APIError(400, "scope range start_sec must precede end_sec")
-        normalized_scope.update(start_sec=start, end_sec=end)
-    elif "start_sec" in scope or "end_sec" in scope:
-        raise APIError(400, "only range scope accepts start_sec/end_sec")
-    normalized_timeline = {"clip_id": clip_id, "time_sec": time_sec, "duration_sec": duration, "fps": fps, "scope": normalized_scope}
+    normalized_timeline = {"clip_id": clip_id, "time_sec": time_sec, "duration_sec": duration, "fps": fps}
+    # Current clients describe modification times in the note. Keep timestamps
+    # as evidence metadata, while preserving explicitly submitted legacy scope.
+    if "scope" in timeline:
+        scope = timeline["scope"]
+        if not isinstance(scope, dict) or scope.get("kind") not in {"frame", "range", "clip"}:
+            raise APIError(400, "timeline scope must be frame, range or clip")
+        normalized_scope = {"kind": scope["kind"]}
+        if scope["kind"] == "range":
+            start = number(scope.get("start_sec"), "scope start_sec", maximum=duration)
+            end = number(scope.get("end_sec"), "scope end_sec", maximum=duration)
+            if start >= end:
+                raise APIError(400, "scope range start_sec must precede end_sec")
+            normalized_scope.update(start_sec=start, end_sec=end)
+        elif "start_sec" in scope or "end_sec" in scope:
+            raise APIError(400, "only range scope accepts start_sec/end_sec")
+        normalized_timeline["scope"] = normalized_scope
     if timeline_view_id is not None:
         normalized_timeline.update(view_id=timeline_view_id, view_name=views[timeline_view_id]["name"])
     if not isinstance(frames, list) or not 1 <= len(frames) <= MAX_DYNAMIC_FRAMES:

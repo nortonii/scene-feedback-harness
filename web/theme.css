@@ -181,14 +181,10 @@ html.theme-transitioning :where(body, .topbar, .tool-panel, .pane-head, .stage,
 }
 [data-theme="dark"] :where(.chat-launcher.has-attention, .chat-launcher.needs-approval) { border-color: #d3ad7177; }
 
-[data-theme="dark"] .scene-mode-switch { background: #00000016; }
-[data-theme="dark"] .scene-mode-switch .compact-button[aria-pressed="false"]:hover:not(:disabled) { background: #ffffff0a; }
-[data-theme="dark"] .scene-mode-switch .compact-button[aria-pressed="true"] { box-shadow: 0 1px 4px #00000026; }
 [data-theme="dark"] :where(.compare-toggle[aria-pressed="true"]:not(:disabled),
   .compare-presets .compact-button[aria-pressed="true"]) { background: #ffffff10; }
 [data-theme="dark"] .compare-toggle:hover:not(:disabled) { background: #ffffff14; }
 [data-theme="dark"] .scene-snapshots { background: #24272be8; box-shadow: 0 3px 12px #0000001a; }
-[data-theme="dark"] .snapshot-strip-toggle:hover { background: #ffffff0c; }
 [data-theme="dark"] .snapshot-open[aria-pressed="true"] { background: #ffffff0a; border-color: #bec6cb; }
 [data-theme="dark"] .scene-snapshot-strip::-webkit-scrollbar-thumb { background: #8d949b66; }
 [data-theme="dark"] .scene-snapshot-strip::-webkit-scrollbar-thumb:hover { background: #a8afb7; }

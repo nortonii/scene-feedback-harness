@@ -146,6 +146,78 @@ class DynamicSceneTests(unittest.TestCase):
         self.assertEqual(self.store.get_session(self.session)["feedback_count"], 1)
         self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(feedback["feedback_id"])["dynamic_frames"], feedback["dynamic_frames"])
 
+    def test_missing_scope_preserves_prompt_times_and_evidence_without_a_default_range(self) -> None:
+        for has_clip in (False, True):
+            clip = self.import_clip() if has_clip else None
+            with self.subTest(reference_clip=has_clip):
+                payload = self.payload(clip)
+                payload["timeline"].pop("scope")
+                payload["note"] = "请把 0.25 秒到 0.75 秒的动作往前移。"
+                original_payload = copy.deepcopy(payload)
+                feedback = self.store.submit_feedback(self.session, payload)
+                self.assertEqual(payload, original_payload)
+                self.assertEqual(feedback["note"], payload["note"])
+                self.assertFalse({"scope", "start_sec", "end_sec"} & feedback["timeline"].keys())
+                self.assertEqual(feedback["timeline"]["time_sec"], 0)
+                self.assertEqual(feedback["dynamic_frames"][0]["time_sec"], 0)
+                message, paths = self.gateway._turn_input(feedback)
+                self.assertIn("动态截图采集时间，修改时段以用户提示为准", message)
+                self.assertIn(payload["note"], message)
+                self.assertNotIn("动态反馈时间轴与适用范围", message)
+                self.assertNotIn("区间范围表示", message)
+                self.assertEqual(len(paths), 4 if clip else 2)
+                with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
+                    result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
+                delivered = result.structured_content["items"][0]
+                self.assertEqual(delivered["timeline"], feedback["timeline"])
+                self.assertEqual(delivered["note"], feedback["note"])
+                self.assertEqual(delivered["dynamic_frames"][0]["camera"], feedback["dynamic_frames"][0]["camera"])
+                self.assertEqual(sum(item.type == "image" for item in result.content), len(paths))
+                texts = [item.text for item in result.content if item.type == "text"]
+                self.assertTrue(any("modification times from the user's prompt text" in text for text in texts))
+                self.assertNotIn("scope", json.loads(texts[0])["items"][0]["timeline"])
+                persisted = SceneStore(self.store.data_dir).feedback_by_id(feedback["feedback_id"])
+                self.assertEqual(persisted, feedback)
+
+    def test_explicit_legacy_scopes_keep_their_saved_intent_and_delivery_message(self) -> None:
+        clip = self.import_clip()
+        saved = []
+        for scope in ({"kind": "frame"}, {"kind": "range", "start_sec": 0.25, "end_sec": 0.75}, {"kind": "clip"}):
+            with self.subTest(scope=scope):
+                payload = self.payload(clip)
+                payload["timeline"]["scope"] = scope
+                feedback = self.store.submit_feedback(self.session, payload)
+                self.assertEqual(feedback["timeline"]["scope"], scope)
+                message, _ = self.gateway._turn_input(feedback)
+                self.assertIn("动态反馈时间轴与适用范围", message)
+                self.assertIn("区间范围表示用户提示的适用时间", message)
+                self.assertNotIn("动态截图采集时间，修改时段以用户提示为准", message)
+                with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
+                    result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
+                self.assertEqual(result.structured_content["items"][0]["timeline"]["scope"], scope)
+                self.assertFalse(any("modification times from the user's prompt text" in item.text for item in result.content if item.type == "text"))
+                saved.append(feedback)
+        state_bytes = self.store.state_path.read_bytes()
+        reloaded = SceneStore(self.store.data_dir)
+        for feedback in saved:
+            self.assertEqual(reloaded.feedback_by_id(feedback["feedback_id"]), feedback)
+        self.assertEqual([item["feedback_id"] for item in reloaded.workspace()["queue"]], [item["feedback_id"] for item in saved])
+        self.assertEqual(self.store.state_path.read_bytes(), state_bytes)
+
+    def test_explicit_legacy_scope_validation_remains_required(self) -> None:
+        for scope in (None, {"kind": "prompt"}, {"kind": "evidence"},
+                      {"kind": "range", "start_sec": 0.75, "end_sec": 0.25},
+                      {"kind": "range", "start_sec": 0, "end_sec": 3},
+                      {"kind": "range", "start_sec": float("nan"), "end_sec": 0.5},
+                      {"kind": "frame", "start_sec": 0}, {"kind": "clip", "end_sec": 1}):
+            with self.subTest(scope=scope):
+                payload = self.payload()
+                payload["timeline"]["scope"] = scope
+                with self.assertRaisesRegex(APIError, "scope"):
+                    self.store.submit_feedback(self.session, payload)
+        self.assertEqual(self.store.list_all_feedback(), [])
+        self.assertEqual(self.store.workspace()["queue"], [])
+
     def test_irregular_clip_indices_follow_sequence_and_override_client_indices(self) -> None:
         clip = self.store.set_reference_clip(self.session, {"fps": 30, "frames": [
             {"name": "source_9025.png", "time_sec": 0, "data_url": self.data_url, "frame_index": 9025},
@@ -373,6 +445,8 @@ class DynamicHTTPTests(unittest.TestCase):
             session = store.workspace()["session_id"]
             data, data_url = image_data()
             try:
+                with opener.open(base + "/api/health") as response:
+                    self.assertIs(json.load(response)["prompt_time_supported"], True)
                 def post(path: str, payload: dict, key: str | None = None) -> dict:
                     headers = {"Content-Type": "application/json"}
                     if key is not None:

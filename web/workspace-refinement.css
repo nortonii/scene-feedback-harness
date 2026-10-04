@@ -1,4 +1,4 @@
-/* Consistent reading hierarchy, grouped scene controls and explicit feedback scope. */
+/* Consistent reading hierarchy and grouped scene controls. */
 :root { --text-control: 13px; --text-caption: 12px; --text-body: 14px; --surface-menu: #faf9f5f7; }
 :root[data-theme=dark] { --surface-menu: #292c30fa; }
 .topbar #scene-name { font-size: 14px; font-weight: 600; letter-spacing: 0; }
@@ -34,8 +34,6 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .scene-pane .pane-actions > #references-dialog-button:hover { background: var(--surface-hover); border-color: var(--line); }
 #annotation-count { font-size: 12px; color: var(--muted); min-width: 10px; text-align: center; }
 #references-dialog-button .action-icon { width: 16px; height: 16px; }
-.scene-snapshots, [data-layout=immersive] .scene-snapshots { right: 12px; max-width: calc(100% - 24px); }
-[data-layout=immersive] .scene-snapshots { max-width: min(48vw,680px); }
 .scene-pane { position: relative; }
 .snapshot-context { position: absolute; z-index: 15; left: 12px; bottom: 12px; padding: 5px 9px; border-radius: 8px; background: var(--surface-menu); color: var(--muted); font-size: 12px; pointer-events: none; }
 #snapshot-context:not([hidden]) ~ .scene-stage #scene-hint { bottom: 48px; }
@@ -57,7 +55,7 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .conversation-item { font-size: 14px; line-height: 1.7; }
 .chat-history { background: color-mix(in srgb,var(--surface) 68%,transparent); }
 #feedback-note { font-size: 14px; line-height: 1.65; }
-/* Two rows: transport plus time/scope, followed by an uninterrupted seek bar. */
+/* Two rows: transport, time and video options, followed by an uninterrupted seek bar. */
 .reference-timeline .timeline-controls { display: grid; grid-template-columns: 28px 58px 28px minmax(0,1fr) auto; gap: 4px; }
 .reference-timeline #timeline-prev { grid-area: 1/1; }
 .reference-timeline #timeline-play { grid-area: 1/2; gap: 4px; padding: 4px; }
@@ -114,3 +112,18 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .evidence-card.is-expanded { grid-column: 1 / -1; }
 .evidence-card.is-expanded .evidence-image { cursor: zoom-out; }
 .evidence-card.is-expanded img { max-height: 70dvh; }
+
+/* Direct scene controls stay available without opening another menu. */
+.scene-pane .pane-actions { min-width: 0; flex-wrap: wrap; row-gap: 4px; }
+.scene-pane .compare-inline { display: inline-flex; align-items: center; flex: none; gap: 5px; padding: 0 3px; border: 0; }
+.scene-pane .compare-inline #compare-opacity { width: 88px; min-width: 0; height: 26px; margin: 0; accent-color: var(--ink); cursor: pointer; }
+.scene-pane .compare-inline #compare-opacity:disabled { cursor: default; }
+.scene-pane .compare-inline #opacity-value { min-width: 31px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.scene-pane .ground-axis-label { display: inline-flex; align-items: center; flex: none; gap: 4px; padding: 0; margin: 0; font-size: 12px; }
+.scene-pane .ground-axis-label select { max-width: 104px; padding: 4px 6px; min-height: 30px; }
+@media (max-width: 640px) {
+  .scene-pane > .pane-head > .pane-actions { min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+  .scene-pane .compare-inline #compare-opacity { width: 68px; }
+  .scene-pane .ground-axis-label { font-size: 11px; }
+  .scene-pane .ground-axis-label select { max-width: 93px; min-height: 28px; padding: 3px 5px; }
+}

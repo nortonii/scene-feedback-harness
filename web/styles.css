@@ -130,6 +130,9 @@ select { min-width: 0; font-size: var(--text-control); }
 .primary-small { display: inline-block; border-bottom: 1px solid var(--ink); font-size: var(--text-control); padding: 4px 0; cursor: pointer; }
 .viewport { position: absolute; inset: 0; }
 .viewport canvas { display: block; width: 100%; height: 100%; outline: none; }
+/* A frozen image owns the whole stage, including its empty margins. Keep the
+   renderer's geometry available for resizing, captures and the live card. */
+.scene-stage[data-scene-view="snapshot"] > .viewport { visibility: hidden; pointer-events: none; }
 .scene-snapshot-media { position: absolute; z-index: 4; left: 50%; top: 50%; transform: translate(-50%,-50%); max-width: 100%; max-height: 100%; background: var(--stage); }
 .scene-annotations { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; touch-action: none; }
 .compare-image { position: absolute; inset: 0; height: 100%; width: 100%; object-fit: contain; pointer-events: none; z-index: 3; }
@@ -154,10 +157,6 @@ select { min-width: 0; font-size: var(--text-control); }
 .scene-pane .pane-head { flex-wrap: wrap; row-gap: 5px; }
 .scene-pane .pane-actions { min-width: 0; max-width: 100%; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
 .scene-pane .pane-heading { gap: 9px; }
-.scene-mode-switch { display: inline-flex; align-items: center; flex: none; padding: 2px; gap: 2px; border: 1px solid var(--line); border-radius: 9px; background: #17171506; }
-.scene-mode-switch .compact-button { min-height: 26px; padding: 3px 9px; border-radius: 6px; color: var(--muted); }
-.scene-mode-switch .compact-button[aria-pressed=true] { background: var(--ink); color: var(--paper); box-shadow: 0 1px 3px #17171518; }
-.scene-mode-switch .compact-button[aria-pressed=false]:hover:not(:disabled) { color: var(--ink); background: #1717150b; }
 .compare-controls { display: inline-flex; align-items: center; flex: none; border: 1px solid var(--line); border-radius: 7px; }
 .compare-toggle { min-height: 28px; padding: 4px 7px; border: 0; border-right: 1px solid var(--line); border-radius: 6px 0 0 6px; }
 .compare-toggle[aria-pressed=true]:not(:disabled) { background: #1717150c; }
@@ -188,8 +187,6 @@ input[type=range] { accent-color: #292925; }
 .timeline-options .popover-content { bottom: calc(100% + 8px); top: auto; }
 .timeline-details { min-width: 260px; }
 #timeline-source { color: var(--muted); line-height: 1.5; font-size: var(--text-caption); }
-#feedback-range { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
-#feedback-range input { width: 73px; }
 #animation-choices { display: grid; gap: 9px; }
 #animation-choices:empty { display: none; }
 #animation-choices label { display: grid; gap: 5px; }
@@ -474,34 +471,9 @@ dialog::backdrop { background: #17171522; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 
 /* Saved camera views float over the canvas without changing its aspect ratio. */
-.scene-snapshots { --snapshot-ease: cubic-bezier(.22,1,.36,1); position: absolute; top: 10px; left: 10px; max-width: calc(100% - 20px); height: 46px; display: flex; align-items: center; z-index: 8; padding: 3px; border-radius: 9px; background: #f5f4efe8; backdrop-filter: blur(12px); transition: height 280ms var(--snapshot-ease); }
-.snapshot-strip-toggle { position: relative; flex: none; align-self: stretch; width: 28px; padding: 0; border-radius: 6px; font-size: var(--text-caption); white-space: nowrap; transition: width 280ms var(--snapshot-ease), background-color 140ms; }
-.snapshot-strip-toggle:hover { background: #1717150a; }
-.snapshot-strip-chevron { position: absolute; right: 7px; top: calc(50% - 7px); transition: transform 280ms var(--snapshot-ease); }
-.snapshot-strip-count { position: absolute; left: 8px; top: 50%; transform: translateY(-50%); opacity: 0; font-variant-numeric: tabular-nums; transition: opacity 120ms; }
-.scene-snapshot-reveal { flex: none; width: var(--snapshot-strip-width,0px); overflow: hidden; opacity: 1; visibility: visible; transition: width 280ms var(--snapshot-ease), opacity 180ms ease, visibility 0s; }
-.scene-snapshot-strip { display: flex; align-items: center; height: 40px; min-width: 0; gap: 6px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #8a887d80 transparent; }
-@supports selector(::-webkit-scrollbar) {
-  .scene-snapshot-strip { scrollbar-width: auto; scrollbar-color: auto; }
-  .scene-snapshot-strip::-webkit-scrollbar { height: 4px; }
-  .scene-snapshot-strip::-webkit-scrollbar-track { background: transparent; }
-  .scene-snapshot-strip::-webkit-scrollbar-thumb { border-radius: 4px; background: #8a887d80; }
-  .scene-snapshot-strip::-webkit-scrollbar-thumb:hover { background: #74746e; }
-}
-.scene-snapshots.is-collapsed { height: 34px; }
-.scene-snapshots.is-collapsed .snapshot-strip-toggle { width: 48px; }
-.scene-snapshots.is-collapsed .snapshot-strip-chevron { transform: rotate(180deg); }
-.scene-snapshots.is-collapsed .snapshot-strip-count { opacity: 1; transition-delay: 80ms; }
-.scene-snapshots.is-collapsed .scene-snapshot-reveal { width: 0; opacity: 0; visibility: hidden; transition: width 280ms var(--snapshot-ease), opacity 140ms ease, visibility 0s 280ms; }
-.snapshot-card { display: flex; flex: none; align-items: center; }
-.snapshot-open { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 3px; border: 1px solid transparent; border-radius: 6px; font-size: var(--text-caption); white-space: nowrap; }
-.snapshot-open img { width: 38px; height: 28px; object-fit: cover; border-radius: 3px; }
-.snapshot-open[aria-pressed=true] { background: var(--paper); border-color: var(--ink); }
-.snapshot-remove { flex: none; padding: 6px; color: var(--muted); }
-.scene-stage:has(.scene-snapshots:not(.hidden)) .selected-chip { top: 66px; }
 
 .eraser-icon { flex: none; }
-body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annotations { cursor: var(--eraser-cursor, crosshair); }
+#reference-annotations[data-tool=erase], #scene-annotations[data-tool=erase], #viewport canvas[data-tool=erase] { cursor: var(--eraser-cursor, crosshair); }
 @media (max-width: 640px) {
   .tool-list { flex-wrap: wrap; max-width: 100%; min-width: 0; }
   .eraser-tool > span { display: none; }
@@ -580,7 +552,6 @@ body[data-tool=erase] #reference-annotations, body[data-tool=erase] #scene-annot
 .chat-approvals .queue-actions button { border-radius: 16px; min-height: 34px; }
 
 
-.scene-snapshot-reveal { min-width: 0; flex-shrink: 1; }
 
 /* Video playback belongs to the reference, keeping the scene canvas unobstructed. */
 .reference-pane > .reference-timeline { flex: none; width: 100%; margin-top: 6px; padding-top: 8px; }

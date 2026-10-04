@@ -7,15 +7,17 @@ def open_annotation_tools(page, context=None):
     if not panel.count():
         return
     if context is None:
-        context = 'scene' if page.locator('#snapshot-button').get_attribute('aria-pressed') == 'true' else 'reference'
+        context = 'scene' if page.locator('#scene-live-card').get_attribute('aria-pressed') == 'false' and page.locator('#scene-snapshot-media').is_visible() else 'reference'
     if panel.is_visible() and (context is None or panel.get_attribute('data-context') == context):
         return
     if context == 'scene':
         page.locator('#scene-annotation-toggle').click()
     else:
-        if page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#annotate-reference-button').is_visible():
+        if page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#reference-media').is_visible():
             page.locator('#immersive-reference-toggle').click()
-        page.locator('#annotate-reference-button').click()
+        page.locator('#reference-media').hover()
+        expect(panel).to_be_visible()
+        panel.hover()
     expect(panel).to_be_visible()
 
 

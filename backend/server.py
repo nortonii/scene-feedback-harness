@@ -36,6 +36,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = HERE / "data"
 DEFAULT_WEB_DIR = HERE.parent / "web"
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+LAN_ACCESS_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
 SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel|references|clip))?$")
 MEDIA_ROUTE = re.compile(r"^/(assets|screenshots|media)/([0-9a-f]{32}\.(?:glb|png|jpg))$")
 WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confirm$")
@@ -84,7 +85,10 @@ def _make_server_unlocked(
     adapter: object | None = None,
     listen_host: str = "127.0.0.1",
     public_base_url: str | None = None,
+    lan_access: str = "link",
 ) -> ThreadingHTTPServer:
+    if lan_access not in {"link", "open"}:
+        raise ValueError("lan_access must be 'link' or 'open'")
     if feedback_transport == "mcp_events":
         if enable_codex or shared_thread_id or adapter is not None:
             raise ValueError("MCP events cannot use a Codex App Server or shared desktop adapter")
@@ -109,6 +113,8 @@ def _make_server_unlocked(
             raise ValueError("--public-base-url must use the listening port")
         public_base_url = public_base_url.rstrip("/")
     lan_mode = public_base_url is not None
+    lan_access_required = lan_mode and lan_access == "link"
+    browser_access_mode = lan_access if lan_mode else "local"
     store = SceneStore(data_dir)
     web_root = Path(web_dir).expanduser().resolve()
     project_root = Path(project_dir or os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)).expanduser().resolve()
@@ -149,7 +155,7 @@ def _make_server_unlocked(
         base = public_base_url or f"http://127.0.0.1:{port_number}"
         prefix = f"/p/{context.project_id}" if prefixed or context is not root_context else ""
         query = {"session_id": session_id}
-        if lan_mode:
+        if lan_access_required:
             query["access_token"] = store.browser_token
         return f"{base}{prefix}/?{urlencode(query)}"
 
@@ -203,7 +209,7 @@ def _make_server_unlocked(
             return cookie is not None and hmac.compare_digest(cookie.value, store.browser_token)
 
         def _needs_lan_access(self) -> bool:
-            if not lan_mode:
+            if not lan_access_required:
                 return False
             try:
                 loopback_peer = ipaddress.ip_address(self.client_address[0]).is_loopback
@@ -213,19 +219,26 @@ def _make_server_unlocked(
             # peer cannot bypass access control by forging a loopback Host header.
             return not loopback_peer or self.headers.get("Host") == urlsplit(public_base_url).netloc
 
+        def _lan_access_cookie(self) -> str:
+            cookie = (
+                f"scene_feedback_{self.server.server_port}_access={store.browser_token}; "
+                f"Max-Age={LAN_ACCESS_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax; Path=/"
+            )
+            if urlsplit(public_base_url).scheme == "https":
+                cookie += "; Secure"
+            return cookie
+
         def _bootstrap_lan_access(self, path: str, query: dict[str, list[str]]) -> bool:
             if not lan_mode or self.command != "GET" or path != "/" or "access_token" not in query:
                 return False
             submitted = query.pop("access_token")
-            if len(submitted) != 1 or not registry.accepts_browser_token(submitted[0]):
+            if lan_access_required and (len(submitted) != 1 or not registry.accepts_browser_token(submitted[0])):
                 raise APIError(403, "invalid workbench access link")
             location = self.project_prefix + "/" + (f"?{urlencode(query, doseq=True)}" if query else "")
-            cookie = f"scene_feedback_{self.server.server_port}_access={store.browser_token}; HttpOnly; SameSite=Lax; Path=/"
-            if urlsplit(public_base_url).scheme == "https":
-                cookie += "; Secure"
             self.send_response(303)
             self.send_header("Location", location)
-            self.send_header("Set-Cookie", cookie)
+            if lan_access_required:
+                self.send_header("Set-Cookie", self._lan_access_cookie())
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Length", "0")
@@ -277,7 +290,7 @@ def _make_server_unlocked(
             self.end_headers()
             self.wfile.write(data)
 
-        def _send_file(self, file_path: Path) -> None:
+        def _send_file(self, file_path: Path, *, renew_lan_access: bool = False) -> None:
             if not file_path.is_file():
                 raise APIError(404, "file not found")
             content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
@@ -288,6 +301,8 @@ def _make_server_unlocked(
             self.send_header("Referrer-Policy", "no-referrer")
             if lan_mode:
                 self.send_header("Cache-Control", "no-store")
+            if renew_lan_access:
+                self.send_header("Set-Cookie", self._lan_access_cookie())
             self.end_headers()
             with file_path.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
@@ -298,6 +313,26 @@ def _make_server_unlocked(
             parsed = urlsplit(self.path)
             path = self._select_context(unquote(parsed.path))
             query = parse_qs(parsed.query)
+            if path == "/open":
+                # A local desktop shortcut can restore browser access without
+                # storing a bearer token in a bookmark or chat message.
+                try:
+                    local_peer = ipaddress.ip_address(self.client_address[0]).is_loopback
+                except ValueError:
+                    local_peer = False
+                local_hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+                if not local_peer or self.headers.get("Host") not in local_hosts:
+                    raise APIError(403, "workbench opener is available only on the service host")
+                if self.command != "GET":
+                    raise APIError(405, "workbench opener accepts GET")
+                workspace = self.context.gateway.state(preferred_session_id=query.get("session_id", [None])[0])
+                self.send_response(303)
+                self.send_header("Location", self._browser_url(workspace["session_id"]))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/mcp":
                 supplied = self.headers.get("Authorization", "")
                 if not hmac.compare_digest(supplied, "Bearer " + self.context.store.control_token):
@@ -335,9 +370,10 @@ def _make_server_unlocked(
                 return self._send_json(201, registry.create(self._read_json()))
 
             if self.command == "GET" and path == "/api/health":
-                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "scene_snapshots_supported": True, "snapshot_comparison_supported": True, "projects_supported": True, "project_id": self.context.project_id, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if gateway.external_review else "appserver", "feedback_transport": gateway.feedback_transport})
+                return self._send_json(200, {"service": "scene-feedback-harness", "status": "ok", "lan_access": browser_access_mode, "scene_revision": store.scene()["revision"], "workspace_gateway": True, "reference_multiview": True, "scene_snapshots_supported": True, "snapshot_comparison_supported": True, "prompt_time_supported": True, "projects_supported": True, "project_id": self.context.project_id, "project_dir": str(project_root), "data_dir": str(store.data_dir), "delivery_mode": "external" if gateway.external_review else "appserver", "feedback_transport": gateway.feedback_transport})
             if self.command == "GET" and path == "/api/workspace/state":
                 state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
+                state["lan_access"] = browser_access_mode
                 state["browser_url"] = self._browser_url(state["session_id"])
                 return self._send_json(200, state)
             if self.command == "GET" and path == "/api/workspace/events":
@@ -542,7 +578,7 @@ def _make_server_unlocked(
                         return self._send_file(store.media_dir / name)
                     raise APIError(404, "file not found")
                 if path == "/":
-                    return self._send_file(web_root / "index.html")
+                    return self._send_file(web_root / "index.html", renew_lan_access=lan_access_required and self._has_lan_access())
                 # Static assets are restricted to the web directory.
                 relative = Path(path.lstrip("/"))
                 candidate = (web_root / relative).resolve()
@@ -724,6 +760,7 @@ def make_server(
     adapter: object | None = None,
     listen_host: str = "127.0.0.1",
     public_base_url: str | None = None,
+    lan_access: str = "link",
 ) -> ThreadingHTTPServer:
     """Create one server for a data directory, releasing its lock on close."""
     data_lock = _DataDirLock(data_dir)
@@ -741,6 +778,7 @@ def make_server(
             adapter=adapter,
             listen_host=listen_host,
             public_base_url=public_base_url,
+            lan_access=lan_access,
         )
     except BaseException:
         data_lock.close()
@@ -765,7 +803,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="3D scene review HTTP server")
     parser.add_argument("--port", type=int, default=18765)
     parser.add_argument("--listen-host", default="127.0.0.1", help="HTTP bind address; use 0.0.0.0 for LAN access")
-    parser.add_argument("--public-base-url", help="Browser URL on the LAN, e.g. http://192.168.1.10:18765; enables access-link authentication")
+    parser.add_argument("--public-base-url", help="Browser URL on the LAN, e.g. http://192.168.1.10:18765")
+    parser.add_argument("--lan-access", choices=("link", "open"), default="link", help="LAN browser access: link requires an access link; open allows direct access")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--web-dir", type=Path, default=DEFAULT_WEB_DIR)
     parser.add_argument("--project-dir", type=Path, default=Path(os.environ.get("SCENE_FEEDBACK_PROJECT_DIR", HERE.parent)))
@@ -789,6 +828,7 @@ def main() -> None:
         shared_thread_id=args.shared_thread_id,
         listen_host=args.listen_host,
         public_base_url=args.public_base_url,
+        lan_access=args.lan_access,
     )
     session_id = server.workspace_gateway.state()["session_id"]
     print(f"Scene feedback UI: {server.browser_url(session_id)}", flush=True)

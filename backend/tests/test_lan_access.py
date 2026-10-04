@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from http.cookies import SimpleCookie
 import io
 import json
 import socket
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -21,6 +23,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import server as server_module  # noqa: E402
 from server import make_server  # noqa: E402
 
 
@@ -101,6 +104,23 @@ class LANAccessTests(unittest.TestCase):
                 data = json.loads(data)
             return response.code, response.headers, data
 
+    def request_at(self, base: str, method: str, path: str, payload: dict | None = None, *, headers: dict | None = None):
+        request_headers = {"Accept": "application/json", **(headers or {})}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(base + path, data=body, headers=request_headers, method=method)
+        try:
+            response = self.opener.open(request, timeout=10)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            data = response.read()
+            if response.headers.get_content_type() == "application/json" and data:
+                data = json.loads(data)
+            return response.code, response.headers, data
+
     def _access_cookie(self) -> str:
         session = self.server.scene_store.create_session()
         path = f"/?session_id={session['session_id']}&access_token={self.browser_token}"
@@ -111,17 +131,35 @@ class LANAccessTests(unittest.TestCase):
         self.assertIn(f"session_id={session['session_id']}", location)
         self.assertNotIn("access_token", location)
         set_cookie = headers.get("Set-Cookie", "")
-        self.assertIn("HttpOnly", set_cookie)
-        self.assertIn("SameSite=Lax", set_cookie)
-        self.assertIn("Path=/", set_cookie)
+        cookies = SimpleCookie()
+        cookies.load(set_cookie)
+        access = cookies[f"scene_feedback_{self.port}_access"]
+        self.assertEqual(access.value, self.browser_token)
+        self.assertEqual(access["max-age"], str(server_module.LAN_ACCESS_COOKIE_MAX_AGE))
+        self.assertTrue(access["httponly"])
+        self.assertEqual(access["samesite"], "Lax")
+        self.assertEqual(access["path"], "/")
+        self.assertFalse(access["secure"])
         return set_cookie.split(";", 1)[0]
 
     def test_default_listener_is_loopback(self) -> None:
         other = make_server(port=0, data_dir=self.root / "other-data", web_dir=self.root / "web", project_dir=self.project)
+        thread = threading.Thread(target=other.serve_forever, daemon=True)
+        thread.start()
         try:
             self.assertEqual(other.server_address[0], "127.0.0.1")
+            base = f"http://127.0.0.1:{other.server_port}"
+            self.assertEqual(self.request_at(base, "GET", "/api/health")[2]["lan_access"], "local")
+            self.assertEqual(self.request_at(base, "GET", "/api/workspace/state")[2]["lan_access"], "local")
         finally:
+            other.shutdown()
             other.server_close()
+            thread.join(timeout=3)
+
+    def test_invalid_lan_access_mode_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "lan_access"):
+            make_server(port=0, data_dir=self.root / "invalid-mode-data", web_dir=self.root / "web",
+                        project_dir=self.project, lan_access="unexpected")
 
     def test_lan_link_bootstraps_authenticated_page_and_media(self) -> None:
         self.assertEqual(self.server.server_address[0], "0.0.0.0")
@@ -142,10 +180,123 @@ class LANAccessTests(unittest.TestCase):
                 status, _, _ = self.request("GET", path, cookie=cookie)
                 self.assertEqual(status, 200)
         status, _, state = self.request("GET", "/api/workspace/state", cookie=cookie)
+        self.assertEqual(state["lan_access"], "link")
+        self.assertEqual(self.request("GET", "/api/health", cookie=cookie)[2]["lan_access"], "link")
         self.assertEqual(state["browser_capability"], self.browser_token)
         self.assertEqual(parse_qs(urlsplit(state["browser_url"]).query)["access_token"], [self.browser_token])
         status, _, asset = self.request("GET", asset_path, cookie=cookie)
         self.assertEqual(asset, model.read_bytes())
+
+    def test_open_lan_needs_no_cookie_and_keeps_control_boundary(self) -> None:
+        port = _free_port()
+        base = f"http://127.0.0.1:{port}"
+        server = make_server(
+            port=port,
+            data_dir=self.root / "open-lan-data",
+            web_dir=self.root / "web",
+            project_dir=self.project,
+            external_review=True,
+            listen_host="0.0.0.0",
+            public_base_url=base,
+            lan_access="open",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for path in ("/", "/app.js", "/api/scene", "/api/health", "/api/workspace/state"):
+                with self.subTest(path=path):
+                    status, headers, _ = self.request_at(base, "GET", path)
+                    self.assertEqual(status, 200)
+                    self.assertIsNone(headers.get("Set-Cookie"))
+
+            status, _, health = self.request_at(base, "GET", "/api/health")
+            self.assertEqual((status, health["lan_access"]), (200, "open"))
+            status, _, state = self.request_at(base, "GET", "/api/workspace/state")
+            self.assertEqual((status, state["lan_access"]), (200, "open"))
+            self.assertEqual(parse_qs(urlsplit(state["browser_url"]).query), {"session_id": [state["session_id"]]})
+            self.assertEqual(parse_qs(urlsplit(server.browser_url(state["session_id"])).query),
+                             {"session_id": [state["session_id"]]})
+
+            status, headers, _ = self.request_at(base, "GET", "/?access_token=obsolete&session_id=" + state["session_id"])
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/?session_id=" + state["session_id"])
+            self.assertIsNone(headers.get("Set-Cookie"))
+            self.assertEqual(self.request_at(base, "GET", headers["Location"])[0], 200)
+
+            scene = self.request_at(base, "GET", "/api/scene")[2]
+            feedback_path = f"/api/sessions/{state['session_id']}/feedback"
+            feedback = {"idempotency_key": "open-lan-feedback-0001", "scene_revision": scene["revision"],
+                        "note": "Move the marked edge"}
+            self.assertEqual(self.request_at(base, "POST", feedback_path, feedback)[0], 403)
+            browser_headers = {"X-Workspace-Capability": state["browser_capability"]}
+            status, _, submitted = self.request_at(base, "POST", feedback_path, feedback, headers=browser_headers)
+            self.assertEqual(status, 201, submitted)
+
+            image = io.BytesIO()
+            Image.new("RGB", (4, 4), "#d86643").save(image, format="PNG")
+            reference = {"name": "mark.png", "data_url": "data:image/png;base64," + base64.b64encode(image.getvalue()).decode("ascii")}
+            reference_path = f"/api/sessions/{state['session_id']}/references"
+            self.assertEqual(self.request_at(base, "POST", reference_path, reference)[0], 403)
+            self.assertEqual(self.request_at(base, "POST", reference_path, reference, headers=browser_headers)[0], 201)
+
+            self.assertEqual(self.request_at(base, "POST", "/api/workspace/publish", {})[0], 403)
+            self.assertEqual(self.request_at(base, "POST", "/api/workspace/publish", {}, headers=browser_headers)[0], 403)
+            self.assertEqual(self.request_at(base, "POST", "/mcp", {})[0], 401)
+            self.assertEqual(self.request_at(base, "GET", "/api/health", headers={"Host": "evil.test"})[0], 403)
+            self.assertEqual(self.request_at(base, "GET", "/api/health", headers={"Origin": "https://evil.test"})[0], 403)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_authenticated_home_renews_cookie_without_renewing_api_or_assets(self) -> None:
+        cookie = self._access_cookie()
+        invalid_cookie = f"scene_feedback_{self.port}_access=invalid"
+        for path, supplied, expected in (("/", "", 403), ("/", invalid_cookie, 403),
+                                         ("/api/workspace/state", "", 403)):
+            with self.subTest(path=path, supplied=supplied):
+                status, headers, _ = self.request("GET", path, cookie=supplied)
+                self.assertEqual(status, expected)
+                self.assertIsNone(headers.get("Set-Cookie"))
+
+        status, headers, _ = self.request("GET", "/", cookie=cookie)
+        self.assertEqual(status, 200)
+        renewed = SimpleCookie()
+        renewed.load(headers.get("Set-Cookie", ""))
+        access = renewed[f"scene_feedback_{self.port}_access"]
+        self.assertEqual(access.value, self.browser_token)
+        self.assertEqual(access["max-age"], str(server_module.LAN_ACCESS_COOKIE_MAX_AGE))
+        self.assertTrue(access["httponly"])
+        self.assertEqual(access["samesite"], "Lax")
+        self.assertEqual(access["path"], "/")
+
+        for path in ("/app.js", "/api/workspace/state"):
+            with self.subTest(path=path):
+                status, headers, _ = self.request("GET", path, cookie=cookie)
+                self.assertEqual(status, 200)
+                self.assertIsNone(headers.get("Set-Cookie"))
+
+    def test_local_opener_uses_saved_session_then_bootstraps_clean_page(self) -> None:
+        session_id = self.server.scene_store.workspace()["session_id"]
+        status, headers, body = self.request("GET", f"/open?session_id={session_id}")
+        self.assertEqual((status, body), (303, b""))
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+        self.assertIsNone(headers.get("Set-Cookie"))
+        access_url = urlsplit(headers["Location"])
+        self.assertEqual(access_url.netloc, urlsplit(self.base).netloc)
+        self.assertEqual(access_url.path, "/")
+        access_query = parse_qs(access_url.query)
+        self.assertEqual(access_query["session_id"], [session_id])
+        self.assertEqual(access_query["access_token"], [self.browser_token])
+
+        status, headers, body = self.request("GET", access_url.path + "?" + access_url.query)
+        self.assertEqual((status, body), (303, b""))
+        self.assertEqual(headers["Location"], f"/?session_id={session_id}")
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        status, _, page = self.request("GET", headers["Location"], cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertIn(b"LAN viewer", page)
 
     def test_lan_writes_still_need_capability_and_origin(self) -> None:
         cookie = self._access_cookie()
@@ -209,6 +360,97 @@ class LANAccessTests(unittest.TestCase):
             self.assertEqual(status, 303)
             cookie = headers["Set-Cookie"].split(";", 1)[0]
             self.assertEqual(get("/api/health", public_host, cookie)[0], 200)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_local_opener_rejects_public_host_remote_peer_and_cross_origin(self) -> None:
+        port = _free_port()
+        public_host = f"lan.test:{port}"
+        server = make_server(
+            port=port,
+            data_dir=self.root / "opener-data",
+            web_dir=self.root / "web",
+            project_dir=self.project,
+            external_review=True,
+            listen_host="0.0.0.0",
+            public_base_url=f"http://{public_host}",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            token = (self.root / "opener-data" / "browser_token").read_text(encoding="ascii").strip()
+            local_host = f"127.0.0.1:{port}"
+
+            def get(path: str, *, host: str, origin: str = "", cookie: str = ""):
+                headers = {"Host": host}
+                if origin:
+                    headers["Origin"] = origin
+                if cookie:
+                    headers["Cookie"] = cookie
+                request = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+                try:
+                    response = self.opener.open(request, timeout=10)
+                except urllib.error.HTTPError as exc:
+                    response = exc
+                with response:
+                    return response.code, response.headers, response.read()
+
+            status, headers, _ = get(f"/?access_token={token}", host=public_host)
+            self.assertEqual(status, 303)
+            cookie = headers["Set-Cookie"].split(";", 1)[0]
+
+            def assert_denied(status, headers, body):
+                self.assertEqual(status, 403)
+                self.assertIsNone(headers.get("Location"))
+                self.assertIsNone(headers.get("Set-Cookie"))
+                self.assertFalse(token in str(headers) + body.decode("utf-8", errors="replace"))
+
+            assert_denied(*get("/open", host=public_host, cookie=cookie))
+            assert_denied(*get("/open", host=local_host, origin="https://other.test", cookie=cookie))
+
+            original_get_request = server.get_request
+
+            def remote_get_request():
+                connection, (_, peer_port) = original_get_request()
+                return connection, ("198.51.100.25", peer_port)
+
+            # Simulate a non-loopback TCP peer even when the test runner has no LAN interface.
+            with patch.object(server, "get_request", side_effect=remote_get_request):
+                assert_denied(*get("/open", host=local_host, cookie=cookie))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_https_public_url_marks_persistent_cookie_secure(self) -> None:
+        port = _free_port()
+        server = make_server(
+            port=port,
+            data_dir=self.root / "https-data",
+            web_dir=self.root / "web",
+            project_dir=self.project,
+            external_review=True,
+            listen_host="0.0.0.0",
+            public_base_url=f"https://127.0.0.1:{port}",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            token = (self.root / "https-data" / "browser_token").read_text(encoding="ascii").strip()
+            request = urllib.request.Request(f"http://127.0.0.1:{port}/?access_token={token}")
+            try:
+                response = self.opener.open(request, timeout=10)
+            except urllib.error.HTTPError as exc:
+                response = exc
+            with response:
+                self.assertEqual(response.code, 303)
+                parsed = SimpleCookie()
+                parsed.load(response.headers["Set-Cookie"])
+                access = parsed[f"scene_feedback_{port}_access"]
+                self.assertTrue(access["secure"])
+                self.assertEqual(access["max-age"], str(server_module.LAN_ACCESS_COOKIE_MAX_AGE))
         finally:
             server.shutdown()
             server.server_close()

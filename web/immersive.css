@@ -68,7 +68,6 @@ html[data-layout=immersive] { overflow: hidden; }
 [data-layout=immersive] .reference-pane #reference-title { max-width: 120px; }
 [data-layout=immersive] #immersive-reference-close { display: inline-flex; width: 28px; height: 28px; margin-left: auto; justify-content: center; align-items: center; border-radius: 9px; color: var(--muted); }
 [data-layout=immersive] #immersive-reference-close:hover { color: var(--ink); background: var(--surface-hover,#17171508); }
-[data-layout=immersive] .scene-snapshots { top: var(--immersive-content-top,196px); left: auto; right: 20px; max-width: min(48vw, 680px); }
 [data-layout=immersive] .scene-notice { position: fixed; z-index: 23; right: 20px; top: calc(var(--immersive-content-top,196px) + 54px); }
 [data-layout=immersive] .timeline-panel { position: fixed; z-index: 24; left: 20px; right: 20px; bottom: 14px; width: auto; padding: 8px 12px; border-radius: 16px; }
 [data-layout=immersive] .feedback-panel,
@@ -100,8 +99,6 @@ html[data-layout=immersive] { overflow: hidden; }
   [data-layout=immersive] .scene-pane .pane-heading { width: 100%; }
   [data-layout=immersive] .scene-pane .pane-actions { width: 100%; justify-content: space-between; }
   [data-layout=immersive] .reference-pane { left: 10px; width: calc(100vw - 20px); height: 40dvh; max-height: calc(100dvh - var(--immersive-content-top,240px) - var(--immersive-bottom,18px) - 12px); }
-  [data-layout=immersive] .scene-snapshots { right: 10px; max-width: calc(100vw - 20px); }
-  [data-layout=immersive][data-reference-visible=true] .scene-snapshots { visibility: hidden; pointer-events: none; }
   [data-layout=immersive] .timeline-panel { left: 10px; right: 10px; bottom: 10px; }
   [data-layout=immersive] .feedback-panel { max-width: calc(100vw - 20px); }
   [data-layout=immersive] #scene-hint { display: none; }
