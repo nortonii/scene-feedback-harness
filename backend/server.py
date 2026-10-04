@@ -36,6 +36,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = HERE / "data"
 DEFAULT_WEB_DIR = HERE.parent / "web"
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
+LAN_ACCESS_COOKIE_MAX_AGE = 30 * 24 * 60 * 60
 SESSION_ROUTE = re.compile(r"^/api/sessions/([0-9a-f]{32})(?:/(feedback|cancel|references|clip))?$")
 MEDIA_ROUTE = re.compile(r"^/(assets|screenshots|media)/([0-9a-f]{32}\.(?:glb|png|jpg))$")
 WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confirm$")
@@ -213,6 +214,15 @@ def _make_server_unlocked(
             # peer cannot bypass access control by forging a loopback Host header.
             return not loopback_peer or self.headers.get("Host") == urlsplit(public_base_url).netloc
 
+        def _lan_access_cookie(self) -> str:
+            cookie = (
+                f"scene_feedback_{self.server.server_port}_access={store.browser_token}; "
+                f"Max-Age={LAN_ACCESS_COOKIE_MAX_AGE}; HttpOnly; SameSite=Lax; Path=/"
+            )
+            if urlsplit(public_base_url).scheme == "https":
+                cookie += "; Secure"
+            return cookie
+
         def _bootstrap_lan_access(self, path: str, query: dict[str, list[str]]) -> bool:
             if not lan_mode or self.command != "GET" or path != "/" or "access_token" not in query:
                 return False
@@ -220,12 +230,9 @@ def _make_server_unlocked(
             if len(submitted) != 1 or not registry.accepts_browser_token(submitted[0]):
                 raise APIError(403, "invalid workbench access link")
             location = self.project_prefix + "/" + (f"?{urlencode(query, doseq=True)}" if query else "")
-            cookie = f"scene_feedback_{self.server.server_port}_access={store.browser_token}; HttpOnly; SameSite=Lax; Path=/"
-            if urlsplit(public_base_url).scheme == "https":
-                cookie += "; Secure"
             self.send_response(303)
             self.send_header("Location", location)
-            self.send_header("Set-Cookie", cookie)
+            self.send_header("Set-Cookie", self._lan_access_cookie())
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Length", "0")
@@ -277,7 +284,7 @@ def _make_server_unlocked(
             self.end_headers()
             self.wfile.write(data)
 
-        def _send_file(self, file_path: Path) -> None:
+        def _send_file(self, file_path: Path, *, renew_lan_access: bool = False) -> None:
             if not file_path.is_file():
                 raise APIError(404, "file not found")
             content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
@@ -288,6 +295,8 @@ def _make_server_unlocked(
             self.send_header("Referrer-Policy", "no-referrer")
             if lan_mode:
                 self.send_header("Cache-Control", "no-store")
+            if renew_lan_access:
+                self.send_header("Set-Cookie", self._lan_access_cookie())
             self.end_headers()
             with file_path.open("rb") as handle:
                 while chunk := handle.read(1024 * 1024):
@@ -298,6 +307,26 @@ def _make_server_unlocked(
             parsed = urlsplit(self.path)
             path = self._select_context(unquote(parsed.path))
             query = parse_qs(parsed.query)
+            if path == "/open":
+                # A local desktop shortcut can restore browser access without
+                # storing a bearer token in a bookmark or chat message.
+                try:
+                    local_peer = ipaddress.ip_address(self.client_address[0]).is_loopback
+                except ValueError:
+                    local_peer = False
+                local_hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+                if not local_peer or self.headers.get("Host") not in local_hosts:
+                    raise APIError(403, "workbench opener is available only on the service host")
+                if self.command != "GET":
+                    raise APIError(405, "workbench opener accepts GET")
+                workspace = self.context.gateway.state(preferred_session_id=query.get("session_id", [None])[0])
+                self.send_response(303)
+                self.send_header("Location", self._browser_url(workspace["session_id"]))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if path == "/mcp":
                 supplied = self.headers.get("Authorization", "")
                 if not hmac.compare_digest(supplied, "Bearer " + self.context.store.control_token):
@@ -542,7 +571,7 @@ def _make_server_unlocked(
                         return self._send_file(store.media_dir / name)
                     raise APIError(404, "file not found")
                 if path == "/":
-                    return self._send_file(web_root / "index.html")
+                    return self._send_file(web_root / "index.html", renew_lan_access=lan_mode and self._has_lan_access())
                 # Static assets are restricted to the web directory.
                 relative = Path(path.lstrip("/"))
                 candidate = (web_root / relative).resolve()

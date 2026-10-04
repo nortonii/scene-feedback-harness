@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+from http.cookies import SimpleCookie
 import json
 from pathlib import Path
 import socket
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -282,17 +284,60 @@ class ProjectTests(unittest.TestCase):
         self.start_server(lan=True)
         context = self.server.project_registry.get(context.project_id)
         prefix = "/p/" + context.project_id
+        self.assertEqual(self.request("GET", prefix + "/")[0], 403)
         self.assertEqual(self.request("GET", prefix + "/api/workspace/state")[0], 403)
         status, _, headers = self.request("GET", prefix + "/?access_token=" + context.store.browser_token)
         self.assertEqual(status, 303)
         cookie = headers["Set-Cookie"].split(";", 1)[0]
         self.assertEqual(cookie.split("=", 1)[1], self.root_context.store.browser_token)
+        parsed = SimpleCookie()
+        parsed.load(headers["Set-Cookie"])
+        self.assertEqual(parsed[f"scene_feedback_{self.server.server_port}_access"]["max-age"],
+                         str(server_module.LAN_ACCESS_COOKIE_MAX_AGE))
         self.assertEqual(headers["Location"], prefix + "/")
-        self.assertEqual(self.request("GET", prefix + "/api/workspace/state", cookie=cookie)[0], 200)
+        status, _, page_headers = self.request("GET", prefix + "/", cookie=cookie)
+        self.assertEqual(status, 200)
+        renewed = SimpleCookie()
+        renewed.load(page_headers.get("Set-Cookie", ""))
+        self.assertEqual(renewed[f"scene_feedback_{self.server.server_port}_access"].value,
+                         self.root_context.store.browser_token)
+        self.assertEqual(renewed[f"scene_feedback_{self.server.server_port}_access"]["max-age"],
+                         str(server_module.LAN_ACCESS_COOKIE_MAX_AGE))
+        status, _, api_headers = self.request("GET", prefix + "/api/workspace/state", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertNotIn("Set-Cookie", api_headers)
         self.assertEqual(self.request("GET", "/api/projects", cookie=cookie)[0], 200)
         self.assertEqual(self.request("POST", prefix + "/api/projects", {"request_id": uuid.uuid4().hex},
                                      cookie=cookie, capability=self.root_context.store.browser_token)[0], 403)
         self.assertEqual(self.request("GET", prefix + "/api/projects", cookie=cookie, origin="https://other.test")[0], 403)
+
+    def test_child_local_opener_preserves_project_and_current_session(self):
+        _, created, _ = self.create(name="Water Tanker")
+        project_id = created["project"]["project_id"]
+        self.stop_server()
+        self.start_server(lan=True)
+        context = self.server.project_registry.get(project_id)
+        session_id = context.store.workspace()["session_id"]
+        prefix = "/p/" + project_id
+
+        status, _, headers = self.request("GET", prefix + f"/open?session_id={session_id}")
+        self.assertEqual(status, 303)
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        self.assertEqual(headers.get("Referrer-Policy"), "no-referrer")
+        access_url = urlsplit(headers["Location"])
+        self.assertEqual(access_url.path, prefix + "/")
+        query = parse_qs(access_url.query)
+        self.assertEqual(query["session_id"], [session_id])
+        self.assertTrue(self.server.project_registry.accepts_browser_token(query["access_token"][0]))
+
+        status, _, bootstrap = self.request("GET", access_url.path + "?" + access_url.query)
+        self.assertEqual(status, 303)
+        self.assertEqual(bootstrap["Location"], prefix + f"/?session_id={session_id}")
+        cookie = bootstrap["Set-Cookie"].split(";", 1)[0]
+        status, page, _ = self.request("GET", bootstrap["Location"], cookie=cookie)
+        self.assertEqual((status, page), (200, b"<html>viewer</html>"))
+        self.assertEqual(self.request("GET", prefix + "/api/workspace/state", cookie=cookie)[1]["session_id"], session_id)
 
     def test_closed_registry_rejects_new_creations(self):
         self.server.project_registry.close()
