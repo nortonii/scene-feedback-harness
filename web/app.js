@@ -68,7 +68,6 @@ const ui = {
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
-  viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
   animationChoices:id('animation-choices'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
@@ -138,7 +137,7 @@ const state = {
   restoredSceneRevision:null, restoredModelUrl:null
 };
 Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
-  activeViewId:null, pendingViewId:null, referenceClipSignature:null, viewOptionsSignature:null,
+  activeViewId:null, pendingViewId:null, referenceClipSignature:null,
   animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
   seekGeneration:0, seeking:false, timelineTarget:null, scrubRequest:null, timelineSaveTimer:null});
 
@@ -2662,7 +2661,7 @@ function setReferences(references) {
 }
 function activeReference() { return clipReference() || state.references.find((ref) => ref.id === state.activeReferenceId); }
 function renderReferenceStrip() {
-  renderReferenceViews();
+  const views = referenceViews(), representedViews = new Set();
   ui.referenceStrip.replaceChildren();
   ui.referenceStrip.classList.toggle('has-reference-clip', !!state.referenceClip && state.references.length > 0);
   if (!state.references.length && !state.referenceClip) {
@@ -2673,9 +2672,11 @@ function renderReferenceStrip() {
     return;
   }
   for (const ref of state.references) {
-    const view = viewForReferenceImage(referenceViews(), ref);
+    const view = viewForReferenceImage(views, ref);
     const button = document.createElement('button');
     button.type = 'button';
+    button.dataset.referenceId = ref.id;
+    if (view) { button.dataset.viewId = view.clip_id; representedViews.add(view.clip_id); }
     const selected = view && state.clipEnabled ? view.clip_id === (state.pendingViewId || state.activeViewId) : ref.id === state.activeReferenceId;
     button.className = 'thumb' + (selected ? ' active' : '');
     button.title = ref.name || '参考图';
@@ -2684,13 +2685,8 @@ function renderReferenceStrip() {
     image.src = resourceURL(ref.url);
     image.alt = '';
     button.append(image);
-    if (referenceCamera(ref)) {
-      const cameraBadge = document.createElement('span');
-      cameraBadge.className = 'thumb-camera';
-      cameraBadge.textContent = view ? '同步' : '机位';
-      button.append(cameraBadge);
-      button.title = (ref.name || '参考图') + (view ? ' · 切换同步机位，保持当前时间' : ' · 有相机位姿');
-    }
+    if (view) button.title = (ref.name || '参考图') + ' · 切换机位，保持当前时间';
+    else if (referenceCamera(ref)) button.title = (ref.name || '参考图') + ' · 有相机位姿';
     const count = state.annotations.filter((a) => a.pane === 'reference' && a.reference_image_id === ref.id).length;
     if (count) {
       const badge = document.createElement('span');
@@ -2719,6 +2715,24 @@ function renderReferenceStrip() {
     });
     ui.referenceStrip.append(button);
   }
+  // Every selectable video view needs an explicit entry, including views with
+  // no calibration or an ambiguous match to a static reference thumbnail.
+  for (const view of views.length > 1 ? views : []) {
+    if (representedViews.has(view.clip_id)) continue;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'thumb'; button.dataset.viewId = view.clip_id;
+    button.title = (view.name || '机位') + ' · 切换机位，保持当前时间';
+    button.setAttribute('aria-label', '切换机位 ' + (view.name || '机位'));
+    const image = document.createElement('img');
+    image.src = resourceURL(view.frames[0].url); image.alt = ''; button.append(image);
+    button.addEventListener('click', () => {
+      if (!editable()) return;
+      state.referenceZoom = 1; state.referencePan = {x:0,y:0};
+      seekTimeline(state.timelineTarget ?? state.time, {viewId:view.clip_id, preserveTime:true});
+    });
+    ui.referenceStrip.append(button);
+  }
+  renderReferenceViews();
 }
 function showActiveReference() {
   const ref = activeReference();
@@ -3430,19 +3444,14 @@ function viewFrameAtTime(view, time) {
   return referenceViews().length > 1 ? nearestFrameAtTime(view?.frames, time) : frameAtTime(view?.frames, time);
 }
 function renderReferenceViews() {
-  const views = referenceViews();
-  const signature = JSON.stringify(views.map((view) => [view.clip_id, view.name]));
-  if (state.viewOptionsSignature !== signature) {
-    state.viewOptionsSignature = signature;
-    ui.viewSelect.replaceChildren();
-    for (const view of views) {
-      const option = document.createElement('option'); option.value = view.clip_id;
-      option.textContent = view.name; ui.viewSelect.append(option);
-    }
+  const viewId = state.pendingViewId || state.activeViewId;
+  for (const button of ui.referenceStrip.querySelectorAll('button.thumb')) {
+    const selected = button.dataset.viewId && state.clipEnabled ? button.dataset.viewId === viewId
+      : button.dataset.referenceId === state.activeReferenceId;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    button.disabled = !editable();
   }
-  ui.viewControl.classList.toggle('hidden', views.length < 2);
-  ui.viewSelect.value = state.pendingViewId || state.activeViewId || state.referenceClip?.clip_id || '';
-  ui.viewSelect.disabled = !editable();
 }
 function timelineDuration() {
   return state.referenceClip ? Math.max(...referenceViews().map((view) => view.duration_sec))
@@ -3934,7 +3943,6 @@ function bindTimelineEvents() {
   });
   ui.seek.addEventListener('input', () => scrubTimeline(Number(ui.seek.value)));
   ui.seek.addEventListener('change', () => scrubTimeline(Number(ui.seek.value), {final:true}));
-  ui.viewSelect.addEventListener('change', () => seekTimeline(state.timelineTarget ?? state.time, {viewId:ui.viewSelect.value, preserveTime:true}));
   id('timeline-prev').addEventListener('click', () => stepReferenceTimeline(-1));
   id('timeline-next').addEventListener('click', () => stepReferenceTimeline(1));
 }
@@ -4087,7 +4095,6 @@ function updateMode() {
   feedbackEvidence?.refresh();
   updateAnnotationHistory();
   renderPromptReferenceControls();
-  id('scene-annotation-toggle').disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
   const context = id('snapshot-context');

@@ -90,7 +90,7 @@ def main():
 
                 first_mark=draw_mark(page,'reference','rectangle')
                 current=next(c for c in candidates(page) if c['descriptor']['sourceType']=='reference')
-                page.locator('#reference-view-select').select_option(side['clip_id'])
+                page.locator('#reference-strip button[data-view-id="' + side['clip_id'] + '"]').first.click()
                 page.locator('#timeline-seek').focus();page.locator('#timeline-seek').press('End')
                 page.wait_for_function('(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking',arg=side['frames'][-1]['id'])
                 assert reject_stale(page,current)

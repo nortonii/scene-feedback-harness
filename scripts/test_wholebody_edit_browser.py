@@ -328,10 +328,10 @@ def main():
                 viewport=page.locator("#viewport canvas").bounding_box(); assert viewport
                 page.mouse.move(viewport["x"]+viewport["width"]*.5,viewport["y"]+viewport["height"]*.45); page.mouse.down()
                 page.mouse.move(viewport["x"]+viewport["width"]*.65,viewport["y"]+viewport["height"]*.6,steps=8); page.mouse.up()
-                page.locator("#reference-view-select").select_option(side["clip_id"]); wait_frame(page,side["frames"][0]["id"])
+                page.locator('#reference-strip button[data-view-id="' + side["clip_id"] + '"]').first.click(); wait_frame(page,side["frames"][0]["id"])
                 assert page.evaluate("structuredClone(__wholeEdit.state.poseEdits)")==patches
                 assert not page.locator("#human-pose-overlay").evaluate("el=>el.classList.contains('pose-editing')")
-                page.locator("#reference-view-select").select_option(primary["clip_id"]); wait_frame(page,primary["frames"][0]["id"])
+                page.locator('#reference-strip button[data-view-id="' + primary["clip_id"] + '"]').first.click(); wait_frame(page,primary["frames"][0]["id"])
                 page.reload(); ready(page); wait_frame(page,primary["frames"][0]["id"])
                 assert page.evaluate("structuredClone(__wholeEdit.state.poseEdits)")==patches
                 assert page.locator("#pose-edit-panel").is_visible()
@@ -398,7 +398,7 @@ def main():
                 body_point=next(point for point in imported["keypoints"] if point["name"]=="left_shoulder")
                 assert body_point["score"]==0 and body_point["in_frame"] and body_point["manual_source"]=="manual_2d"
                 lost_patches=pose_patches(page)
-                page.locator("#reference-view-select").select_option(side["clip_id"]); wait_frame(page,side["frames"][1]["id"])
+                page.locator('#reference-strip button[data-view-id="' + side["clip_id"] + '"]').first.click(); wait_frame(page,side["frames"][1]["id"])
                 assert pose_patches(page)==lost_patches
                 assert not page.locator("#human-pose-overlay").evaluate("el=>el.classList.contains('pose-editing')")
                 print("PASS: a new detector-lost frame accepts explicit body/hand placement without fabricated score/bbox or cross-view source rebinding",flush=True)

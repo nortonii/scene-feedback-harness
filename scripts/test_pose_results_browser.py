@@ -301,7 +301,7 @@ def main() -> None:
                 print("PASS: pending frame evidence leaves an empty overlay instead of a stale or historical body", flush=True)
 
                 close_results(page)
-                page.locator("#reference-view-select").select_option(secondary["clip_id"])
+                page.locator('#reference-strip button[data-view-id="' + secondary["clip_id"] + '"]').first.click()
                 page.locator("#timeline-seek").focus()
                 page.locator("#timeline-seek").press("End")
                 expected_b = secondary["frames"][-1]["id"]
@@ -326,7 +326,7 @@ def main() -> None:
                 assert page.locator("#human-pose-jobs .human-pose-edit-draft").count() == 1
                 close_results(page)
                 page.locator("#pose-edit-finish").click()
-                page.locator("#reference-view-select").select_option(primary["clip_id"])
+                page.locator('#reference-strip button[data-view-id="' + primary["clip_id"] + '"]').first.click()
                 expected_a = primary["frames"][-1]["id"]
                 page.wait_for_function("(x)=>{const s=__poseCheck.state,j=s.humanJobs.find(j=>j.job_id===x.job); return !s.seeking && s.activeViewId===x.view && __poseCheck.humanCurrentFrame(j)?.reference_id===x.ref}",
                     arg={"job": job_id, "view": primary["clip_id"], "ref": expected_a})

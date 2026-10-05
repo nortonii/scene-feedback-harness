@@ -88,8 +88,8 @@ def assert_clean_visual_headers(page):
     for selector in ("#freeze-button", "#human-pose-import"):
         expect(page.locator(selector)).to_have_count(0)
     expect(page.locator(".pane-head #human-pose-panel")).to_have_count(0)
-    expect(page.locator(".pane-head #scene-annotation-toggle")).to_have_count(1)
-    for text in ("视角", "标注截图", "人体结果"):
+    expect(page.locator(".pane-head #scene-annotation-toggle")).to_have_count(0)
+    for text in ("视角", "标注", "标注截图", "人体结果"):
         expect(page.locator(".pane-head").get_by_text(text, exact=True)).to_have_count(0)
 
 
@@ -955,7 +955,7 @@ def verify_project_isolation(page, server, screenshots):
         wait_ready(page)
         expect(page.locator("#feedback-note")).to_have_value(root_note)
         assert abs(page.locator("#chat-dock").bounding_box()["height"] - root_dock_height) < 2
-        expect(page.locator("#reference-view-select")).to_be_visible()
+        expect(page.locator("#reference-strip button[data-view-id]").first).to_be_visible()
         expect(page.locator("#compare-opacity")).to_have_value("0")
         expect(page.locator("#compare-image")).to_be_hidden()
         expect(page.locator("#conversation")).to_contain_text(root_event_marker)
@@ -1437,11 +1437,11 @@ def main():
                 control(page, "#confirm-clear-annotations").click()
                 passed("explicit capture saves the current dynamic frame; snapshot browsing restores the last operated moment without creating another")
 
-                expect(page.locator("#reference-view-select")).to_be_visible()
+                expect(page.locator("#reference-strip button[data-view-id]").first).to_be_visible()
                 before_view_time = page.locator("#timeline-seek").input_value()
                 secondary_id = clip["views"][0]["clip_id"]
-                page.locator("#reference-view-select").select_option(secondary_id)
-                expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
+                page.locator('#reference-strip button[data-view-id="' + secondary_id + '"]').first.click()
+                expect(page.locator(f'#reference-strip button[data-view-id="{secondary_id}"]').first).to_have_attribute("aria-pressed", "true")
                 expect(page.locator("#reference-title")).to_have_text("同步侧面机位")
                 expect(page.locator("#reference-frame-label")).to_contain_text("2 /")
                 expect(page.locator("#compare-opacity")).to_have_value("0")
@@ -1449,7 +1449,7 @@ def main():
                 assert page.locator("#timeline-seek").input_value() == before_view_time
                 page.reload()
                 wait_ready(page)
-                expect(page.locator("#reference-view-select")).to_have_value(secondary_id)
+                expect(page.locator(f'#reference-strip button[data-view-id="{secondary_id}"]').first).to_have_attribute("aria-pressed", "true")
                 expect(page.locator("#compare-opacity")).to_have_value("0")
                 expect(page.locator("#compare-image")).to_be_hidden()
                 assert page.locator("#timeline-seek").input_value() == before_view_time

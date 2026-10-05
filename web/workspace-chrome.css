@@ -146,11 +146,6 @@
 }
 .scene-pane .pane-actions > .popover[open] > summary,
 .scene-pane .pane-actions > .popover > summary:hover { text-decoration: none; background: var(--surface-hover); }
-#scene-annotation-toggle[aria-expanded=true] {
-  background: var(--ink);
-  color: var(--paper);
-  border-color: transparent;
-}
 /* Settings share the same quiet floating surface as the camera menu. */
 .compare-settings {
   border-color: var(--surface-border);
