@@ -57,7 +57,7 @@ def main():
         errors=[];posts=[]
         try:
             with sync_playwright() as pw:
-                browser=pw.chromium.launch(headless=True,**({'executable_path':args.browser_executable} if args.browser_executable else {}),args=['--no-sandbox','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'])
+                browser=pw.chromium.launch(headless=True,**({'executable_path':args.browser_executable} if args.browser_executable else {}),args=['--no-sandbox','--no-proxy-server','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'])
                 context=browser.new_context(viewport={'width':1440,'height':950})
                 legacy={'feedbackScope':'range','rangeStart':'0','rangeEnd':'1','note':''}
                 context.add_init_script('const k='+json.dumps('astra-visual-draft:'+session)+';if(!localStorage.getItem(k))localStorage.setItem(k,'+json.dumps(json.dumps(legacy))+');')
@@ -72,6 +72,8 @@ def main():
                 assert page.locator('.prompt-mention-option[data-mention-kind="time"]').count()>=2
                 choose(page,'当前参考帧')
                 assert '正面' in field.input_value() and '0.000' in field.input_value()
+                assert '片段参考0.000s' in field.input_value() and '#1' in field.input_value()
+                assert '机位「' not in field.input_value() and '第 1 帧' not in field.input_value()
                 assert '[[object:' not in canonical(page), 'A source name must not register a prompt object reference'
                 assert not posts
                 print('PASS: legacy range fields disappear; slash inserts a precise current reference time into prose without submitting',flush=True)
@@ -81,6 +83,7 @@ def main():
                 assert '[[node:fixture_model:' in canonical(page) and '【Door】' in field.input_value()
                 query(page,'整个');field.press('Control+Enter')
                 assert '整个片段' in field.input_value() and '1.500' in field.input_value()
+                assert '0.000–1.500s · 全部机位' in field.input_value()
                 assert not posts
                 first_note=field.input_value()
                 print('PASS: time options and compact @ part references coexist; Ctrl+Enter picks an option instead of sending',flush=True)
@@ -95,6 +98,15 @@ def main():
                 control(page,'#capture-scene-button').click()
                 page.wait_for_function("__mentionCheck.state.sceneView==='snapshot'")
                 scene_mark=draw_mark(page,'scene','arrow')
+                # Another real camera pose at the same clip time joins the
+                # same option. Its screenshot caption must remain visible,
+                # while the shared source frame appears just once.
+                control(page,'#scene-live-card').click()
+                viewport=page.locator('#viewport canvas').bounding_box();assert viewport
+                page.mouse.move(viewport['x']+viewport['width']*.5,viewport['y']+viewport['height']*.5);page.mouse.down()
+                page.mouse.move(viewport['x']+viewport['width']*.6,viewport['y']+viewport['height']*.56,steps=6);page.mouse.up()
+                control(page,'#capture-scene-button').click()
+                page.wait_for_function("__mentionCheck.state.sceneView==='snapshot'")
                 rows=candidates(page)
                 assert all(c['kind']=='time' for c in rows)
                 for mark in (first_mark,side_mark,scene_mark):
@@ -103,15 +115,27 @@ def main():
                     field.press('Escape')
                 scene=next(c for c in rows if c['descriptor']['sourceType']=='snapshot')
                 assert '1.500' in scene['label']+' '+scene['detail'] and '1.000' in scene['label']+' '+scene['detail']
+                assert '片段1.500s · 参考1.000s' in scene['text'] and '#3' in scene['text']
+                assert scene['text'].startswith('截图') and '场景截图（' not in scene['text']
+                same_time=next(c for c in rows if c['descriptor']['sourceType']=='round' and len(c['descriptor']['members'])>=2)
+                assert same_time['text'].count('参考1.000s')==1 and same_time['text'].count('#3')==1,same_time['text']
+                for member in same_time['descriptor']['members']:
+                    assert str(int(member['name'].split()[-1])) in same_time['text'],same_time['text']
+                assert all(mark['name'].replace(' ','') in same_time['text'] or
+                    mark['name'].startswith('标记 ') and mark['name'].split()[-1] in same_time['text']
+                    for mark in same_time['descriptor']['marks']),same_time['text']
+                current_reference=next(c for c in rows if c['descriptor']['sourceType']=='reference')
+                assert current_reference['text'].startswith('片段参考1.000s') and '（场景1.500s）' in current_reference['text']
                 query(page,'本轮',note=first_note+' ');choose(page,'本轮标记时段')
                 assert '0.000' in field.input_value() and '1.500' in field.input_value()
+                assert '片段0.000–1.500s' in field.input_value() and '正面' in field.input_value() and '侧面' in field.input_value()
                 frozen=page.evaluate('JSON.stringify({snapshot:__mentionCheck.state.snapshot,camera:__mentionCheck.cameraData(),time:__mentionCheck.state.time,marks:__mentionCheck.state.annotations})')
                 query(page,'当前参考帧');choose(page,'当前参考帧')
                 assert '侧面' in field.input_value() and '1.000' in field.input_value()
                 assert canonical(page).count('[[node:fixture_model:')==1 and '[[object:' not in canonical(page), 'Source names must not expand existing compact aliases or protocol tokens'
                 assert page.evaluate('JSON.stringify({snapshot:__mentionCheck.state.snapshot,camera:__mentionCheck.cameraData(),time:__mentionCheck.state.time,marks:__mentionCheck.state.annotations})')==frozen
                 draft=field.input_value()
-                print('PASS: cross-view marks generate time options and spans; scene time and sample time stay distinct without moving the viewport',flush=True)
+                print('PASS: compact cross-view times preserve exact scene/sample distinctions, endpoints and screenshot captions; duplicate source frames appear once without moving the viewport',flush=True)
 
                 query(page,first_mark['name'],note='')
                 old=page.evaluate('__mentionCheck.promptMentions.candidates[0]')

@@ -5040,11 +5040,19 @@ function promptTimeMoment(moment) {
     name:moment.name || '',animationClips:moment.animation_clips || []};
 }
 function promptTimeFrameText(member) {
-  return member.frameId ? `参考采样 ${promptTimeSeconds(member.referenceTimeSec)} s，机位「${member.viewName}」，第 ${member.frameIndex+1} 帧`
-    : member.referenceId ? '静态参考图随场景时刻保留' : '场景时间轴';
+  if (!member.frameId) return member.referenceId ? '静态参考' : '场景动画';
+  const sample=Math.abs(member.referenceTimeSec-member.timeSec)>1e-7 ? `参考${promptTimeSeconds(member.referenceTimeSec)}s · ` : '';
+  return sample+`${member.viewName || '参考'} #${member.frameIndex+1}`;
 }
-function promptTimeMomentText(member) {
-  return `片段场景时间 ${promptTimeSeconds(member.timeSec)} s；${promptTimeFrameText(member)}`;
+function promptTimeMomentText(members) {
+  const list=Array.isArray(members) ? members : [members];
+  return `片段${promptTimeSeconds(list[0].timeSec)}s · `+[...new Set(list.map(promptTimeFrameText))].join(' / ');
+}
+function promptTimeNames(names) {
+  const unique=[...new Set(names.filter(Boolean))];
+  const numbered=unique.map(name => /^(标记|截图|点|方框|线段|箭头|文字|笔迹)\s*(\d+)$/.exec(name));
+  return numbered.length && numbered.every(item => item && item[1] === numbered[0][1])
+    ? numbered[0][1]+numbered.map(item => item[2]).join('/') : unique.join(' / ');
 }
 function getPromptTimeCandidates() {
   if (!editable() || !dynamicEnabled() || state.seeking || state.pendingViewId || state.timelineTarget !== null) return [];
@@ -5055,18 +5063,19 @@ function getPromptTimeCandidates() {
   const frame=clipReference(), view=referenceView();
   if (frame && view && Number.isFinite(frame.time_sec) && referencePixelsReady()) {
     const index=view.frames.findIndex(item => item.id === frame.id);
-    const frameText=`片段时间 ${promptTimeSeconds(frame.time_sec)} s，机位「${view.name}」，第 ${index+1} 帧`;
-    const sceneText=Math.abs(frame.time_sec-state.time)>1e-7 ? `；场景时间 ${promptTimeSeconds(state.time)} s` : '';
-    add('time:reference:'+view.clip_id+':'+frame.id,'当前参考帧 · '+frameText,
-      '真实参考采样'+sceneText,'reference',
+    const frameText=`片段参考${promptTimeSeconds(frame.time_sec)}s · ${view.name} #${index+1}`;
+    const sceneText=Math.abs(frame.time_sec-state.time)>1e-7 ? `（场景${promptTimeSeconds(state.time)}s）` : '';
+    add('time:reference:'+view.clip_id+':'+frame.id,'当前参考帧 · '+promptTimeSeconds(frame.time_sec)+'s',
+      `${view.name} #${index+1}`+sceneText,'reference',
       {clipId:state.referenceClip.clip_id,viewId:view.clip_id,viewName:view.name,referenceId:frame.id,frameId:frame.id,
         frameIndex:index,timeSec:frame.time_sec,sceneTimeSec:state.time,referenceUrl:frame.url},
-      `参考帧（${frameText}${sceneText}）`,[view.name,index+1,frame.name,promptTimeSeconds(state.time)].join(' '));
+      frameText+sceneText,[view.name,index+1,frame.name,promptTimeSeconds(state.time)].join(' '));
   }
   const moments=state.dynamicSnapshots.map(promptTimeMoment).filter(Boolean);
   const frozen=state.sceneView === 'snapshot' && moments.find(member => member.id === state.snapshot?.id);
-  if (frozen) add('time:snapshot:'+frozen.id,'当前冻结场景截图 · 片段 '+promptTimeSeconds(frozen.timeSec)+' s',
-    promptTimeFrameText(frozen),'snapshot',{members:[frozen]},`场景截图（${promptTimeMomentText(frozen)}）`,frozen.viewName);
+  if (frozen) add('time:snapshot:'+frozen.id,'当前冻结场景截图 · '+promptTimeSeconds(frozen.timeSec)+'s',
+    [promptTimeNames([frozen.name]),promptTimeFrameText(frozen)].filter(Boolean).join(' · '),'snapshot',{members:[frozen]},
+    `${promptTimeNames([frozen.name]) || '截图'} · ${promptTimeMomentText(frozen)}`,[frozen.name,frozen.viewName].join(' '));
 
   // Multiple cameras/screenshots at the same source time are one option. Keep
   // all member IDs and mark names so deletion or source replacement invalidates
@@ -5085,31 +5094,34 @@ function getPromptTimeCandidates() {
   }
   const round=[...groups.values()].sort((a,b) => a.members[0].timeSec-b.members[0].timeSec);
   for (const group of round) {
-    const member=group.members[0], markNames=group.marks.map(mark => mark.name).join('、');
-    const source=member.viewName ? ' · 机位 '+member.viewName : member.referenceId ? ' · 场景截图与静态参考' : ' · 场景';
-    add('time:round:'+group.key,'本轮时刻 · 片段 '+promptTimeSeconds(member.timeSec)+' s'+source,
-      promptTimeFrameText(member)+(markNames ? ' · 标记：'+markNames : ' · 已保留时刻'),'round',
-      {members:group.members,marks:group.marks},`本轮时刻（${promptTimeMomentText(member)}${markNames ? '；标记：'+markNames : ''}）`,
-      group.members.map(item => item.name).join(' '));
+    const member=group.members[0], markNames=promptTimeNames(group.marks.map(mark => mark.name));
+    const snapshots=promptTimeNames(group.members.map(item => item.name));
+    const caption=markNames ? markNames+(group.members.length>1 && snapshots ? `（${snapshots}）` : '') : snapshots || '保留时刻';
+    add('time:round:'+group.key,'本轮时刻 · '+promptTimeSeconds(member.timeSec)+'s',
+      [markNames,snapshots,...new Set(group.members.map(promptTimeFrameText))].filter(Boolean).join(' · '),'round',
+      {members:group.members,marks:group.marks},`${caption} · ${promptTimeMomentText(group.members)}`,
+      [...group.members.map(item => item.name),...group.marks.map(mark => mark.name)].join(' '));
   }
   const distinctTimes=[...new Set(round.map(group => group.members[0].timeSec))];
   if (distinctTimes.length >= 2) {
     const start=Math.min(...distinctTimes), end=Math.max(...distinctTimes);
     const members=round.flatMap(group => group.members), marks=round.flatMap(group => group.marks);
     const views=[...new Set(members.map(member => member.viewName).filter(Boolean))];
-    const locations=views.length ? '机位 '+views.map(name => '「'+name+'」').join('、') : '保留场景截图';
-    add('time:range','本轮标记时段 · '+promptTimeSeconds(start)+'–'+promptTimeSeconds(end)+' s',
-      locations+' · '+distinctTimes.length+' 个时刻'+(marks.length ? ' · 标记：'+marks.map(mark => mark.name).join('、') : ' · 保留时刻'),
+    const locations=views.length ? views.join(' / ') : '场景';
+    add('time:range','本轮标记时段 · '+promptTimeSeconds(start)+'–'+promptTimeSeconds(end)+'s',
+      locations+' · '+distinctTimes.length+'个时刻'+(marks.length ? ' · '+promptTimeNames(marks.map(mark => mark.name)) : ''),
       'range',{startSec:start,endSec:end,members,marks},
-      `本轮标记时段（片段场景时间 ${promptTimeSeconds(start)}–${promptTimeSeconds(end)} s；${locations}）`);
+      `本轮标记时段 · 片段${promptTimeSeconds(start)}–${promptTimeSeconds(end)}s · ${locations}`,
+      [...members.map(member => member.name),...marks.map(mark => mark.name)].join(' '));
   }
   const duration=timelineDuration();
   if ((state.referenceClip || state.animations.size) && Number.isFinite(duration) && duration > 0) {
     const views=referenceViews().map(view => ({clipId:view.clip_id,name:view.name,durationSec:view.duration_sec}));
     const source=state.referenceClip?.name || '场景动画';
-    add('time:clip','整个片段 · 0.000–'+promptTimeSeconds(duration)+' s',source+(views.length>1 ? ' · 全部 '+views.length+' 个机位' : ''),
+    const locations=views.length>1 ? '全部机位' : views[0]?.name || source;
+    add('time:clip','整个片段 · 0.000–'+promptTimeSeconds(duration)+'s',views.length>1 ? '全部'+views.length+'个机位' : locations,
       'clip',{clipId:state.referenceClip?.clip_id || null,startSec:0,endSec:duration,views},
-      `整个片段（片段时间 0.000–${promptTimeSeconds(duration)} s；${source}）`,views.map(view => view.name).join(' '));
+      `整个片段 · 0.000–${promptTimeSeconds(duration)}s · ${locations}`,[source,...views.map(view => view.name)].join(' '));
   }
   return candidates;
 }

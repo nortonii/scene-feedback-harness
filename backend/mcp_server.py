@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import io
 import json
 import logging
@@ -21,6 +22,7 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from server import DEFAULT_DATA_DIR
+from feedback_summary import caption, feedback_result_manifest
 
 
 PORT = int(os.environ.get("SCENE_FEEDBACK_PORT", "18765"))
@@ -129,69 +131,55 @@ def _preview_image(path: Path) -> ImageContent:
 
 
 def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) -> CallToolResult:
-    enriched = _feedback_with_local_paths(result, data_dir)
-    content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(enriched, ensure_ascii=False))]
+    directory = data_dir or DATA_DIR
+    enriched = _feedback_with_local_paths(copy.deepcopy(result), directory)
+    summary = feedback_result_manifest(enriched, directory)
+    content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(summary, ensure_ascii=False, separators=(",", ":")))]
+
+    def add(key: str, role: str, path: str) -> None:
+        content.append(TextContent(type="text", text=caption(key, role)))
+        content.append(_preview_image(Path(path)))
+
     for item in enriched.get("items", []):
+        content.append(TextContent(type="text", text=f"Feedback {item['feedback_id']}: image source keys below refer to this packet. User marks are instructions, not image geometry."))
         if item.get("timeline") and "scope" not in item["timeline"]:
-            content.append(TextContent(type="text", text="Dynamic timestamps record screenshot capture times. Determine modification times from the user's prompt text."))
+            content.append(TextContent(type="text", text="Timestamps are capture times; determine modification times from the user's prompt text."))
         if item.get('comparison') or any(frame.get('comparison') for frame in [*item.get('scene_snapshots', []), *item.get('dynamic_frames', [])]):
-            content.append(TextContent(type='text', text='scene_comparison is an annotated reference/scene overlay, not new model geometry. Use comparison opacity, normalized_scene_image rect and camera metadata with the separate scene/reference originals; ghosting is not an extra object.'))
+            content.append(TextContent(type='text', text='scene_comparison is an auxiliary overlay, not new model geometry. Use opacity, normalized_scene_image rect, camera and separate originals; ghosting is not extra geometry.'))
+        if item.get("human_pose"):
+            content.append(TextContent(type="text", text="Interpret evidence_kind and keypoint_profile as declared; projected_3d is not an observed 2D measurement. Cross-view identity requires evidence."))
+        if item.get("human_pose_edits"):
+            content.append(TextContent(type="text", text="Apply corrections_path with $capsule-human-tracking apply-corrections. Model scores are unchanged; manual_visibility=visible alone supplies visible manual measurements, never occluded/missing. Unchanged points retain parent_evidence_kind."))
+        reference_keys = {}
         for index, reference in enumerate(item.get("reference_images", []), 1):
-            content.append(TextContent(type="text", text=f"Reference {index} original ({reference['id']}): {reference['path']}"))
-            content.append(_preview_image(Path(reference["path"])))
-        for reference in item.get("reference_annotated_images", []):
-            content.append(TextContent(type="text", text=f"Annotated reference ({reference['reference_id']}): {reference['path']}"))
-            content.append(_preview_image(Path(reference["path"])))
-        for label in ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
-            path = item.get(f"{label}_path")
+            key = reference_keys[reference["id"]] = f"R{index}"
+            add(key, "reference original", reference["path"])
+        for index, reference in enumerate(item.get("reference_annotated_images", []), 1):
+            add(reference_keys.get(reference["reference_id"], f"RA{index}"), "annotated reference", reference["path"])
+        for field in ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
+            path = item.get(f"{field}_path")
             if path:
-                content.append(TextContent(type="text", text=f"{label.replace('_', ' ').title()}: {path}"))
-                content.append(_preview_image(Path(path)))
-        for crop in item.get("crops", []):
-            content.append(TextContent(type="text", text=f"{crop['source'].title()} detail crop: {crop['path']}"))
-            content.append(_preview_image(Path(crop["path"])))
-        for image in item.get("image_refs", []):
-            caption = f"[[image:{image['id']}]] {image['label']}; pane {image['pane']}"
-            if "scene_revision" in image:
-                caption += f"; independently frozen scene revision {image['scene_revision']}"
-            if "frame_index" in image:
-                caption += f"; view {image['view_id']}, source frame {image['frame_index'] + 1}, {image['time_sec']:.6f}s"
-            for name in ("original", "display_original", "annotated"):
-                if image.get(name + "_path"):
-                    content.append(TextContent(type="text", text=f"{caption}: {name.replace('_', ' ')}; camera/dimensions/source metadata are in structured content"))
-                    content.append(_preview_image(Path(image[name + "_path"])))
-        for pose in item.get("human_pose", []):
-            frame = pose["frame"]
-            label = f"{pose.get('evidence_kind', 'observed_2d')} {pose['track_id']}; profile {pose.get('keypoint_profile', 'coco17')}; reference {frame['reference_id']}"
-            if "frame_index" in frame:
-                label += f", view {frame['view_name']}, frame {frame['frame_index'] + 1}, {frame['time_sec']:.6f}s"
-            for name in ("reference_original", "pose_overlay"):
-                content.append(TextContent(type="text", text=f"{label}: {name} (estimated 2D keypoints, not user-drawn geometry)"))
-                content.append(_preview_image(Path(pose[name + "_path"])))
-        for pose in item.get("human_pose_edits", []):
-            frame = pose["frame"]
-            label = f"[[pose_edit:{pose['id']}]] manual 2D corrections; profile {pose['keypoint_profile']}; reference {frame['reference_id']}"
-            if "frame_index" in frame:
-                label += f"; view {frame['view_name']}, frame {frame['frame_index'] + 1}, {frame['time_sec']:.6f}s"
-            content.append(TextContent(type="text", text=f"{label}: source-bound JSON {pose['corrections_path']}. Original model scores are unchanged; only explicitly visible manual points are observed measurements, not occluded/missing points. Unchanged points retain parent evidence kind."))
-            for name in ("reference_original", "pose_overlay"):
-                content.append(TextContent(type="text", text=f"{label}: {name}; orange points are user corrections"))
-                content.append(_preview_image(Path(pose[name + "_path"])))
-        for snapshot in item.get("scene_snapshots", []):
-            content.append(TextContent(type="text", text=f"Saved camera view {snapshot['name']}, evidence {snapshot['id']}, scene revision {snapshot['scene_revision']}; each annotation belongs to its snapshot_id."))
-            for name in ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
-                if snapshot.get(name + "_path"):
-                    content.append(TextContent(type="text", text=f"{snapshot['name']} {name}: {snapshot[name + '_path']}"))
-                    content.append(_preview_image(Path(snapshot[name + "_path"])))
-        for frame in item.get("dynamic_frames", []):
-            frame_label = f"clip frame {frame['frame_index'] + 1}, " if "frame_index" in frame else ""
-            view_label = f"view {frame['view_name']} (ID {frame['view_id']}), " if frame.get("view_id") else ""
-            reference_time = f", reference sample time {frame['reference_time_sec']:.6f}s" if "reference_time_sec" in frame else ""
-            content.append(TextContent(type="text", text=f"Frozen dynamic evidence {frame['id']}, {view_label}{frame_label}time {frame['time_sec']:.6f}s{reference_time}, scene revision {frame['scene_revision']}; camera and selection metadata are in structured content."))
-            for name in ("reference_original", "reference_annotated", "scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
-                if frame.get(name + "_path"):
-                    content.append(TextContent(type="text", text=f"{name.replace('_', ' ').title()} ({view_label}{frame_label}time {frame['time_sec']:.6f}s{reference_time}, evidence {frame['id']}): {frame[name + '_path']}"))
-                    content.append(_preview_image(Path(frame[name + "_path"])))
+                add("scene", field.replace("_", " "), path)
+        for index, crop in enumerate(item.get("crops", []), 1):
+            add(f"crop{index}", crop['source'] + " detail", crop["path"])
+        for index, image in enumerate(item.get("image_refs", []), 1):
+            for field in ("original", "display_original", "annotated"):
+                if image.get(field + "_path"):
+                    add(f"I{index}", field.replace("_", " "), image[field + "_path"])
+        for index, pose in enumerate(item.get("human_pose", []), 1):
+            add(f"P{index}", "source original", pose["reference_original_path"])
+            add(f"P{index}", "projected 3D (cyan)" if pose.get("evidence_kind") == "projected_3d" else "observed 2D (cyan)", pose["pose_overlay_path"])
+        for index, pose in enumerate(item.get("human_pose_edits", []), 1):
+            add(f"E{index}", "source original", pose["reference_original_path"])
+            add(f"E{index}", "manual corrections (orange)", pose["pose_overlay_path"])
+        for field, prefix, image_fields in (
+            ("scene_snapshots", "S", ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison")),
+            ("dynamic_frames", "F", ("reference_original", "reference_annotated", "scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison")),
+        ):
+            for index, frame in enumerate(item.get(field, []), 1):
+                for image_field in image_fields:
+                    if frame.get(image_field + "_path"):
+                        add(f"{prefix}{index}", image_field.replace("_", " "), frame[image_field + "_path"])
     return CallToolResult(content=content, structured_content=enriched)
 
 
