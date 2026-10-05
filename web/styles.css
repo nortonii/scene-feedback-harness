@@ -148,7 +148,7 @@ select { min-width: 0; font-size: var(--text-control); }
 .reference-navigation .reference-strip { flex: 1; min-width: 0; }
 .reference-view-control { display: flex; align-items: center; gap: 6px; flex: none; font-size: var(--text-caption); color: var(--muted); }
 .reference-view-control select { max-width: 170px; padding: 4px 6px; font-size: var(--text-caption); color: var(--ink); }
-.reference-strip:not(:has(.thumb + .thumb)):not(:has(.compact-button)) { display: none; }
+.reference-strip:not(:has(.thumb + .thumb)):not(.has-reference-clip) { display: none; }
 .thumb { flex: none; position: relative; width: 45px; height: 29px; padding: 0; background: var(--stage); border: 1px solid transparent; }
 .thumb.active { border-color: var(--ink); }
 .thumb img { height: 100%; width: 100%; object-fit: cover; }

@@ -2655,17 +2655,7 @@ function activeReference() { return clipReference() || state.references.find((re
 function renderReferenceStrip() {
   renderReferenceViews();
   ui.referenceStrip.replaceChildren();
-  if (state.referenceClip) {
-    const button = document.createElement('button');
-    button.type = 'button'; button.className = 'compact-button';
-    button.textContent = (state.clipEnabled ? '✓ ' : '↺ ') + (referenceViews().length > 1 ? '同步参考' : state.referenceClip.name);
-    button.addEventListener('click', () => {
-      if (!editable()) return;
-      state.clipEnabled = true; seekTimeline(state.time);
-      renderReferenceStrip();
-    });
-    ui.referenceStrip.append(button);
-  }
+  ui.referenceStrip.classList.toggle('has-reference-clip', !!state.referenceClip && state.references.length > 0);
   if (!state.references.length && !state.referenceClip) {
     const empty = document.createElement('span');
     empty.className = 'muted';
