@@ -3771,7 +3771,7 @@ function renderTimeline({moments=true}={}) {
   ui.timeline.classList.toggle('hidden', !enabled);
   // Keep one set of playback controls and listeners while moving it with its media.
   const referenceTimeline = !!state.referenceClip;
-  const timelineParent = document.querySelector(referenceTimeline ? '.reference-pane' : '.workspace');
+  const timelineParent = document.querySelector(referenceTimeline ? '.reference-pane-footer' : '.workspace');
   ui.timeline.classList.toggle('reference-timeline', referenceTimeline);
   if (ui.timeline.parentElement !== timelineParent) timelineParent.appendChild(ui.timeline);
   ui.timeline.setAttribute('aria-label', referenceTimeline ? '参考视频时间轴' : '动态场景时间轴');

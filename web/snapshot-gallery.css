@@ -1,5 +1,22 @@
+/* Shared rows keep both comparison stages aligned as either footer grows. */
+.reference-pane-footer, .scene-pane-footer { display: flex; flex: none; flex-direction: column; min-width: 0; padding-top: 8px; }
+.reference-pane-footer > .reference-timeline { flex: none; width: 100%; margin-top: 6px; padding-top: 8px; }
+@media (min-width: 641px) {
+  html:not([data-layout=immersive]) .workspace { grid-template-rows: auto minmax(0,1fr) auto; }
+  html:not([data-layout=immersive]) .workspace:has(> .timeline-panel:not(.hidden)) { grid-template-rows: auto minmax(0,1fr) auto auto; }
+  html:not([data-layout=immersive]) .workspace > .visual-pane { display: grid; grid-row: 1 / 4; grid-template-rows: subgrid; row-gap: 0; }
+  html:not([data-layout=immersive]) .workspace > .reference-pane { grid-column: 1; }
+  html:not([data-layout=immersive]) .workspace > .scene-pane { grid-column: 3; }
+  html:not([data-layout=immersive]) .visual-pane > .pane-head { grid-row: 1; }
+  html:not([data-layout=immersive]) .visual-pane > .stage { grid-row: 2; }
+  html:not([data-layout=immersive]) .visual-pane > :is(.reference-pane-footer,.scene-pane-footer) { grid-row: 3; }
+  html:not([data-layout=immersive]) #workspace-divider { grid-column: 2; grid-row: 1 / 4; }
+  html:not([data-layout=immersive]) .workspace > .timeline-panel { grid-row: 4; }
+}
+html:not([data-layout=immersive]) .app-shell :is(#chat-dock,#chat-launcher) { bottom: calc(var(--workspace-footer-height,139px) + var(--workspace-timeline-height,0px) + 20px); }
+html:not([data-layout=immersive]) .app-shell .feedback-panel { max-height: calc(100dvh - var(--workspace-footer-height,139px) - var(--workspace-timeline-height,0px) - 130px); }
 /* A single row starts with the live scene, then follows evidence creation order. */
-.scene-snapshots { container: scene-gallery / inline-size; position: relative; inset: auto; flex: none; display: flex; align-items: flex-start; width: 100%; max-width: 100%; height: auto; margin: 0 0 8px; padding: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-menu); color: var(--ink); }
+.scene-snapshots { container: scene-gallery / inline-size; position: relative; inset: auto; flex: none; display: flex; align-items: flex-start; width: 100%; max-width: 100%; height: auto; margin: 0; padding: 3px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-menu); color: var(--ink); }
 .scene-snapshot-strip { --scene-live-width: 124px; display: flex; flex: 1; align-items: flex-start; gap: 8px; min-width: 0; height: auto; padding: 3px 1px 8px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-padding-inline: 0; transition: scroll-padding-inline-start 200ms ease; scrollbar-width: thin; scrollbar-color: #8a887d80 transparent; }
 @supports selector(::-webkit-scrollbar) {
   .scene-snapshot-strip { scrollbar-width: auto; scrollbar-color: auto; }
@@ -58,16 +75,15 @@
 .timeline-mark::before { content: ''; position: absolute; left: 9px; top: 5px; width: 2px; height: 7px; border-radius: 2px; background: var(--muted); }
 .timeline-mark[aria-pressed=true]::before { background: var(--ink); width: 4px; left: 8px; height: 9px; top: 4px; }
 .timeline-mark:hover { background: var(--surface-hover); }
-[data-layout=immersive] body > .scene-snapshots { position: fixed; z-index: 28; top: var(--immersive-content-top,128px); right: 20px; left: auto; width: min(48vw,680px); max-width: calc(100vw - 40px); margin: 0; background: var(--surface-glass,var(--surface-menu)); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
-[data-layout=immersive][data-reference-visible=true] body > .scene-snapshots { max-width: min(48vw,calc(100vw - clamp(300px,28vw,420px) - 52px),680px); }
-[data-layout=immersive] .scene-notice { top: calc(var(--immersive-content-top,128px) + var(--scene-gallery-height,156px) + 12px); }
+[data-layout=immersive] body > .scene-snapshots { position: fixed; z-index: 28; top: auto; bottom: var(--immersive-bottom,18px); right: 20px; left: auto; width: min(48vw,680px); max-width: calc(100vw - 40px); margin: 0; background: var(--surface-glass,var(--surface-menu)); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+[data-layout=immersive] .app-shell :is(#chat-dock,#chat-launcher) { bottom: calc(var(--immersive-bottom,18px) + var(--scene-gallery-height,131px) + 12px); }
+[data-layout=immersive] .app-shell .feedback-panel { max-height: calc(100dvh - var(--immersive-bottom,18px) - var(--scene-gallery-height,131px) - 122px); }
+[data-layout=immersive] .reference-pane:not([data-reference-custom=true]) { max-height: max(100px,calc(100dvh - var(--immersive-content-top,128px) - var(--scene-gallery-height,131px) - var(--immersive-bottom,18px) - 24px)); }
+[data-layout=immersive] .scene-stage > .snapshot-context { bottom: calc(var(--immersive-bottom,18px) + var(--scene-gallery-height,131px) + 12px); }
+[data-layout=immersive] .scene-stage > .selected-chip { bottom: calc(var(--immersive-bottom,18px) + var(--scene-gallery-height,131px) + 40px); }
+[data-layout=immersive] .scene-notice { top: var(--immersive-content-top,128px); }
 @media (max-width:640px) {
-  [data-layout=immersive] body > .scene-snapshots,
-  [data-layout=immersive][data-reference-visible=true] body > .scene-snapshots { right: 10px; width: calc(100vw - 20px); max-width: calc(100vw - 20px); }
-  [data-layout=immersive]:has(body > .scene-snapshots) .reference-pane:not([data-reference-custom=true]) {
-    top: calc(var(--immersive-content-top,128px) + var(--scene-gallery-height,156px) + 12px);
-    max-height: max(100px,calc(100dvh - var(--immersive-content-top,128px) - var(--scene-gallery-height,156px) - var(--immersive-bottom,18px) - 24px));
-  }
+  [data-layout=immersive] body > .scene-snapshots { right: 10px; width: calc(100vw - 20px); max-width: calc(100vw - 20px); }
 }
 @media (prefers-reduced-motion: reduce) {
   .scene-snapshot-strip, .snapshot-card, .snapshot-thumb { transition: none; }
