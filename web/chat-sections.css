@@ -1,5 +1,10 @@
 /* One quiet header for history and evidence; details stay within the dock. */
-.chat-dock-header { gap: 6px; }
+.chat-dock-header { position: relative; gap: 6px; padding-left: 28px; cursor: grab; touch-action: none; }
+.chat-dock-header::before { content: ''; position: absolute; left: 10px; top: 50%; width: 8px; height: 16px; transform: translateY(-50%); background: radial-gradient(circle,var(--muted) 1px,transparent 1.2px) 0 0 / 4px 4px; opacity: .45; pointer-events: none; }
+.chat-dock-header:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; border-radius: 23px 23px 0 0; }
+.chat-dock-header .chat-status { cursor: text; }
+.feedback-panel.moving, .feedback-panel.moving * { cursor: grabbing !important; user-select: none; }
+html .app-shell #chat-dock.is-positioned { left: var(--chat-left); top: var(--chat-top); bottom: auto; transform: none; max-height: var(--chat-position-max-height); }
 .chat-evidence-toggle { flex: none; }
 .chat-history-toggle > [aria-hidden] { transition: transform 320ms cubic-bezier(.22,.68,.2,1); }
 #chat-dock-body,.history-collapsed #chat-dock-body { padding-top: 8px; }
@@ -18,7 +23,7 @@
 .sections-animating #chat-dock-body { overflow: hidden; }
 .sections-animating .chat-history,.sections-animating #feedback-evidence { min-height: 0; }
 @media (max-width: 640px) {
-  .chat-dock-header { gap: 3px; padding-left: 8px; padding-right: 8px; }
+  .chat-dock-header { gap: 3px; padding-left: 28px; padding-right: 8px; }
   .chat-history-toggle,.chat-collapse { font-size: 12px; gap: 4px; padding-left: 4px; padding-right: 4px; }
   .chat-status:not(.running):not(.error):not(.queued) { display: none; }
   .chat-message-count { max-width: 48px; }

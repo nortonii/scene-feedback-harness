@@ -2,6 +2,7 @@ import {createChatSectionMotion,setupChatPanelSizing} from './chat-sections.js';
 export function setupChatDock({getState}) {
   const byId = (id) => document.getElementById(id);
   const dock = byId('chat-dock');
+  const moveHandle = byId('chat-dock-move');
   const launcher = byId('chat-launcher');
   const history = byId('chat-history');
   const conversation = byId('conversation');
@@ -16,6 +17,8 @@ export function setupChatDock({getState}) {
   let unread = 0;
   let dockHeight = null;
   let resizeDrag = null;
+  let moveDrag = null;
+  let dockPositions = {};
   let resizeFrame = 0;
   let lastHeightBounds = {min:1, max:window.innerHeight};
   let launcherStatus = '';
@@ -31,8 +34,59 @@ export function setupChatDock({getState}) {
   function persist() {
     if (!sessionId) return;
     try {
-      localStorage.setItem(storageKey(), JSON.stringify({collapsed, historyCollapsed, dockHeight}));
+      localStorage.setItem(storageKey(), JSON.stringify({collapsed, historyCollapsed, dockHeight, dockPositions}));
     } catch { /* Layout controls remain usable when browser storage is unavailable. */ }
+  }
+
+  const positionLayout = () => document.documentElement.dataset.layout === 'immersive' ? 'immersive' : 'compare';
+  const customPosition = () => dockPositions[positionLayout()];
+  function viewportBounds() {
+    const viewport=window.visualViewport;
+    const left=viewport?.offsetLeft || 0,top=viewport?.offsetTop || 0;
+    return {left:left+10,top:top+24,right:left+(viewport?.width || innerWidth)-10,
+      bottom:top+(viewport?.height || innerHeight)-12};
+  }
+  function applyPosition() {
+    if (!dock) return;
+    const preferred=customPosition();
+    if (!preferred) {
+      dock.classList.remove('is-positioned');
+      for(const property of ['--chat-left','--chat-top','--chat-position-max-height']) dock.style.removeProperty(property);
+      return;
+    }
+    if (collapsed && dock.classList.contains('hidden')) return;
+    const bounds=viewportBounds(),width=dock.offsetWidth,height=dock.offsetHeight;
+    const left=Math.max(bounds.left,Math.min(bounds.right-width,preferred.left));
+    const top=Math.max(bounds.top,Math.min(bounds.bottom-height,preferred.top));
+    for(const [property,value] of Object.entries({'--chat-left':left,'--chat-top':top,
+      '--chat-position-max-height':Math.max(1,bounds.bottom-top)})) {
+      const pixels=Math.round(value)+'px';
+      if(dock.style.getPropertyValue(property)!==pixels) dock.style.setProperty(property,pixels);
+    }
+    dock.classList.add('is-positioned');
+  }
+  function finishMove({cancel=false}={}) {
+    if (!moveDrag) return;
+    const {pointerId,layout,previous,moved}=moveDrag;
+    moveDrag=null;dock.classList.remove('moving');
+    if(cancel) {
+      if(previous) dockPositions[layout]=previous;
+      else delete dockPositions[layout];
+    } else if(moved) {
+      const rect=dock.getBoundingClientRect();
+      dockPositions[layout]={left:Math.round(rect.left),top:Math.round(rect.top)};
+    }
+    if(moveHandle.hasPointerCapture(pointerId)) moveHandle.releasePointerCapture(pointerId);
+    applyPosition();scheduleHeightUpdate();persist();
+  }
+  function settleForMove() {
+    sectionMotion?.finish();panelSizing?.finishResize();finishResize();
+    if ([dock,launcher].some(element=>visibilityTransitions.get(element)?.animation)) applyLayout();
+  }
+  function resetPosition() {
+    finishMove({cancel:true});settleForMove();
+    delete dockPositions[positionLayout()];
+    applyPosition();panelSizing?.fit({notify:false});applyHeight();persist();
   }
 
   function updateCounts() {
@@ -82,15 +136,18 @@ export function setupChatDock({getState}) {
     followingLatest = atLatest();
   }
 
-  function heightBounds() {
+  function heightBounds({bottomAnchor=null}={}) {
     if (!dock || collapsed) return lastHeightBounds;
     const rect = dock.getBoundingClientRect();
     const viewport = window.visualViewport;
     const top = viewport?.offsetTop || 0;
     const bottom = Math.min(rect.bottom, top + (viewport?.height || window.innerHeight));
     const cssMaximum = parseFloat(getComputedStyle(dock).maxHeight);
-    const maximum = Math.max(1, Math.floor(Math.min(bottom - top - 12,
-      Number.isFinite(cssMaximum) ? cssMaximum : Infinity)));
+    const custom=customPosition(),bounds=viewportBounds();
+    const available=custom ? (bottomAnchor === null ? bounds.bottom-Math.max(bounds.top,rect.top)
+      : Math.min(bounds.bottom,bottomAnchor)-bounds.top) : bottom-top-12;
+    const maximum = Math.max(1, Math.floor(Math.min(available,
+      !custom && Number.isFinite(cssMaximum) ? cssMaximum : Infinity)));
     // Everything outside history (header, input, actions and spacing) keeps its
     // natural size; leave enough history to read a message even at the minimum.
     const chrome = rect.height - (history?.getBoundingClientRect().height || 0);
@@ -120,6 +177,7 @@ export function setupChatDock({getState}) {
 
   function applyHeight({restoreScroll=true}={}) {
     if (!dock || sectionMotion?.active) return;
+    applyPosition();
     dock.classList.toggle('is-resized', dockHeight !== null);
     if (dockHeight === null) dock.style.removeProperty('--chat-height');
     if (collapsed) return;
@@ -130,6 +188,7 @@ export function setupChatDock({getState}) {
       const value = Math.min(bounds.max, Math.max(bounds.min, dockHeight)) + 'px';
       if (dock.style.getPropertyValue('--chat-height') !== value) dock.style.setProperty('--chat-height', value);
     }
+    applyPosition();
     if (restoreScroll) restoreHistoryScroll();
     updateHeightAria(bounds);
   }
@@ -138,14 +197,20 @@ export function setupChatDock({getState}) {
     if (resizeFrame) return;
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = 0;
+      if(sectionMotion?.active) return;
+      applyPosition();
+      panelSizing?.fit({notify:false});
       applyHeight();
     });
   }
 
-  function setHeight(height) {
+  function setHeight(height, {bottomAnchor=null}={}) {
     rememberScroll();
-    const bounds = heightBounds();
+    const custom=customPosition();
+    if(custom && bottomAnchor === null) bottomAnchor=dock.getBoundingClientRect().bottom;
+    const bounds = heightBounds({bottomAnchor});
     dockHeight = Math.round(Math.min(bounds.max, Math.max(bounds.min, height)));
+    if(custom) dockPositions[positionLayout()]={left:custom.left,top:bottomAnchor-dockHeight};
     applyHeight();
   }
 
@@ -251,6 +316,7 @@ export function setupChatDock({getState}) {
     }
     const hidden = dock?.classList.contains('hidden');
     if (!collapsed) dock?.classList.remove('hidden');
+    applyPosition();
     panelSizing?.fit();
     applyHeight({restoreScroll:false});
     if (hidden) dock?.classList.add('hidden');
@@ -289,7 +355,7 @@ export function setupChatDock({getState}) {
   function refresh() {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
-      sectionMotion?.finish();panelSizing?.finishResize();finishResize();
+      finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();
       sessionId = state.sessionId;
       panelSizing?.refresh();
       collapsed = false;
@@ -298,11 +364,17 @@ export function setupChatDock({getState}) {
       savedScrollTop = 0;
       unread = 0;
       dockHeight = null;
+      dockPositions = {};
+      applyPosition();
       try {
         const stored = JSON.parse(localStorage.getItem(storageKey()) || 'null');
         collapsed = stored?.collapsed === true;
         historyCollapsed = stored?.historyCollapsed === true;
         if (Number.isFinite(stored?.dockHeight) && stored.dockHeight > 0) dockHeight = stored.dockHeight;
+        for(const layout of ['compare','immersive']) {
+          const position=stored?.dockPositions?.[layout];
+          if(Number.isFinite(position?.left) && Number.isFinite(position?.top)) dockPositions[layout]={left:position.left,top:position.top};
+        }
       } catch { /* Ignore an unavailable or invalid saved preference. */ }
       applyLayout();
     }
@@ -350,17 +422,65 @@ export function setupChatDock({getState}) {
     updateCounts();
   }
 
-  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{applyHeight();restoreHistoryScroll();}});
+  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{applyHeight();restoreHistoryScroll();scheduleHeightUpdate();}});
   panelSizing=setupChatPanelSizing({getState,animateChange:change=>{
-    finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
-  },beforeResize:()=>{sectionMotion.finish();finishResize();rememberScroll();},onResize:scheduleHeightUpdate});
+    finishMove();finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
+  },beforeResize:()=>{finishMove();sectionMotion.finish();finishResize();rememberScroll();},
+  beforeViewportResize:()=>{finishMove({cancel:true});sectionMotion.finish();finishResize();rememberScroll();},
+  onResize:scheduleHeightUpdate});
+
+  moveHandle?.addEventListener('pointerdown',event=>{
+    if(event.target!==moveHandle || event.button!==0 || event.isPrimary===false || collapsed || dock.inert || moveDrag ||
+      window.getSelection()?.type==='Range') return;
+    event.preventDefault();event.stopPropagation();settleForMove();
+    moveHandle.focus({preventScroll:true});
+    const rect=dock.getBoundingClientRect(),layout=positionLayout();
+    moveDrag={pointerId:event.pointerId,x:event.clientX,y:event.clientY,left:rect.left,top:rect.top,layout,
+      previous:dockPositions[layout] ? {...dockPositions[layout]} : null,moved:false};
+    dock.classList.add('moving');
+    try {moveHandle.setPointerCapture(event.pointerId);} catch {finishMove({cancel:true});}
+  });
+  moveHandle?.addEventListener('pointermove',event=>{
+    if(moveDrag?.pointerId!==event.pointerId) return;
+    if(event.pointerType==='mouse' && !event.buttons) {finishMove();return;}
+    event.preventDefault();event.stopPropagation();
+    const dx=event.clientX-moveDrag.x,dy=event.clientY-moveDrag.y;
+    if(!moveDrag.moved && Math.hypot(dx,dy)<3) return;
+    moveDrag.moved=true;
+    dockPositions[moveDrag.layout]={left:moveDrag.left+dx,top:moveDrag.top+dy};
+    applyPosition();
+  });
+  for(const name of ['pointerup','pointercancel','lostpointercapture']) moveHandle?.addEventListener(name,event=>{
+    if(moveDrag?.pointerId!==event.pointerId) return;
+    event.preventDefault();event.stopPropagation();finishMove({cancel:name==='pointercancel'});
+  });
+  moveHandle?.addEventListener('dblclick',event=>{
+    if(event.target!==moveHandle || collapsed || window.getSelection()?.type==='Range') return;
+    event.preventDefault();event.stopPropagation();resetPosition();
+  });
+  moveHandle?.addEventListener('keydown',event=>{
+    if(event.target!==moveHandle || collapsed || event.isComposing || event.altKey || event.ctrlKey || event.metaKey ||
+      !['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','Escape'].includes(event.key)) return;
+    event.preventDefault();event.stopPropagation();
+    if(event.key==='Escape') {finishMove({cancel:true});return;}
+    if(event.key==='Home') {resetPosition();return;}
+    finishMove();settleForMove();
+    const rect=dock.getBoundingClientRect(),step=event.shiftKey?32:8;
+    dockPositions[positionLayout()]={left:rect.left+(event.key==='ArrowLeft'?-step:event.key==='ArrowRight'?step:0),
+      top:rect.top+(event.key==='ArrowUp'?-step:event.key==='ArrowDown'?step:0)};
+    applyPosition();
+    const result=dock.getBoundingClientRect();
+    dockPositions[positionLayout()]={left:Math.round(result.left),top:Math.round(result.top)};
+    scheduleHeightUpdate();persist();
+  });
 
   resizeHandle?.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.isPrimary === false || resizeDrag || !historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
+    finishMove();sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
     resizeHandle.focus({preventScroll:true});
-    resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:dock.getBoundingClientRect().height};
+    const rect=dock.getBoundingClientRect();
+    resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:rect.height,bottom:rect.bottom};
     dock.classList.add('resizing');
     try { resizeHandle.setPointerCapture(event.pointerId); }
     catch { finishResize(); }
@@ -369,7 +489,7 @@ export function setupChatDock({getState}) {
     if (!resizeDrag || event.pointerId !== resizeDrag.pointerId) return;
     event.preventDefault(); event.stopPropagation();
     if (event.pointerType === 'mouse' && !event.buttons) { finishResize(event); return; }
-    setHeight(resizeDrag.height + resizeDrag.y - event.clientY);
+    setHeight(resizeDrag.height + resizeDrag.y - event.clientY,{bottomAnchor:resizeDrag.bottom});
   });
   for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) {
     resizeHandle?.addEventListener(name, (event) => {
@@ -401,11 +521,12 @@ export function setupChatDock({getState}) {
     setHeight(next);
     persist();
   });
-  window.addEventListener('blur', () => finishResize());
+  window.addEventListener('blur', () => {finishMove();finishResize();});
   reducedMotion.addEventListener('change', () => {
     if (reducedMotion.matches) applyLayout();
   });
   function resizeViewport() {
+    finishMove({cancel:true});
     sectionMotion?.finish();
     // A viewport change invalidates the launcher-to-panel path. Settle at the
     // requested state before fitting the new screen instead of drifting outside it.
@@ -415,6 +536,9 @@ export function setupChatDock({getState}) {
   window.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
+  new MutationObserver(()=>{
+    finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();applyLayout();
+  }).observe(document.documentElement,{attributes:true,attributeFilter:['data-layout']});
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
     for (const element of [dock, dock?.querySelector('.chat-dock-header'),
@@ -424,7 +548,7 @@ export function setupChatDock({getState}) {
   }
 
   byId('chat-collapse')?.addEventListener('click', () => {
-    sectionMotion?.finish();panelSizing?.finishResize();finishResize();
+    finishMove();sectionMotion?.finish();panelSizing?.finishResize();finishResize();
     rememberScroll();
     collapsed = true;
     applyLayout({animate:true});
