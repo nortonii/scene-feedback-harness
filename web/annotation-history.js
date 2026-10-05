@@ -9,7 +9,8 @@ export function createAnnotationHistory(limit=50) {
           before.dynamicSnapshots.every((moment, i) => moment === after.dynamicSnapshots[i]) &&
           (before.sceneSnapshots || []).length === (after.sceneSnapshots || []).length &&
           (before.sceneSnapshots || []).every((view, i) => view === after.sceneSnapshots[i]) &&
-          before.snapshot === after.snapshot) return;
+          before.snapshot === after.snapshot &&
+          JSON.stringify(before.poseEdits || []) === JSON.stringify(after.poseEdits || [])) return;
       past.push({before, after});
       if (past.length > limit) past.shift();
       future.length = 0;

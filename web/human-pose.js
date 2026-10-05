@@ -22,6 +22,28 @@ export function handJointLabel(name) {
   return match ? side + ' · ' + ({thumb:'拇指',forefinger:'食指',middle_finger:'中指',ring_finger:'无名指',pinky_finger:'小指'})[match[1]] +
     (match[2] === '4' ? '指尖' : '关节 ' + match[2]) : name;
 }
+export function poseJointIndices(names, region='all', groups={}) {
+  if (!Array.isArray(names)) return [];
+  if (region === 'all') return names.map((_,index) => index);
+  const group=groups[region === 'left' || region === 'right' ? region + '_hand' : region];
+  if (Array.isArray(group)) return group.filter(index => Number.isInteger(index) && index >= 0 && index < names.length);
+  if (region === 'left' || region === 'right') return handJointIndices(names,region);
+  return names.flatMap((name,index) => {
+    const face=/^face[-_]\d+$/.test(name), foot=/_(?:big_toe|small_toe|heel)$/.test(name);
+    const hand=/_(?:hand_root|thumb[1-4]|forefinger[1-4]|middle_finger[1-4]|ring_finger[1-4]|pinky_finger[1-4])$/.test(name);
+    return (region === 'face' ? face : region === 'feet' ? foot : region === 'body' && !face && !foot && !hand) ? [index] : [];
+  });
+}
+export function poseJointLabel(name) {
+  if (/_(?:hand_root|thumb[1-4]|forefinger[1-4]|middle_finger[1-4]|ring_finger[1-4]|pinky_finger[1-4])$/.test(name || '')) return handJointLabel(name);
+  const face=/^face[-_](\d+)$/.exec(name || '');
+  if (face) return '面部点 ' + (Number(face[1])+1);
+  if (name === 'nose') return '鼻尖';
+  const match=/^(left|right)_(.+)$/.exec(name || '');
+  const label={eye:'眼',ear:'耳',shoulder:'肩',elbow:'肘',wrist:'腕',hip:'髋',knee:'膝',ankle:'踝',
+    big_toe:'大脚趾',small_toe:'小脚趾',heel:'脚跟'}[match?.[2]];
+  return label ? (match[1] === 'left' ? '左' : '右') + label : name;
+}
 export function poseEditToken(editId) { return /^[0-9a-f]{32}$/.test(editId || '') ? `[[pose_edit:${editId}]]` : null; }
 export function validPoseEdit(sample) {
   return sample && poseEditToken(sample.id) && /^[0-9a-f]{32}$/.test(sample.job_id || '') &&
@@ -37,7 +59,7 @@ export function validPoseEdit(sample) {
 }
 export function collectPoseEdits(note,candidates) {
   const tokens=[...note.matchAll(/\[\[pose_edit:([0-9a-f]{32})\]\]/g)], starts=new Set(tokens.map((match) => match.index));
-  for (const match of note.matchAll(/\[\[pose_edit:/g)) if (!starts.has(match.index)) throw new Error('手部修正引用不完整，请重新点击「引用修正」。');
+  for (const match of note.matchAll(/\[\[pose_edit:/g)) if (!starts.has(match.index)) throw new Error('关键点修改引用不完整，请重新点击「引用」。');
   const ids=[...new Set(tokens.map((match) => match[1]))];
   if (ids.length > 8) throw new Error('一条提示最多引用 8 帧关键点修正。');
   return ids.map((id) => {

@@ -99,6 +99,29 @@ class PoseEditTransportTests(unittest.TestCase):
         self.assertTrue(Path(item["corrections_path"]).is_file())
         self.assertTrue(Path(item["pose_overlay_path"]).is_file())
 
+    def test_body_face_and_foot_corrections_use_the_existing_feedback_transport(self):
+        payload = copy.deepcopy(self.payload)
+        payload["pose_edits"][0]["edits"] = [
+            {"name": "left_shoulder", "x": .68, "y": .26, "visibility": "visible"},
+            {"name": "left_big_toe", "x": .73, "y": .71, "visibility": "visible"},
+            {"name": "face-0", "visibility": "missing"},
+        ]
+        feedback = self.store.submit_feedback(self.session, payload)
+        item = feedback["human_pose_edits"][0]
+        frame = item["document"]["frames"][0]
+        self.assertEqual(frame["original_keypoints"], self.job["frames"][0]["keypoints"])
+        effective = {point["name"]: point for point in frame["effective_keypoints"]}
+        self.assertEqual((effective["left_shoulder"]["x"], effective["left_big_toe"]["y"]), (.68, .71))
+        self.assertFalse(effective["face-0"]["in_frame"])
+        text, paths = self.gateway._turn_input(feedback)
+        self.assertIn(item["corrections_path"], text)
+        self.assertEqual(len(paths), 3)
+        self.assertTrue(Path(paths[-1]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+        result = _visual_tool_result({"items": [feedback]}, self.store.data_dir)
+        self.assertEqual(len([part for part in result.content if part.type == "image"]), 3)
+        self.assertEqual(result.structured_content["items"][0]["human_pose_edits"][0]["edits"],
+                         payload["pose_edits"][0]["edits"])
+
     def test_bad_source_or_missing_token_cannot_write_partial_feedback(self):
         for change in (lambda p: p["pose_edits"][0].__setitem__("image_sha256", "0" * 64),
                        lambda p: p.__setitem__("note", "Fix the hands")):

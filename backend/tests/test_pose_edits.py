@@ -1,4 +1,4 @@
-"""Source-bound sparse WholeBody hand corrections; no inference or model calls."""
+"""Source-bound sparse WholeBody corrections; no inference or model calls."""
 from __future__ import annotations
 
 import copy
@@ -74,6 +74,64 @@ class PoseEditTests(unittest.TestCase):
         self.assertEqual(self.fixture.jobs.get(self.job["job_id"])["frames"][0], self.frame)
         with Image.open(io.BytesIO(evidence["_overlay_data"])) as image:
             self.assertEqual(image.size, (160,120))
+
+    def test_body_face_feet_and_hand_edits_share_the_source_bound_evidence(self):
+        sample = copy.deepcopy(self.sample)
+        sample["edits"] = [
+            {"name": "left_elbow", "x": .8, "y": .2, "visibility": "visible"},
+            {"name": "left_big_toe", "x": .7, "y": .4, "visibility": "visible"},
+            {"name": "face-23", "x": .6, "y": .6, "visibility": "visible"},
+            {"name": "left_thumb4", "x": .42, "y": .61, "visibility": "visible"},
+            {"name": "face-24", "x": .23, "y": .33, "visibility": "occluded"},
+            {"name": "right_ankle", "visibility": "missing"},
+        ]
+        evidence = self.prepare(sample)
+        document = evidence["document"]
+        source = document["frames"][0]
+        self.assertEqual(source["original_keypoints"], self.frame["keypoints"])
+        self.assertEqual(source["image_sha256"], self.frame["image_sha256"])
+        self.assertEqual(source["edits"], sample["edits"])
+        before = {point["name"]: point for point in source["original_keypoints"]}
+        after = {point["name"]: point for point in source["effective_keypoints"]}
+        for edit in sample["edits"]:
+            joint = after[edit["name"]]
+            self.assertEqual(joint["score"], before[edit["name"]]["score"])
+            self.assertEqual(joint["manual_source"], "manual_2d")
+            self.assertEqual(joint["manual_visibility"], edit["visibility"])
+            self.assertEqual(joint["in_frame"], edit["visibility"] == "visible")
+            if "x" in edit:
+                self.assertEqual((joint["x"], joint["y"]), (edit["x"], edit["y"]))
+            else:
+                self.assertEqual((joint["x"], joint["y"]),
+                                 (before[edit["name"]]["x"], before[edit["name"]]["y"]))
+        with Image.open(io.BytesIO(evidence["_overlay_data"])) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.size, (160, 120))
+            for name in ("left_elbow", "left_big_toe", "face-23", "left_thumb4"):
+                point = after[name]
+                self.assertEqual(image.getpixel((round(point["x"] * 160), round(point["y"] * 120))), (182, 83, 32))
+
+    def test_custom_named_profile_without_hand_joints_can_be_corrected(self):
+        export = self.fixture.export()
+        names, edges = ["head", "shoulder", "toe"], [[0, 1], [1, 2]]
+        result = fixtures.result_for(export, names=names, edges=edges, profile="custom-three")
+        result["keypoint_groups"] = {"body": [0, 1], "foot": [2]}
+        self.fixture.jobs.import_result({"job_id": export["job_id"], "result": result})
+        job = self.fixture.jobs.get(export["job_id"])
+        frame = job["frames"][0]
+        sample = {"id": uuid.uuid4().hex, "job_id": job["job_id"], "reference_id": frame["reference_id"],
+                  "image_sha256": frame["image_sha256"], "image_orientation": frame["image_orientation"],
+                  "keypoint_profile": "custom-three", "edits": [
+                      {"name": "head", "x": .63, "y": .27, "visibility": "visible"},
+                      {"name": "toe", "visibility": "missing"}]}
+        evidence = self.prepare(sample)
+        document = evidence["document"]
+        self.assertEqual(document["keypoint_names"], names)
+        self.assertEqual(document["skeleton_edges"], edges)
+        self.assertEqual(document["keypoint_groups"], {"body": [0, 1], "foot": [2]})
+        self.assertEqual(document["frames"][0]["original_keypoints"], frame["keypoints"])
+        self.assertEqual(document["frames"][0]["effective_keypoints"][0]["x"], .63)
+        self.assertFalse(document["frames"][0]["effective_keypoints"][2]["in_frame"])
 
     def test_invalid_joint_coordinate_visibility_name_and_duplicate_rejected(self):
         cases = [

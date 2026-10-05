@@ -5,7 +5,7 @@
 插件负责参考图、3D 场景、标注、动态机位和外部二维人体结果的查看与引用。
 人体追踪推理与重建位于独立的 [capsule skill](../external-skills/capsule-human-tracking/SKILL.md)，
 不随工作台插件安装。
-默认 skill 使用 WholeBody133，工作台可在原帧上修正左右手关键点并提交原图、修正图和 JSON；插件仅负责编辑与证据交换，不包含二维推理、三角化或 Blender 重建运行环境。
+默认 skill 使用 WholeBody133。左图工具栏「关键点」可编辑原帧已声明的身体、脚、脸和手部关键点；本轮修改按帧累加为「关键点修改N」卡片，可自动插入提示或用 `@` 引用。原图、修正前后坐标与来源 JSON 随反馈提交；插件仅负责编辑与证据交换，不包含二维推理、三角化或 Blender 重建运行环境。
 
 ## 两个可以分别验证的步骤
 
@@ -34,7 +34,7 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 保留完整 MCP、技能、详细介绍、图标，以及 `.codex-plugin/plugin.json` 和
 `.mcp.json` 兼容文件。仓库及配置出的本地安装目录仍可使用本地市场清单。
 
-请使用 `0.1.27` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
+请使用 `0.1.28` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
 上传请求的响应；本地 `plugin/read` 成功不能代替云端归档导入验证。
 官方 [包结构说明](https://developers.openai.com/plugins/build/plugins) 区分了
 单插件分发包和本地市场目录；[上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)
