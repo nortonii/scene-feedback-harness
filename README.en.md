@@ -177,7 +177,9 @@ The separate [capsule-human-tracking skill](external-skills/capsule-human-tracki
 
 A reconstruction task calls `workspace_export_pose_sources` to snapshot this project's reference frames, uses the skill to process actual images or validate existing 2D tracks, then returns the result with `workspace_import_human_pose`. The snapshot binds the project, session, view, frame, time and image; results from another project or replaced references are rejected. A geometry revision alone does not invalidate unchanged reference images.
 
-Camera and timeline changes display the matching source-frame skeleton. Results can declare their joint names and edges; previously completed COCO17 results remain readable. Source labels distinguish observations, inferred estimates and projections of an existing 3D model. Projections are not measured 2D tracks.
+Camera and timeline changes display the matching source-frame skeleton. Results can declare their joint names and edges; previously completed COCO17 results remain readable. Source labels in the result list distinguish observations, inferred estimates and projections of an existing 3D model. Projections are not measured 2D tracks.
+
+The reference overlay and newly exported skeleton evidence images show only skeletons and keypoints, with no detection boxes or text labels; source and identity information remains in the result list and prompt references.
 
 The reference image shows one result at a time: the newest 2D result by default, or the newest 3D projection if no 2D result exists. In human evidence, use `显示 / 隐藏` (Show / Hide) to select a historical result, `最新结果` (Latest result) for automatic selection, or `隐藏全部` (Hide all). Your choice is saved per session and stays through polling and new imports. While the current frame loads, no old-frame skeleton is shown. Citations and downloads retain their original results.
 

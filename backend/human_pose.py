@@ -600,8 +600,6 @@ def _render_overlay(path: Path, frame: dict, threshold: float, edges: list[list[
         elif point.get("manual_visibility") == "occluded" and point.get("manual_position"):
             x, y = point["x"] * width, point["y"] * height
             draw.ellipse((x-radius,y-radius,x+radius,y+radius),outline="#b65320",width=line_width)
-    draw.rectangle((4, 4, 255, 25), fill="white")
-    draw.text((8, 8), "Manual 2D corrections" if evidence_kind == "manual_2d" else "Projected 3D joints" if evidence_kind == "projected_3d" else "Estimated 2D joints", fill="#005f5b")
     output = io.BytesIO()
     image.save(output, "PNG")
     return output.getvalue()

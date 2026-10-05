@@ -2930,8 +2930,8 @@ function drawHumanPoseOverlay() {
   const color=POSE_COLORS[(humanJobNumber(job)-1)%POSE_COLORS.length];
   const sample=state.poseEdits.find((item) => item.job_id === job.job_id && item.reference_id === frame.reference_id);
   const corrected=correctedPoseFrame(frame,sample);
-  drawPoseSkeleton(surface.context,corrected,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
-    edges:detail.skeleton_edges, label:humanJobName(job) + ' · ' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name)});
+  drawPoseSkeleton(surface.context,corrected,surface.width,surface.height,{color,threshold:job.confidence_threshold ?? 0.3,
+    edges:detail.skeleton_edges});
   drawPoseEditHandles(surface.context,corrected,surface.width,surface.height);
 }
 function poseEditorContext() {
@@ -2992,11 +2992,6 @@ function drawPoseEditHandles(context,frame,width,height) {
     context.fillStyle=point.manual_visibility === 'visible' ? '#b65320' : '#f5f4ef';
     context.lineWidth=selected ? 2.5 : 1.5;
     context.beginPath(); context.arc(x,y,selected ? 7 : 4.5,0,Math.PI*2); context.fill(); context.stroke();
-    if (selected) {
-      context.font='12px ' + annotationFontFamily; context.fillStyle='#292925';
-      const label=handJointLabel(point.name),left=clamp(x+10,4,Math.max(4,width-context.measureText(label).width-4));
-      context.fillText(label,left,Math.max(15,y-10));
-    }
   }
   context.restore();
 }
