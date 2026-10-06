@@ -1,9 +1,11 @@
 /* One quiet header for history and evidence; details stay within the dock. */
-.chat-dock-header { position: relative; gap: 6px; padding-left: 28px; cursor: grab; touch-action: none; }
-.chat-dock-header::before { content: ''; position: absolute; left: 10px; top: 50%; width: 8px; height: 16px; transform: translateY(-50%); background: radial-gradient(circle,var(--muted) 1px,transparent 1.2px) 0 0 / 4px 4px; opacity: .45; pointer-events: none; }
+#chat-dock { --chat-move-cursor: url('./cursors/chat-move.svg') 8 8, move; }
+[data-theme=dark] #chat-dock { --chat-move-cursor: url('./cursors/chat-move-dark.svg') 8 8, move; }
+.chat-dock-header { position: relative; gap: 6px; padding-left: 28px; cursor: var(--chat-move-cursor); touch-action: none; }
+.chat-dock-header::before { content: ''; position: absolute; left: 11px; top: 50%; width: 6px; height: 9px; transform: translateY(-50%); background: radial-gradient(circle,var(--muted) .6px,transparent .8px) 0 0 / 3px 3px; opacity: .28; pointer-events: none; }
 .chat-dock-header:focus-visible { outline: 2px solid var(--ink); outline-offset: -3px; border-radius: 23px 23px 0 0; }
 .chat-dock-header .chat-status { cursor: text; }
-.feedback-panel.moving, .feedback-panel.moving * { cursor: grabbing !important; user-select: none; }
+.feedback-panel.moving, .feedback-panel.moving * { cursor: var(--chat-move-cursor, move) !important; user-select: none; }
 html .app-shell #chat-dock.is-positioned { left: var(--chat-left); top: var(--chat-top); bottom: auto; transform: none; max-height: var(--chat-position-max-height); }
 .chat-evidence-toggle { flex: none; }
 .chat-history-toggle > [aria-hidden] { transition: transform 320ms cubic-bezier(.22,.68,.2,1); }
