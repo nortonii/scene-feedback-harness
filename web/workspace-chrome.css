@@ -163,39 +163,6 @@
 .reference-pane #reference-title { max-width: min(28vw,360px); }
 .reference-pane > .pane-head .eyebrow { font-size: var(--text-caption); color: var(--muted); font-weight: 500; }
 .stage { border-radius: 14px; }
-.reference-corner-tools {
-  position: absolute;
-  z-index: 9;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  max-width: calc(100% - 20px);
-  gap: 2px;
-  padding: 4px;
-  border: 1px solid var(--surface-border);
-  border-radius: 12px;
-  background: var(--surface-glass);
-  box-shadow: var(--surface-shadow);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-}
-.reference-corner-tools .compact-button,
-.reference-corner-tools .text-button {
-  display: inline-flex;
-  flex: none;
-  justify-content: center;
-  align-items: center;
-  min-width: 28px;
-  min-height: 28px;
-  padding: 4px 7px;
-  border-radius: 8px;
-  font-size: var(--text-caption);
-  color: var(--ink);
-}
-.reference-corner-tools .compact-button:hover,
-.reference-corner-tools .text-button:hover { background: var(--surface-hover); text-decoration: none; }
 #annotate-reference-button { margin-left: 4px; }
 #drag-reference-image, [data-layout=immersive] .reference-pane #drag-reference-image {
   display: inline-flex;
@@ -430,7 +397,6 @@
   #stop-button { padding: 4px; font-size: 11px; }
   .pane-head { flex-wrap: nowrap; gap: 5px; }
   .reference-pane #reference-title { max-width: calc(100vw - 155px); }
-  .reference-corner-tools .zoom-button { display: inline-flex; }
   .scene-pane > .pane-head { flex-wrap: wrap; }
   .scene-pane .pane-heading { width: auto; }
   .scene-pane .pane-actions { width: auto; flex: 1; justify-content: flex-end; gap: 1px; }
@@ -453,7 +419,7 @@
 #annotation-tool-panel.is-compact #more-tools > summary { min-height: 30px; padding: 4px 6px; }
 @media (hover: none) { #drag-scene-image { opacity: 1; } }
 @media (prefers-reduced-transparency: reduce) {
-  #annotation-tool-panel, .reference-corner-tools, #workspace-menu > .popover-content,
+  #annotation-tool-panel, #workspace-menu > .popover-content,
   #references-dialog-button, #drag-scene-image { background: var(--paper); backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 @media (prefers-reduced-motion: reduce) {

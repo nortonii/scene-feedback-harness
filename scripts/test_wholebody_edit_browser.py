@@ -245,7 +245,10 @@ def main():
                 # Real transformed-image gestures must still write original
                 # normalized image coordinates, not CSS pixels after zoom/pan.
                 close_tools(page)
-                page.locator("#reference-zoom-in").click()
+                stage=page.locator("#reference-stage").bounding_box()
+                page.mouse.move(stage["x"]+stage["width"]/2,stage["y"]+stage["height"]/2)
+                page.mouse.wheel(0,-120)
+                page.wait_for_function("__wholeEdit.state.referenceZoom > 1.14")
                 page.evaluate("document.activeElement.blur()")
                 page.keyboard.down("Space")
                 page.mouse.move(*point_position(page,(.5,.5))); page.mouse.down()
@@ -258,7 +261,12 @@ def main():
                 history_action(page,"undo"); assert pose_patches(page)==body_patch
                 history_action(page,"redo")
                 close_tools(page)
-                page.locator("#reference-zoom-reset").click()
+                stage=page.locator("#reference-stage").bounding_box()
+                page.mouse.move(stage["x"]+stage["width"]/2,stage["y"]+stage["height"]/2)
+                for _ in range(3):
+                    if page.evaluate("__wholeEdit.state.referenceZoom") <= 1+1e-8: break
+                    page.mouse.wheel(0,120)
+                page.wait_for_function("__wholeEdit.state.referenceZoom === 1")
                 edit_point(page,"left_big_toe","feet",(.25,.79))
                 edit_point(page,"face-0","face",(.57,.19))
 

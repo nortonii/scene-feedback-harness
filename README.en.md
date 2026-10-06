@@ -49,7 +49,7 @@ The warm off-white and dark themes retain the glass conversation dock. A single 
 | `侧栏 → 任务` | With Codex Desktop connected, switch the current scene’s recipient or create a task with a name, model, reasoning effort, and permissions |
 | `侧栏 → 执行记录` | Execution and feedback queue; approvals, retries, and delivery checks also appear above the conversation prompt |
 | Conversation dock | History appears above the prompt. `收起记录` hides history; `收起会话` hides the whole dock, and `展开会话` brings it back |
-| Empty reference area and image corner | With no reference loaded, use `选择图片` to add static images; use the lower-right controls to zoom or fit, and hover the image to open annotation tools |
+| Empty reference area and image | With no reference loaded, use `选择图片` to add static images; use the mouse wheel to zoom the reference image, and hover the image to open annotation tools |
 | Scene header | `截图` saves the current view; opacity is shown directly, with clear, high contrast controls for ground orientation and `对齐` |
 | Annotation dock at the top of the image | Select, point, box, line, arrow, eraser, undo/redo, and clear; `更多` holds text, freehand, and correspondence numbers. Snapshot name labels are toggled here |
 | Scene header’s `物体 / 部件` switch | Select item or part directly, with a clear active state; hidden for screenshots and restored in live 3D |

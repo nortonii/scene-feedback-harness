@@ -70,7 +70,6 @@ const ui = {
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
   animationChoices:id('animation-choices'),
-  referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
   alignReference:id('align-reference-button'), alignmentStatus:id('camera-alignment-status'),
   compareImage:id('compare-image'), snapshotCompareImage:id('snapshot-compare-image'),
   compareOpacity:id('compare-opacity'), opacityValue:id('opacity-value'),
@@ -5836,22 +5835,14 @@ function bindEvents() {
   ui.referenceImage.addEventListener('error', () => announce('这张参考图无法显示。', true));
   ui.compareImage.addEventListener('load', resizeScene);
   ui.alignReference.addEventListener('click', () => { if (editable()) { pauseTimeline(); alignActiveReference({notify:true}); } });
-  ui.referenceZoomIn.addEventListener('click', () => setReferenceZoom(state.referenceZoom * 1.4));
-  ui.referenceZoomOut.addEventListener('click', () => setReferenceZoom(state.referenceZoom / 1.4));
-  ui.referenceZoomReset.addEventListener('click', () => {
-    state.referenceZoom = 1;
-    state.referencePan = {x:0,y:0};
-    updateReferenceTransform();
-    saveDraft();
-  });
   ui.referenceStage.addEventListener('wheel', (event) => {
-    if (event.target.closest('.reference-corner-tools, button, summary, input, select')) return;
+    if (event.target.closest('button, summary, input, select')) return;
     if (!activeReference()) return;
     event.preventDefault();
     setReferenceZoom(state.referenceZoom * (event.deltaY < 0 ? 1.15 : 1 / 1.15), event);
   }, {passive:false});
   ui.referenceStage.addEventListener('pointerdown', (event) => {
-    if (event.target.closest('.reference-corner-tools, button, summary, input, select')) return;
+    if (event.target.closest('button, summary, input, select')) return;
     if (!activeReference() || !(toolMode('reference') === 'select' || state.spacePan)) return;
     event.preventDefault();
     ui.referenceStage.setPointerCapture(event.pointerId);

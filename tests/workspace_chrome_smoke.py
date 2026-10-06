@@ -398,12 +398,21 @@ def main():
                 page.set_viewport_size({'width':1440,'height':900})
                 control(page, '#comparison-layout-button').click(); settle(page)
                 original_zoom = page.evaluate('__appearanceCheck.state.referenceZoom')
-                control(page, '#reference-zoom-in').click()
+                stage = bounds(page, '#reference-stage')
+                page.mouse.move(stage['x']+stage['width']/2,stage['y']+stage['height']/2)
+                page.mouse.wheel(0,-120)
+                page.wait_for_function('__appearanceCheck.state.referenceZoom > 1.14')
                 assert page.evaluate('__appearanceCheck.state.referenceZoom') > original_zoom
-                control(page, '#reference-zoom-out').click()
+                page.mouse.wheel(0,120)
+                page.wait_for_function('__appearanceCheck.state.referenceZoom === 1')
                 assert abs(page.evaluate('__appearanceCheck.state.referenceZoom') - original_zoom) < 1e-8
-                control(page, '#reference-zoom-in').click()
-                control(page, '#reference-zoom-reset').click()
+                page.mouse.wheel(0,-120)
+                page.mouse.wheel(0,-120)
+                page.wait_for_function('__appearanceCheck.state.referenceZoom > 1.3')
+                for _ in range(3):
+                    if page.evaluate('__appearanceCheck.state.referenceZoom') <= 1+1e-8: break
+                    page.mouse.wheel(0,120)
+                page.wait_for_function('__appearanceCheck.state.referenceZoom === 1')
                 assert page.evaluate('__appearanceCheck.state.referenceZoom') == 1
                 control(page, '#drag-reference-image').click()
                 expect(page.locator('#prompt-image-refs .prompt-image-chip')).to_have_count(1)
@@ -414,7 +423,7 @@ def main():
                 expect(page.locator('#prompt-image-refs .prompt-image-chip')).to_have_count(0)
                 control(page, '#chat-collapse').click()
                 expect(page.locator('#chat-dock')).to_be_hidden()
-                print('PASS reference corner zoom/reset and image-reference button receive real pointer clicks', flush=True)
+                print('PASS reference stage wheel zoom/reset and image-reference button receive real pointer input', flush=True)
                 open_annotation_tools(page, 'reference')
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
