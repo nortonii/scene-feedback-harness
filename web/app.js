@@ -19,7 +19,7 @@ import { drawAnnotationName, hitsAnnotationName } from './annotation-labels.js';
 import { createFrameImageCache } from './frame-image-cache.js';
 import { projectPrefix, scopedURL, projectNavigationURL } from './projects.js';
 import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel, poseEvidenceLabel, drawPoseSkeleton, POSE_COLORS,
-  handJointIndices, handJointLabel, poseEditToken, validPoseEdit, collectPoseEdits, correctedPoseFrame } from './human-pose.js';
+  poseJointIndices, poseJointLabel, poseEditToken, validPoseEdit, collectPoseEdits, correctedPoseFrame } from './human-pose.js';
 import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
 import { createPromptMentions } from './prompt-mentions.js';
 import { createPromptReferenceText } from './prompt-reference-text.js';
@@ -60,6 +60,7 @@ const ui = {
   humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'),
   humanStatus:id('human-pose-status'), humanJobs:id('human-pose-jobs'),
   humanLatest:id('human-pose-latest'), humanHideAll:id('human-pose-hide-all'),
+  poseEditTool:id('pose-edit-tool'), poseEditResult:id('pose-edit-result'),
   poseEditPanel:id('pose-edit-panel'), poseEditSource:id('pose-edit-source'), poseEditHand:id('pose-edit-hand'),
   poseEditJoint:id('pose-edit-joint'), poseEditVisibility:id('pose-edit-visibility'), poseEditHint:id('pose-edit-hint'),
   poseEditReference:id('pose-edit-reference'), poseEditDownload:id('pose-edit-download'), poseEditFinish:id('pose-edit-finish'),
@@ -67,7 +68,6 @@ const ui = {
   referenceEmpty:id('reference-empty'), referenceStrip:id('reference-strip'),
   referenceTitle:id('reference-title'), referenceInput:id('reference-input'),
   clipInput:id('clip-input'), clipFps:id('clip-fps'), clipName:id('clip-name'), clipStatus:id('clip-import-status'),
-  viewControl:id('reference-view-control'), viewSelect:id('reference-view-select'),
   timeline:id('timeline-panel'), play:id('timeline-play'), seek:id('timeline-seek'), time:id('timeline-time'),
   animationChoices:id('animation-choices'),
   referenceZoomOut:id('reference-zoom-out'), referenceZoomReset:id('reference-zoom-reset'), referenceZoomIn:id('reference-zoom-in'),
@@ -137,7 +137,7 @@ const state = {
   restoredSceneRevision:null, restoredModelUrl:null
 };
 Object.assign(state, {referenceClip:null, clipEnabled:true, time:0, playing:false, playbackStart:null,
-  activeViewId:null, pendingViewId:null, referenceClipSignature:null, viewOptionsSignature:null,
+  activeViewId:null, pendingViewId:null, referenceClipSignature:null,
   animations:new Map(), animationChoices:{}, dynamicSnapshots:[], draftMomentSignature:null,
   seekGeneration:0, seeking:false, timelineTarget:null, scrubRequest:null, timelineSaveTimer:null});
 
@@ -325,7 +325,7 @@ function restoreDraft() {
     state.poseRefs = Array.isArray(draft.poseRefs) ? draft.poseRefs.filter((item) => poseToken(item?.job_id,item?.reference_id)).slice(0,64) : [];
     state.poseEdits = Array.isArray(draft.poseEdits) ? draft.poseEdits.filter(validPoseEdit).slice(0,8) : [];
     state.poseEditor = draft.poseEditor && /^[0-9a-f]{32}$/.test(draft.poseEditor.jobId || '') && /^[0-9a-f]{32}$/.test(draft.poseEditor.referenceId || '')
-      ? {...draft.poseEditor,hand:draft.poseEditor.hand === 'right' ? 'right' : 'left',visibility:['visible','occluded','missing'].includes(draft.poseEditor.visibility) ? draft.poseEditor.visibility : 'visible'} : null;
+      ? {...draft.poseEditor,hand:['all','body','feet','face','left','right'].includes(draft.poseEditor.hand) ? draft.poseEditor.hand : 'all',visibility:['visible','occluded','missing'].includes(draft.poseEditor.visibility) ? draft.poseEditor.visibility : 'visible'} : null;
     state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,16) : [];
     state.humanOverlayChoice = ['latest','hidden'].includes(draft.humanOverlayChoice) || /^[0-9a-f]{32}$/.test(draft.humanOverlayChoice || '')
       ? draft.humanOverlayChoice : 'latest';
@@ -384,14 +384,14 @@ function updateAnnotationHistory() {
   ui.undoAnnotation.disabled = !editable() || !annotationHistory.canUndo;
   ui.redoAnnotation.disabled = !editable() || !annotationHistory.canRedo;
   ui.clearAnnotations.disabled = !editable() || !state.annotations.some(mark => annotationVisibleInPane(mark,state.toolPane));
-  id('clear-round').disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length && !state.sceneSnapshots.length && !state.snapshot);
+  id('clear-round').disabled = !editable() || (!state.annotations.length && !state.dynamicSnapshots.length && !state.sceneSnapshots.length && !state.snapshot && !state.poseEdits.length);
   ui.confirmClear.disabled = !editable();
   ui.referenceAllAnnotations.disabled = !editable() || !state.annotations.length;
 }
 
 function annotationEditState() {
   return {annotations:[...state.annotations], sceneSnapshots:[...state.sceneSnapshots], dynamicSnapshots:[...state.dynamicSnapshots],
-    snapshot:state.snapshot, sceneView:state.sceneView};
+    snapshot:state.snapshot, sceneView:state.sceneView, poseEdits:structuredClone(state.poseEdits)};
 }
 function recordAnnotationEdit(before) {
   annotationHistory.record(before, annotationEditState());
@@ -410,6 +410,14 @@ function applyAnnotationEdit(from, to) {
     return false;
   }
   pauseTimeline(); hideTextEditor(); state.drag = null;
+  cancelPoseEditDrag();
+  const previousPoseIds=new Set(state.poseEdits.map(item => item.id));
+  state.poseEdits=structuredClone(to.poseEdits || []);
+  for (const sample of from.poseEdits || []) {
+    if (!state.poseEdits.some(item => item.id === sample.id)) ui.note.value=promptReferenceText.remove(ui.note.value,poseEditToken(sample.id));
+  }
+  for (const sample of state.poseEdits) if (!previousPoseIds.has(sample.id)) referencePoseEdit(sample,{focus:false});
+  renderPromptImageReferences();
   state.annotations = [...to.annotations];
   state.dynamicSnapshots = moments;
   state.sceneSnapshots = [...to.sceneSnapshots];
@@ -2653,19 +2661,9 @@ function setReferences(references) {
 }
 function activeReference() { return clipReference() || state.references.find((ref) => ref.id === state.activeReferenceId); }
 function renderReferenceStrip() {
-  renderReferenceViews();
+  const views = referenceViews(), representedViews = new Set();
   ui.referenceStrip.replaceChildren();
-  if (state.referenceClip) {
-    const button = document.createElement('button');
-    button.type = 'button'; button.className = 'compact-button';
-    button.textContent = (state.clipEnabled ? '✓ ' : '↺ ') + (referenceViews().length > 1 ? '同步参考' : state.referenceClip.name);
-    button.addEventListener('click', () => {
-      if (!editable()) return;
-      state.clipEnabled = true; seekTimeline(state.time);
-      renderReferenceStrip();
-    });
-    ui.referenceStrip.append(button);
-  }
+  ui.referenceStrip.classList.toggle('has-reference-clip', !!state.referenceClip && state.references.length > 0);
   if (!state.references.length && !state.referenceClip) {
     const empty = document.createElement('span');
     empty.className = 'muted';
@@ -2674,9 +2672,11 @@ function renderReferenceStrip() {
     return;
   }
   for (const ref of state.references) {
-    const view = viewForReferenceImage(referenceViews(), ref);
+    const view = viewForReferenceImage(views, ref);
     const button = document.createElement('button');
     button.type = 'button';
+    button.dataset.referenceId = ref.id;
+    if (view) { button.dataset.viewId = view.clip_id; representedViews.add(view.clip_id); }
     const selected = view && state.clipEnabled ? view.clip_id === (state.pendingViewId || state.activeViewId) : ref.id === state.activeReferenceId;
     button.className = 'thumb' + (selected ? ' active' : '');
     button.title = ref.name || '参考图';
@@ -2685,13 +2685,8 @@ function renderReferenceStrip() {
     image.src = resourceURL(ref.url);
     image.alt = '';
     button.append(image);
-    if (referenceCamera(ref)) {
-      const cameraBadge = document.createElement('span');
-      cameraBadge.className = 'thumb-camera';
-      cameraBadge.textContent = view ? '同步' : '机位';
-      button.append(cameraBadge);
-      button.title = (ref.name || '参考图') + (view ? ' · 切换同步机位，保持当前时间' : ' · 有相机位姿');
-    }
+    if (view) button.title = (ref.name || '参考图') + ' · 切换机位，保持当前时间';
+    else if (referenceCamera(ref)) button.title = (ref.name || '参考图') + ' · 有相机位姿';
     const count = state.annotations.filter((a) => a.pane === 'reference' && a.reference_image_id === ref.id).length;
     if (count) {
       const badge = document.createElement('span');
@@ -2720,6 +2715,24 @@ function renderReferenceStrip() {
     });
     ui.referenceStrip.append(button);
   }
+  // Every selectable video view needs an explicit entry, including views with
+  // no calibration or an ambiguous match to a static reference thumbnail.
+  for (const view of views.length > 1 ? views : []) {
+    if (representedViews.has(view.clip_id)) continue;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'thumb'; button.dataset.viewId = view.clip_id;
+    button.title = (view.name || '机位') + ' · 切换机位，保持当前时间';
+    button.setAttribute('aria-label', '切换机位 ' + (view.name || '机位'));
+    const image = document.createElement('img');
+    image.src = resourceURL(view.frames[0].url); image.alt = ''; button.append(image);
+    button.addEventListener('click', () => {
+      if (!editable()) return;
+      state.referenceZoom = 1; state.referencePan = {x:0,y:0};
+      seekTimeline(state.timelineTarget ?? state.time, {viewId:view.clip_id, preserveTime:true});
+    });
+    ui.referenceStrip.append(button);
+  }
+  renderReferenceViews();
 }
 function showActiveReference() {
   const ref = activeReference();
@@ -2774,10 +2787,10 @@ function humanJobNumber(job) {
   return Math.max(0, ordered.findIndex((item) => item.job_id === job.job_id)) + 1;
 }
 function humanJobName(job) { return '人体结果' + humanJobNumber(job); }
-function humanOverlayJob() {
-  if (state.humanOverlayChoice === 'hidden') return null;
+function humanOverlayJob(choice=state.humanOverlayChoice) {
+  if (choice === 'hidden') return null;
   const jobs=state.humanJobs.filter((job) => job.status === 'completed' && humanJobContainsCurrentReference(job));
-  if (state.humanOverlayChoice !== 'latest') return jobs.find((job) => job.job_id === state.humanOverlayChoice) || null;
+  if (choice !== 'latest') return jobs.find((job) => job.job_id === choice) || null;
   const observations=jobs.filter((job) => job.evidence_kind !== 'projected_3d');
   return [...(observations.length ? observations : jobs)].sort((a,b) =>
     String(b.finished_at || b.created_at || '').localeCompare(String(a.finished_at || a.created_at || '')) ||
@@ -2824,90 +2837,48 @@ function humanCurrentFrame(job) {
   if (humanAutomaticJob(job)) return detail?.frames?.find((frame) => frame.reference_id === ref?.id) || null;
   return poseFrameForReference(detail, ref?.id, clipReference() ? referenceView()?.clip_id : null, state.time);
 }
+function poseEditName(sample) { return '关键点修改' + (sample.number || state.poseEdits.findIndex(item => item.id === sample.id)+1); }
+function poseEditSummary(sample) {
+  return sample.edits.map(point => poseJointLabel(point.name) + (point.visibility === 'visible' ? '' :
+    point.visibility === 'occluded' ? '（遮挡）' : '（缺失）')).join('、');
+}
 function renderHumanPosePanel() {
   renderPoseEditor();
-  const jobs=state.humanJobs.filter((job) => job.status === 'completed');
-  ui.humanPanel.classList.toggle('hidden',!jobs.length);
+  ui.humanPanel.classList.toggle('hidden',!state.poseEdits.length);
   ui.humanLatest.setAttribute('aria-pressed',String(state.humanOverlayChoice === 'latest'));
   ui.humanHideAll.setAttribute('aria-pressed',String(state.humanOverlayChoice === 'hidden'));
-  const overlayJob=humanOverlayJob();
   ui.humanStatus.textContent=state.humanError || '';
   ui.humanStatus.classList.toggle('hidden',!state.humanError);
   for (const job of state.humanJobs) {
     if (job.status === 'completed' && humanJobContainsCurrentReference(job) && !humanCurrentFrame(job)) {
       const referenceId=humanAutomaticJob(job) ? activeReference()?.id : null;
       const loadKey=humanPoseLoadKey(job,referenceId);
-      const busyForJob=humanAutomaticJob(job) && [...state.humanDetailLoads].some((key) => key.startsWith(job.job_id + ':'));
+      const busyForJob=humanAutomaticJob(job) && [...state.humanDetailLoads].some(key => key.startsWith(job.job_id + ':'));
       if (!busyForJob && !state.humanDetailLoads.has(loadKey) && !state.humanDetailErrors.has(loadKey)) {
         Promise.resolve().then(() => ensureHumanPoseDetail(job,{referenceId}));
       }
     }
   }
-  const jobsSignature=JSON.stringify([jobs,state.poseRefs,state.poseEdits,state.poseCorrectionsSupported,editable(),state.humanOverlayChoice,overlayJob?.job_id,
-    jobs.map((job) => [job.job_id,humanCurrentFrame(job)?.reference_id,
-      state.humanDetailLoads.has(job.job_id),state.humanDetailErrors.get(job.job_id),
-      state.humanDetailLoads.has(humanPoseLoadKey(job,activeReference()?.id)),
-      state.humanDetailErrors.get(humanPoseLoadKey(job,activeReference()?.id))])]);
-  if (jobsSignature === state.humanJobsSignature) return;
-  state.humanJobsSignature=jobsSignature; ui.humanJobs.replaceChildren();
-  for (const job of [...jobs].reverse()) {
-    const row=document.createElement('div'); row.className='human-pose-job';
-    const heading=document.createElement('div'); heading.className='human-pose-job-heading';
-    const name=document.createElement('strong'); name.textContent=humanJobName(job);
-    const status=document.createElement('span'); status.textContent=({awaiting_import:'等待外部结果',completed:'已完成',failed:'失败',cancelled:'已取消',interrupted:'已中断'})[job.status] || job.status;
-    heading.append(name,status); row.append(heading);
-    const source=document.createElement('small'); source.textContent=job.multi_view
-      ? `${job.source_kind === 'static_references' ? '参考图' : '多机位'} · ${(Array.isArray(job.views) ? job.views : []).map((item) => item.view_name || referenceView(item.view_id)?.name || item.view_id).join('、')}`
-      : job.view_name || job.reference_name || (humanAutomaticJob(job) ? '全部参考图' : '参考图'); row.append(source);
-    if (job.status === 'completed') {
-      const origin=document.createElement('small'); origin.textContent=poseEvidenceLabel(job) + (job.keypoint_profile ? ' · ' + job.keypoint_profile : '');
-      if (job.evidence_kind === 'projected_3d') origin.title='从三维人体投影得到，用来检查重建；不表示图像里独立追踪到的关键点。';
-      row.append(origin);
-    }
-    const frame=humanCurrentFrame(job), ref=activeReference();
-    if (frame) {
-      const detail=document.createElement('small'); detail.textContent=(frame.reference_id !== ref?.id ? '近邻采样：' : '来源：') +
-        poseFrameLabel(frame,job.reference_name) + (frame.tracking_status === 'lost' ? ' · 未找到人物' : ''); row.append(detail);
-    }
-    const error=job.error || state.humanDetailErrors.get(job.job_id) || state.humanDetailErrors.get(humanPoseLoadKey(job,ref?.id));
-    if (error) { const detail=document.createElement('small'); detail.className='human-pose-error'; detail.textContent=String(error); row.append(detail); }
-    if (job.status === 'completed') {
-      const actions=document.createElement('div'); actions.className='human-pose-job-actions';
-      const selected=state.humanOverlayChoice === job.job_id || state.humanOverlayChoice === 'latest' && overlayJob?.job_id === job.job_id;
-      const display=document.createElement('button'); display.type='button'; display.className='compact-button human-pose-display';
-      display.textContent=selected ? '隐藏' : '显示'; display.setAttribute('aria-pressed',String(selected));
-      display.title=selected ? '隐藏参考图上的人体结果' : '在参考图上只显示这份人体结果';
-      display.addEventListener('click',() => setHumanOverlayChoice(selected ? 'hidden' : job.job_id)); actions.append(display);
-      const cite=document.createElement('button'); cite.type='button'; cite.className='compact-button emphasis-button'; cite.textContent='引用人体';
-      cite.disabled=!editable() || !frame; cite.title=frame ? '引用当前来源帧的' + poseEvidenceLabel(job) + '和骨架图' : '切到有结果的机位和帧后引用';
-      cite.addEventListener('mousedown',event => event.preventDefault()); cite.addEventListener('click',() => insertHumanPoseReference(job,frame)); actions.append(cite);
-      const names=state.humanDetails.get(job.job_id)?.keypoint_names || job.keypoint_names;
-      if (state.poseCorrectionsSupported && handJointIndices(names,'left').length === 21 && handJointIndices(names,'right').length === 21) {
-        const edit=document.createElement('button'); edit.type='button'; edit.className='compact-button human-pose-edit-action';
-        edit.textContent='修正关键点'; edit.disabled=!editable() || frame?.reference_id !== activeReference()?.id || !frame?.image_sha256;
-        edit.addEventListener('click',() => beginPoseEdit(job,frame)); actions.append(edit);
-      }
-      if (!frame) {
-        const viewButton=document.createElement('button'); viewButton.type='button'; viewButton.className='compact-button'; viewButton.textContent='查看结果';
-        viewButton.disabled=!editable() || state.humanDetailLoads.has(job.job_id);
-        viewButton.addEventListener('click',() => viewHumanPose(job)); actions.append(viewButton);
-      }
-      const download=document.createElement('button'); download.type='button'; download.className='compact-button'; download.textContent='下载 JSON';
-      download.addEventListener('click',() => downloadHumanPose(job)); actions.append(download);
-      row.append(actions);
-      for (const sample of state.poseEdits.filter((item) => item.job_id === job.job_id)) {
-        const draft=document.createElement('div'); draft.className='human-pose-edit-draft';
-        draft.append(document.createTextNode((sample.label || '手部修正') + ' · ' + sample.edits.length + ' 点 '));
-        const open=document.createElement('button'); open.type='button'; open.className='text-button'; open.textContent='回看';
-        open.disabled=!editable(); open.addEventListener('click',() => revisitPoseEdit(sample));
-        const cite=document.createElement('button'); cite.type='button'; cite.className='text-button'; cite.textContent='引用修正';
-        cite.disabled=!editable() || !state.poseCorrectionsSupported; cite.addEventListener('click',() => referencePoseEdit(sample));
-        draft.append(open,cite); row.append(draft);
-      }
-    }
-    ui.humanJobs.append(row);
+  const signature=JSON.stringify([state.poseEdits,editable(),state.poseCorrectionsSupported]);
+  if (signature === state.humanJobsSignature) return;
+  state.humanJobsSignature=signature; ui.humanJobs.replaceChildren();
+  for (const sample of state.poseEdits) {
+    const row=document.createElement('div'); row.className='human-pose-edit-draft human-pose-job'; row.dataset.poseEditId=sample.id;
+    const heading=document.createElement('strong'); heading.textContent=poseEditName(sample);
+    const source=document.createElement('small'); source.textContent=sample.label;
+    const changes=document.createElement('small'); changes.textContent=poseEditSummary(sample);
+    const actions=document.createElement('div'); actions.className='human-pose-job-actions';
+    const open=document.createElement('button'); open.type='button'; open.className='text-button'; open.textContent='回看';
+    open.disabled=!editable(); open.addEventListener('click',() => revisitPoseEdit(sample));
+    const cite=document.createElement('button'); cite.type='button'; cite.className='text-button'; cite.textContent='引用';
+    cite.disabled=!editable() || !state.poseCorrectionsSupported;
+    cite.addEventListener('mousedown',event => event.preventDefault()); cite.addEventListener('click',() => referencePoseEdit(sample));
+    const remove=document.createElement('button'); remove.type='button'; remove.className='text-button'; remove.textContent='移除';
+    remove.disabled=!editable(); remove.addEventListener('click',() => removePoseEdit(sample));
+    actions.append(open,cite,remove); row.append(heading,source,changes,actions); ui.humanJobs.append(row);
   }
 }
+
 function humanJobContainsCurrentReference(job) {
   const ref=activeReference(), view=clipReference() ? referenceView() : null;
   if (humanAutomaticJob(job)) return job.source_kind === 'static_references'
@@ -2930,8 +2901,15 @@ function drawHumanPoseOverlay() {
   const color=POSE_COLORS[(humanJobNumber(job)-1)%POSE_COLORS.length];
   const sample=state.poseEdits.find((item) => item.job_id === job.job_id && item.reference_id === frame.reference_id);
   const corrected=correctedPoseFrame(frame,sample);
-  drawPoseSkeleton(surface.context,corrected,surface.width,surface.height,{color,fontFamily:annotationFontFamily,threshold:job.confidence_threshold ?? 0.3,
-    edges:detail.skeleton_edges, label:humanJobName(job) + ' · ' + poseEvidenceLabel(job) + ' · ' + poseFrameLabel(frame,job.reference_name)});
+  drawPoseSkeleton(surface.context,corrected,surface.width,surface.height,{color,threshold:job.confidence_threshold ?? 0.3,
+    edges:detail.skeleton_edges});
+  if (sample) {
+    surface.context.save(); surface.context.fillStyle='#b65320';
+    for (const point of sample.edits) if (point.visibility === 'visible' && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+      surface.context.beginPath(); surface.context.arc(point.x*surface.width,point.y*surface.height,4,0,Math.PI*2); surface.context.fill();
+    }
+    surface.context.restore();
+  }
   drawPoseEditHandles(surface.context,corrected,surface.width,surface.height);
 }
 function poseEditorContext() {
@@ -2943,35 +2921,75 @@ function poseEditorContext() {
   const sample=state.poseEdits.find((item) => item.job_id === editor.jobId && item.reference_id === editor.referenceId);
   return {editor,job,detail,frame,sample,names:detail?.keypoint_names || job?.keypoint_names || []};
 }
+function poseEditorIndices(context) {
+  return poseJointIndices(context.names,context.editor.hand,context.detail?.keypoint_groups || context.job?.keypoint_groups || {});
+}
 function renderPoseEditor() {
   const context=poseEditorContext();
+  const available=humanOverlayJob() || humanOverlayJob('latest');
+  const availableFrame=available && humanCurrentFrame(available);
+  ui.poseEditTool.disabled=!editable() || !state.poseCorrectionsSupported || state.seeking || !referencePixelsReady() ||
+    availableFrame?.reference_id !== activeReference()?.id || !availableFrame?.image_sha256;
+  ui.poseEditTool.title=ui.poseEditTool.disabled ? '当前原图尚无可编辑的关键点结果' : '拖动关键点，自动生成本轮修改引用';
   ui.poseEditPanel.classList.toggle('hidden',!context || !state.poseCorrectionsSupported);
   const active=!!context?.frame && context.editor.referenceId === activeReference()?.id && referencePixelsReady() &&
-    editable() && state.poseCorrectionsSupported && !state.seeking;
+    humanOverlayJob()?.job_id === context.editor.jobId && editable() && state.poseCorrectionsSupported && !state.seeking;
   ui.humanCanvas.classList.toggle('pose-editing',active);
+  ui.poseEditTool.classList.toggle('active',active); ui.poseEditTool.setAttribute('aria-pressed',String(active));
   if (!context) return;
   const {editor,frame,sample,names}=context;
-  const indices=handJointIndices(names,editor.hand);
-  const optionSignature=editor.hand + ':' + indices.map((index) => names[index]).join(',');
+  const groups=context.detail?.keypoint_groups || context.job?.keypoint_groups || {};
+  const regions=[['all','全部'],['body','身体'],['feet','脚'],['face','脸'],['left','左手'],['right','右手']]
+    .filter(([region]) => poseJointIndices(names,region,groups).length);
+  const regionSignature=JSON.stringify(regions);
+  if (ui.poseEditHand.dataset.options !== regionSignature) {
+    ui.poseEditHand.replaceChildren();
+    for (const [value,label] of regions) {
+      const option=document.createElement('option'); option.value=value; option.textContent=label; ui.poseEditHand.append(option);
+    }
+    ui.poseEditHand.dataset.options=regionSignature;
+  }
+  if (!regions.some(([value]) => value === editor.hand)) editor.hand='all';
+  const indices=poseEditorIndices(context);
+  const optionSignature=editor.hand + ':' + indices.map(index => names[index]).join(',');
   if (ui.poseEditJoint.dataset.options !== optionSignature) {
     ui.poseEditJoint.replaceChildren();
     for (const index of indices) {
-      const option=document.createElement('option'); option.value=names[index]; option.textContent=handJointLabel(names[index]);
+      const option=document.createElement('option'); option.value=names[index]; option.textContent=poseJointLabel(names[index]);
       ui.poseEditJoint.append(option);
     }
     ui.poseEditJoint.dataset.options=optionSignature;
   }
-  if (!indices.some((index) => names[index] === editor.jointName)) editor.jointName=names[indices[0]];
+  if (!indices.some(index => names[index] === editor.jointName)) {
+    editor.jointName=names[indices[0]];
+    const chosen=correctedPoseFrame(frame || {},sample).keypoints?.find(point => point.name === editor.jointName);
+    editor.placeSelected=!!chosen && (chosen.in_frame === false || chosen.manual_visibility === 'missing' ||
+      chosen.manual_visibility === 'occluded' && !chosen.manual_position);
+  }
   ui.poseEditHand.value=editor.hand; ui.poseEditJoint.value=editor.jointName || '';
   ui.poseEditVisibility.value=editor.visibility;
   ui.poseEditSource.textContent=frame ? poseFrameLabel(frame) : sample?.label || '加载原结果…';
-  const original=frame?.keypoints?.find((point) => point.name === editor.jointName);
-  const edit=sample?.edits.find((point) => point.name === editor.jointName);
+  const jobs=state.humanJobs.filter(job => job.status === 'completed' && humanJobContainsCurrentReference(job));
+  const resultSignature=JSON.stringify(jobs.map(job => [job.job_id,job.created_at,job.evidence_kind]));
+  if (ui.poseEditResult.dataset.options !== resultSignature) {
+    ui.poseEditResult.replaceChildren();
+    for (const job of jobs) {
+      const option=document.createElement('option'); option.value=job.job_id;
+      const date=job.created_at ? new Date(job.created_at).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+      option.textContent=poseEvidenceLabel(job)+(date ? ' · '+date : ''); ui.poseEditResult.append(option);
+    }
+    ui.poseEditResult.dataset.options=resultSignature;
+  }
+  ui.poseEditResult.value=editor.jobId;
+  id('pose-edit-result-control').classList.toggle('hidden',jobs.length <= 1);
+  ui.poseEditResult.disabled=!editable() || editor.referenceId !== activeReference()?.id || state.seeking;
+  const original=frame?.keypoints?.find(point => point.name === editor.jointName);
+  const edit=sample?.edits.find(point => point.name === editor.jointName);
   const confidence=Number.isFinite(original?.score) ? ' · 原评分 ' + original.score.toFixed(2) +
     (original.score < (context.job?.confidence_threshold ?? .3) ? '（低置信）' : '') : '';
-  ui.poseEditHint.textContent=!active ? '这份修正固定在原参考帧；切回该机位和帧后继续编辑。'
-    : handJointLabel(editor.jointName) + confidence + (edit ? ' · 已人工修正' : ' · 原结果未修改') +
-      '。点击定位或拖动关节；可缩放，空格拖动平移。遮挡/缺失不作为可见点。';
+  ui.poseEditHint.textContent=!active ? '修改固定在原参考帧；回到该帧并显示骨架后继续编辑。'
+    : poseJointLabel(editor.jointName) + confidence + (edit ? ' · 已修改' : '') +
+      '。拖动点；缺失点先在下拉框选择，再点击定位。空格拖动平移。';
   for (const control of [ui.poseEditHand,ui.poseEditJoint,ui.poseEditVisibility]) control.disabled=!active;
   ui.poseEditReset.disabled=!active || !edit;
   ui.poseEditReference.disabled=!editable() || !sample?.edits.length || !state.poseCorrectionsSupported;
@@ -2982,59 +3000,91 @@ function drawPoseEditHandles(context,frame,width,height) {
   if (!current || current.editor.referenceId !== activeReference()?.id || frame.reference_id !== current.editor.referenceId ||
       humanOverlayJob()?.job_id !== current.editor.jobId || !state.poseCorrectionsSupported) return;
   context.save();
-  for (const index of handJointIndices(current.names,current.editor.hand)) {
+  for (const index of poseEditorIndices(current)) {
     const point=frame.keypoints[index];
-    if (!point || point.in_frame === false && !(point.manual_visibility === 'occluded' && point.manual_position) || point.manual_visibility === 'missing' ||
+    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) ||
+        point.in_frame === false && !(point.manual_visibility === 'occluded' && point.manual_position) || point.manual_visibility === 'missing' ||
         point.manual_visibility === 'occluded' && !point.manual_position) continue;
-    const x=point.x*width,y=point.y*height, selected=point.name === current.editor.jointName;
-    context.strokeStyle=point.manual_source ? '#b65320' : point.score < (current.job.confidence_threshold ?? .3) ? '#77776f' :
-      current.editor.hand === 'left' ? '#b65320' : '#6856aa';
+    const x=point.x*width,y=point.y*height,selected=point.name === current.editor.jointName;
+    context.strokeStyle=point.manual_source ? '#b65320' : point.score < (current.job.confidence_threshold ?? .3) ? '#77776f' : '#087f8c';
     context.fillStyle=point.manual_visibility === 'visible' ? '#b65320' : '#f5f4ef';
-    context.lineWidth=selected ? 2.5 : 1.5;
-    context.beginPath(); context.arc(x,y,selected ? 7 : 4.5,0,Math.PI*2); context.fill(); context.stroke();
-    if (selected) {
-      context.font='12px ' + annotationFontFamily; context.fillStyle='#292925';
-      const label=handJointLabel(point.name),left=clamp(x+10,4,Math.max(4,width-context.measureText(label).width-4));
-      context.fillText(label,left,Math.max(15,y-10));
-    }
+    context.lineWidth=selected ? 2.5 : 1.2;
+    context.beginPath(); context.arc(x,y,selected ? 7 : 3,0,Math.PI*2); context.fill(); context.stroke();
   }
   context.restore();
 }
+async function startCurrentPoseEdit() {
+  if (!editable() || !state.poseCorrectionsSupported) return;
+  if (state.poseEditor?.referenceId === activeReference()?.id && humanOverlayJob()?.job_id === state.poseEditor.jobId) {
+    finishPoseEdit(); return;
+  }
+  pauseTimeline();
+  const referenceId=activeReference()?.id,job=humanOverlayJob() || humanOverlayJob('latest');
+  if (!job) { announce('当前帧尚无人体关键点，请先导入二维关键点结果。',true); return; }
+  const detail=await ensureHumanPoseDetail(job,{referenceId,retry:true});
+  if (referenceId !== activeReference()?.id || !editable()) return;
+  const frame=detail?.frames?.find(item => item.reference_id === referenceId);
+  if (!frame) { announce('当前原图没有对应的关键点；请切换到实际采样帧。',true); return; }
+  beginPoseEdit(job,frame);
+}
 function beginPoseEdit(job,frame) {
   if (!editable() || !state.poseCorrectionsSupported || frame?.reference_id !== activeReference()?.id || !frame?.image_sha256) return;
-  pauseTimeline(); setMode('select');
-  state.poseEditor={jobId:job.job_id,referenceId:frame.reference_id,hand:'left',jointName:null,visibility:'visible'};
+  const restoreLatest=state.humanOverlayChoice === 'latest' ||
+    state.poseEditor?.restoreLatest === true && state.poseEditor.jobId === job.job_id;
+  cancelPoseEditDrag(); pauseTimeline(); setMode('select','reference');
+  state.poseEditor={jobId:job.job_id,referenceId:frame.reference_id,hand:'all',jointName:null,visibility:'visible',restoreLatest};
   setHumanOverlayChoice(job.job_id);
   minimalLayout?.closeReferences(); drawOverlays(); saveDraft();
-  announce('在左图点选或拖动手部关节；只修改这张来源帧。');
+  announce('在左图拖动关键点，修改会自动引用到提示中。');
+}
+function finishPoseEdit() {
+  const restoreLatest=state.poseEditor?.restoreLatest;
+  cancelPoseEditDrag(); state.poseEditor=null;
+  if (restoreLatest) setHumanOverlayChoice('latest');
+  drawOverlays(); saveDraft();
 }
 function poseEditSample(context,{create=false}={}) {
   if (context.sample) return context.sample;
   if (!create) return null;
-  if (state.poseEdits.length >= 8) throw new Error('一条提示最多保留 8 帧关键点修正，请先发送或移除一份。');
+  if (state.poseEdits.length >= 8) throw new Error('一条提示最多保留 8 帧关键点修改，请先发送或移除一份。');
   const {frame,job}=context;
   const sample={id:newId().replace(/-/g,''),job_id:job.job_id,reference_id:frame.reference_id,
     image_sha256:frame.image_sha256,image_orientation:frame.image_orientation,keypoint_profile:job.keypoint_profile,
+    number:Math.max(0,...state.poseEdits.map((item,index) => item.number || index+1))+1,
     label:poseFrameLabel(frame),edits:[]};
   state.poseEdits.push(sample); return sample;
 }
 function updatePoseJoint(visibility,position=null) {
   const context=poseEditorContext();
-  if (!context?.frame || context.editor.referenceId !== activeReference()?.id || !editable() || !state.poseCorrectionsSupported) return null;
+  if (!context?.frame || !context.names.includes(context.editor.jointName) || context.editor.referenceId !== activeReference()?.id ||
+      !editable() || !state.poseCorrectionsSupported) return null;
   try {
     const sample=poseEditSample(context,{create:true});
     const edit={name:context.editor.jointName,visibility,...(visibility !== 'missing' && position ?
       {x:Math.min(visibility === 'visible' ? 1-1e-7 : 1,position.x),y:Math.min(visibility === 'visible' ? 1-1e-7 : 1,position.y)} : {})};
-    const index=sample.edits.findIndex((item) => item.name === edit.name);
+    const index=sample.edits.findIndex(item => item.name === edit.name);
     if (index < 0) sample.edits.push(edit); else sample.edits[index]=edit;
     drawOverlays(); saveDraft(); return sample;
   } catch (error) { announce(error.message,true); return null; }
 }
 function referencePoseEdit(sample,{focus=true}={}) {
-  if (!editable() || !sample?.edits.length || !state.poseCorrectionsSupported) return;
+  if (!editable() || !sample?.edits.length || !state.poseCorrectionsSupported) return false;
   const token=poseEditToken(sample.id);
-  if (promptText().includes(token)) { if (focus) { minimalLayout?.openChat(); ui.note.focus(); } return; }
-  insertNoteText('手部修正（' + sample.label + '） ' + token,{replaceSelection:false,focus});
+  if (promptText().includes(token)) {
+    renderPromptImageReferences();
+    if (focus) { minimalLayout?.openChat(); ui.note.focus(); }
+    return true;
+  }
+  return insertNoteText(promptReferenceText.remember(poseEditName(sample),token).alias,{replaceSelection:false,focus,preserveTool:true});
+}
+function removePoseEdit(sample,{record=true}={}) {
+  if (!sample || !editable()) return;
+  cancelPoseEditDrag();
+  const before=annotationEditState();
+  state.poseEdits=state.poseEdits.filter(item => item.id !== sample.id);
+  ui.note.value=promptReferenceText.remove(ui.note.value,poseEditToken(sample.id));
+  if (record) recordAnnotationEdit(before);
+  renderPromptImageReferences(); drawOverlays(); saveDraft();
 }
 async function downloadPoseEdit(sample) {
   if (!sample?.edits.length || !state.poseCorrectionsSupported) return;
@@ -3042,102 +3092,144 @@ async function downloadPoseEdit(sample) {
     const edits=collectPoseEdits(poseEditToken(sample.id),[sample]);
     const result=await api('/api/workspace/pose/corrections/export',{method:'POST',body:{session_id:state.sessionId,pose_edits:edits}});
     const correction=result.documents?.[0];
-    if (!correction || correction.correction_id !== sample.id) throw new Error('修正导出与当前来源不匹配。');
+    if (!correction || correction.correction_id !== sample.id) throw new Error('修改导出与当前来源不匹配。');
     const url=URL.createObjectURL(new Blob([JSON.stringify(correction,null,2)],{type:'application/json'}));
     const link=document.createElement('a'); link.href=url; link.download='pose-correction-' + sample.id + '.json'; document.body.append(link);
     link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url),1000);
-  } catch (error) { announce('修正导出失败：' + error.message,true); }
+  } catch (error) { announce('修改导出失败：' + error.message,true); }
 }
 async function revisitPoseEdit(sample) {
-  const job=state.humanJobs.find((item) => item.job_id === sample.job_id);
+  const job=state.humanJobs.find(item => item.job_id === sample.job_id);
   if (!job || !editable()) return;
   const detail=await ensureHumanPoseDetail(job,{referenceId:sample.reference_id,retry:true});
-  const frame=detail?.frames.find((item) => item.reference_id === sample.reference_id);
+  const frame=detail?.frames.find(item => item.reference_id === sample.reference_id);
   if (!frame) return;
-  const view=referenceViews().find((item) => item.frames.some((ref) => ref.id === frame.reference_id));
+  const view=referenceViews().find(item => item.frames.some(ref => ref.id === frame.reference_id));
   if (view) await seekTimeline(frame.time_sec,{viewId:view.clip_id,preserveTime:true});
-  else if (state.references.some((ref) => ref.id === frame.reference_id)) {
+  else if (state.references.some(ref => ref.id === frame.reference_id)) {
     pauseTimeline(); state.clipEnabled=false; state.activeReferenceId=frame.reference_id;
     showActiveReference(); renderReferenceStrip();
     if (referenceCamera(activeReference())) alignActiveReference(); else leaveReferenceCamera();
-  } else { announce('原参考帧已从当前场景移除，修正仍保留且可下载。',true); return; }
+  } else { announce('原参考帧已从当前场景移除，修改仍保留且可下载。',true); return; }
   beginPoseEdit(job,frame);
 }
+function cancelPoseEditDrag() {
+  const drag=state.poseEditDrag;
+  if (!drag) return;
+  state.poseEditDrag=null;
+  state.poseEdits=structuredClone(drag.before.poseEdits);
+  if (ui.humanCanvas.hasPointerCapture(drag.pointerId)) ui.humanCanvas.releasePointerCapture(drag.pointerId);
+  drawOverlays(); saveDraft();
+}
+function commitPoseChange(before,sample) {
+  recordAnnotationEdit(before);
+  if (sample?.edits.length) referencePoseEdit(sample,{focus:false});
+  promptMentions?.refresh(); renderPromptImageReferences(); saveDraft();
+}
 function bindPoseEditEvents() {
+  ui.poseEditTool.addEventListener('click',() => startCurrentPoseEdit().catch(error => announce(error.message,true)));
+  ui.poseEditResult.addEventListener('change',async () => {
+    cancelPoseEditDrag();
+    const referenceId=activeReference()?.id,job=state.humanJobs.find(item => item.job_id === ui.poseEditResult.value);
+    if (!job) return;
+    setHumanOverlayChoice(job.job_id);
+    const detail=await ensureHumanPoseDetail(job,{referenceId,retry:true});
+    if (referenceId !== activeReference()?.id || state.humanOverlayChoice !== job.job_id) return;
+    const frame=detail?.frames?.find(item => item.reference_id === referenceId);
+    if (frame) beginPoseEdit(job,frame);
+  });
   ui.poseEditHand.addEventListener('change',() => {
     if (!state.poseEditor) return;
     state.poseEditor.hand=ui.poseEditHand.value; state.poseEditor.jointName=null; state.poseEditor.visibility='visible';
+    state.poseEditor.placeSelected=false;
     renderPoseEditor(); drawHumanPoseOverlay(); saveDraft();
   });
   ui.poseEditJoint.addEventListener('change',() => {
     const context=poseEditorContext(); if (!context) return;
-    context.editor.jointName=ui.poseEditJoint.value;
-    context.editor.placeSelected=true;
-    context.editor.visibility=context.sample?.edits.find((point) => point.name === context.editor.jointName)?.visibility || 'visible';
+    context.editor.jointName=ui.poseEditJoint.value; context.editor.placeSelected=true;
+    context.editor.visibility=context.sample?.edits.find(point => point.name === context.editor.jointName)?.visibility || 'visible';
     renderPoseEditor(); drawHumanPoseOverlay(); saveDraft();
   });
   ui.poseEditVisibility.addEventListener('change',() => {
-    if (!state.poseEditor) return;
-    state.poseEditor.visibility=ui.poseEditVisibility.value;
-    if (state.poseEditor.visibility !== 'visible') {
-      const sample=updatePoseJoint(state.poseEditor.visibility);
-      if (sample) referencePoseEdit(sample,{focus:false});
+    const context=poseEditorContext(); if (!context) return;
+    context.editor.visibility=ui.poseEditVisibility.value;
+    const before=annotationEditState();
+    const effective=correctedPoseFrame(context.frame,context.sample).keypoints.find(point => point.name === context.editor.jointName);
+    const position=context.editor.visibility !== 'missing' && effective?.in_frame !== false &&
+      Number.isFinite(effective?.x) && Number.isFinite(effective?.y) ? {x:effective.x,y:effective.y} : null;
+    context.editor.placeSelected=!position && context.editor.visibility !== 'missing';
+    if (context.editor.visibility !== 'visible' || position) {
+      const sample=updatePoseJoint(context.editor.visibility,position);
+      commitPoseChange(before,sample);
     }
     renderPoseEditor(); saveDraft();
   });
   ui.poseEditReference.addEventListener('click',() => referencePoseEdit(poseEditorContext()?.sample));
   ui.poseEditDownload.addEventListener('click',() => downloadPoseEdit(poseEditorContext()?.sample));
-  ui.poseEditFinish.addEventListener('click',() => { state.poseEditor=null; state.poseEditDrag=null; drawOverlays(); saveDraft(); });
+  ui.poseEditFinish.addEventListener('click',finishPoseEdit);
   ui.poseEditReset.addEventListener('click',() => {
     const context=poseEditorContext(); if (!context?.sample || !editable()) return;
-    const sample=context.sample; sample.edits=sample.edits.filter((point) => point.name !== context.editor.jointName);
-    if (!sample.edits.length) {
-      state.poseEdits=state.poseEdits.filter((item) => item.id !== sample.id);
-      ui.note.value=promptReferenceText.remove(ui.note.value,poseEditToken(sample.id));
-      renderPromptImageReferences();
-    }
-    context.editor.visibility='visible'; drawOverlays(); saveDraft();
+    const before=annotationEditState(),sample=context.sample;
+    sample.edits=sample.edits.filter(point => point.name !== context.editor.jointName);
+    if (!sample.edits.length) removePoseEdit(sample,{record:false});
+    context.editor.visibility='visible'; context.editor.placeSelected=false;
+    recordAnnotationEdit(before); renderPromptImageReferences(); drawOverlays(); saveDraft();
   });
-  ui.humanCanvas.addEventListener('pointerdown',(event) => {
+  ui.humanCanvas.addEventListener('pointerdown',event => {
     const context=poseEditorContext();
     if (!context?.frame || context.editor.referenceId !== activeReference()?.id || !editable() || !state.poseCorrectionsSupported ||
-        state.spacePan || state.seeking || event.button !== 0) return;
+        state.spacePan || state.seeking || event.button !== 0 || state.poseEditDrag) return;
     event.preventDefault(); event.stopPropagation();
     const point=pointFromPointer(event,ui.humanCanvas),rect=ui.humanCanvas.getBoundingClientRect();
     const effective=correctedPoseFrame(context.frame,context.sample);
     let closest=null,distance=12;
-    for (const index of handJointIndices(context.names,context.editor.hand)) {
+    for (const index of poseEditorIndices(context)) {
       const joint=effective.keypoints[index];
-      if (joint?.in_frame === false && !(joint.manual_visibility === 'occluded' && joint.manual_position) || joint?.manual_visibility === 'missing') continue;
+      if (!joint || !Number.isFinite(joint.x) || !Number.isFinite(joint.y) ||
+          joint.in_frame === false && !(joint.manual_visibility === 'occluded' && joint.manual_position) ||
+          joint.manual_visibility === 'missing' || joint.manual_visibility === 'occluded' && !joint.manual_position) continue;
       const value=Math.hypot((joint.x-point.x)*rect.width,(joint.y-point.y)*rect.height);
       if (value < distance) { distance=value; closest=joint; }
     }
-    if (closest && !context.editor.placeSelected) {
-      context.editor.jointName=closest.name;
-      context.editor.visibility=closest.manual_visibility || 'visible';
-    }
+    const placing=context.editor.placeSelected;
+    if (closest && !placing) {
+      context.editor.jointName=closest.name; context.editor.visibility=closest.manual_visibility || 'visible';
+    } else if (!placing) { renderPoseEditor(); return; }
     context.editor.placeSelected=false;
     if (context.editor.visibility === 'missing') { renderPoseEditor(); return; }
+    const before=annotationEditState();
     ui.humanCanvas.setPointerCapture(event.pointerId);
-    state.poseEditDrag={pointerId:event.pointerId,jobId:context.editor.jobId,referenceId:context.editor.referenceId};
-    updatePoseJoint(context.editor.visibility,point);
+    state.poseEditDrag={pointerId:event.pointerId,jobId:context.editor.jobId,referenceId:context.editor.referenceId,
+      startX:event.clientX,startY:event.clientY,before,changed:placing};
+    if (placing) updatePoseJoint(context.editor.visibility,point);
+    else { renderPoseEditor(); drawHumanPoseOverlay(); }
   });
-  ui.humanCanvas.addEventListener('pointermove',(event) => {
+  ui.humanCanvas.addEventListener('pointermove',event => {
     const drag=state.poseEditDrag,context=poseEditorContext();
-    if (!drag || drag.pointerId !== event.pointerId || drag.referenceId !== activeReference()?.id || context?.editor.jobId !== drag.jobId) return;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (drag.referenceId !== activeReference()?.id || context?.editor.jobId !== drag.jobId || state.seeking || !editable()) {
+      cancelPoseEditDrag(); return;
+    }
     event.preventDefault(); event.stopPropagation();
+    if (!drag.changed && Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY) < 2) return;
+    drag.changed=true;
     updatePoseJoint(context.editor.visibility,pointFromPointer(event,ui.humanCanvas));
   });
-  const finish=(event) => {
-    if (state.poseEditDrag?.pointerId !== event.pointerId) return;
-    event.stopPropagation(); state.poseEditDrag=null;
-    const sample=poseEditorContext()?.sample;
-    if (sample) referencePoseEdit(sample,{focus:false});
+  ui.humanCanvas.addEventListener('pointerup',event => {
+    const drag=state.poseEditDrag;
+    if (drag?.pointerId !== event.pointerId) return;
+    event.stopPropagation();
+    if (drag.referenceId !== activeReference()?.id || state.seeking || !editable()) { cancelPoseEditDrag(); return; }
+    state.poseEditDrag=null;
+    if (ui.humanCanvas.hasPointerCapture(event.pointerId)) ui.humanCanvas.releasePointerCapture(event.pointerId);
+    if (drag.changed) commitPoseChange(drag.before,poseEditorContext()?.sample);
     saveDraft();
-  };
-  ui.humanCanvas.addEventListener('pointerup',finish);
-  ui.humanCanvas.addEventListener('pointercancel',finish);
+  });
+  ui.humanCanvas.addEventListener('pointercancel',cancelPoseEditDrag);
+  ui.humanCanvas.addEventListener('lostpointercapture',cancelPoseEditDrag);
+  window.addEventListener('blur',cancelPoseEditDrag);
 }
+
 async function ensureHumanPoseDetail(job, {retry=false,referenceId=null,first=false}={}) {
   const cached=state.humanDetails.get(job.job_id);
   if (!humanAutomaticJob(job) && cached) return cached;
@@ -3238,7 +3330,11 @@ async function downloadHumanPose(job) {
   setTimeout(() => URL.revokeObjectURL(url),1000);
 }
 function bindHumanPoseEvents() {
-  ui.humanLatest.addEventListener('click',() => setHumanOverlayChoice('latest'));
+  ui.humanLatest.addEventListener('click',() => {
+    setHumanOverlayChoice('latest');
+    const job=humanOverlayJob(),frame=job && humanCurrentFrame(job);
+    if (state.poseEditor && frame?.reference_id === activeReference()?.id) beginPoseEdit(job,frame);
+  });
   ui.humanHideAll.addEventListener('click',() => setHumanOverlayChoice('hidden'));
   id('references-dialog-button').addEventListener('click',() => {
     renderHumanPosePanel(); loadHumanPoses().catch(() => {});
@@ -3348,19 +3444,14 @@ function viewFrameAtTime(view, time) {
   return referenceViews().length > 1 ? nearestFrameAtTime(view?.frames, time) : frameAtTime(view?.frames, time);
 }
 function renderReferenceViews() {
-  const views = referenceViews();
-  const signature = JSON.stringify(views.map((view) => [view.clip_id, view.name]));
-  if (state.viewOptionsSignature !== signature) {
-    state.viewOptionsSignature = signature;
-    ui.viewSelect.replaceChildren();
-    for (const view of views) {
-      const option = document.createElement('option'); option.value = view.clip_id;
-      option.textContent = view.name; ui.viewSelect.append(option);
-    }
+  const viewId = state.pendingViewId || state.activeViewId;
+  for (const button of ui.referenceStrip.querySelectorAll('button.thumb')) {
+    const selected = button.dataset.viewId && state.clipEnabled ? button.dataset.viewId === viewId
+      : button.dataset.referenceId === state.activeReferenceId;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+    button.disabled = !editable();
   }
-  ui.viewControl.classList.toggle('hidden', views.length < 2);
-  ui.viewSelect.value = state.pendingViewId || state.activeViewId || state.referenceClip?.clip_id || '';
-  ui.viewSelect.disabled = !editable();
 }
 function timelineDuration() {
   return state.referenceClip ? Math.max(...referenceViews().map((view) => view.duration_sec))
@@ -3689,7 +3780,7 @@ function renderTimeline({moments=true}={}) {
   ui.timeline.classList.toggle('hidden', !enabled);
   // Keep one set of playback controls and listeners while moving it with its media.
   const referenceTimeline = !!state.referenceClip;
-  const timelineParent = document.querySelector(referenceTimeline ? '.reference-pane' : '.workspace');
+  const timelineParent = document.querySelector(referenceTimeline ? '.reference-pane-footer' : '.workspace');
   ui.timeline.classList.toggle('reference-timeline', referenceTimeline);
   if (ui.timeline.parentElement !== timelineParent) timelineParent.appendChild(ui.timeline);
   ui.timeline.setAttribute('aria-label', referenceTimeline ? '参考视频时间轴' : '动态场景时间轴');
@@ -3852,7 +3943,6 @@ function bindTimelineEvents() {
   });
   ui.seek.addEventListener('input', () => scrubTimeline(Number(ui.seek.value)));
   ui.seek.addEventListener('change', () => scrubTimeline(Number(ui.seek.value), {final:true}));
-  ui.viewSelect.addEventListener('change', () => seekTimeline(state.timelineTarget ?? state.time, {viewId:ui.viewSelect.value, preserveTime:true}));
   id('timeline-prev').addEventListener('click', () => stepReferenceTimeline(-1));
   id('timeline-next').addEventListener('click', () => stepReferenceTimeline(1));
 }
@@ -4005,7 +4095,6 @@ function updateMode() {
   feedbackEvidence?.refresh();
   updateAnnotationHistory();
   renderPromptReferenceControls();
-  id('scene-annotation-toggle').disabled = !editable();
   ui.captureScene.disabled = !editable() || state.sceneView !== 'live';
   ui.captureScene.title = state.sceneView === 'live' ? '保存当前 3D 视角，不覆盖已有截图' : '先返回 3D，调整视角后再截图';
   const context = id('snapshot-context');
@@ -4043,7 +4132,9 @@ function setMode(mode, pane=state.toolPane) {
   if (state.submitting || state.pendingSubmission) return;
   if (!['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode)) return;
   state.toolPane = pane; state.paneModes[pane] = mode; state.mode = mode;
-  if (mode !== 'select') { state.poseEditor=null; state.poseEditDrag=null; }
+  cancelPoseEditDrag();
+  if (state.poseEditor?.restoreLatest) state.humanOverlayChoice='latest';
+  state.poseEditor=null;
   if (mode !== 'select') pauseTimeline();
   hideTextEditor();
   finishAnnotationReferenceDrag();
@@ -4819,7 +4910,8 @@ function resolvePromptReference(token, fallback='') {
     name=job?humanJobName(job):'人体结果';title=fallback;missing=!state.poseRefs.some(item=>poseToken(item.job_id,item.reference_id)===token);
   } else {
     const item=state.poseEdits.find(item=>item.id===key);
-    name='手部修正';label=item?'手部修正（'+item.label+'）':fallback;title=label;missing=!item;
+    name=item ? poseEditName(item) : '关键点修改';label=item ? name+'（'+item.label+'）' : fallback;
+    title=item ? label+' · '+poseEditSummary(item) : fallback;missing=!item;
   }
   return {kind,name,label,title,missing};
 }
@@ -4907,6 +4999,11 @@ function getPromptMentionCandidates() {
       search:['标注 标记 提示 annotation mark',labels[mark.type],mark.name,index+1,mark.group_id,mark.id,mark.text,mark.object_id,mark.reference_image_id].join(' '),
       descriptor:{kind:'annotation',annotationId:mark.id,label:annotationReferenceLabel(mark)}});
   });
+  for (const sample of state.poseEdits) if (sample.edits.length) {
+    candidates.push({key:'pose_edit:'+sample.id,kind:'pose_edit',sessionId,label:poseEditName(sample),
+      detail:sample.label+' · '+poseEditSummary(sample),search:'人体 关键点 修改 修正 pose joint '+poseEditSummary(sample),
+      descriptor:{kind:'pose_edit',poseEditId:sample.id}});
+  }
   return candidates;
 }
 
@@ -4950,11 +5047,19 @@ function promptTimeMoment(moment) {
     name:moment.name || '',animationClips:moment.animation_clips || []};
 }
 function promptTimeFrameText(member) {
-  return member.frameId ? `参考采样 ${promptTimeSeconds(member.referenceTimeSec)} s，机位「${member.viewName}」，第 ${member.frameIndex+1} 帧`
-    : member.referenceId ? '静态参考图随场景时刻保留' : '场景时间轴';
+  if (!member.frameId) return member.referenceId ? '静态参考' : '场景动画';
+  const sample=Math.abs(member.referenceTimeSec-member.timeSec)>1e-7 ? `参考${promptTimeSeconds(member.referenceTimeSec)}s · ` : '';
+  return sample+`${member.viewName || '参考'} #${member.frameIndex+1}`;
 }
-function promptTimeMomentText(member) {
-  return `片段场景时间 ${promptTimeSeconds(member.timeSec)} s；${promptTimeFrameText(member)}`;
+function promptTimeMomentText(members) {
+  const list=Array.isArray(members) ? members : [members];
+  return `片段${promptTimeSeconds(list[0].timeSec)}s · `+[...new Set(list.map(promptTimeFrameText))].join(' / ');
+}
+function promptTimeNames(names) {
+  const unique=[...new Set(names.filter(Boolean))];
+  const numbered=unique.map(name => /^(标记|截图|点|方框|线段|箭头|文字|笔迹)\s*(\d+)$/.exec(name));
+  return numbered.length && numbered.every(item => item && item[1] === numbered[0][1])
+    ? numbered[0][1]+numbered.map(item => item[2]).join('/') : unique.join(' / ');
 }
 function getPromptTimeCandidates() {
   if (!editable() || !dynamicEnabled() || state.seeking || state.pendingViewId || state.timelineTarget !== null) return [];
@@ -4965,18 +5070,19 @@ function getPromptTimeCandidates() {
   const frame=clipReference(), view=referenceView();
   if (frame && view && Number.isFinite(frame.time_sec) && referencePixelsReady()) {
     const index=view.frames.findIndex(item => item.id === frame.id);
-    const frameText=`片段时间 ${promptTimeSeconds(frame.time_sec)} s，机位「${view.name}」，第 ${index+1} 帧`;
-    const sceneText=Math.abs(frame.time_sec-state.time)>1e-7 ? `；场景时间 ${promptTimeSeconds(state.time)} s` : '';
-    add('time:reference:'+view.clip_id+':'+frame.id,'当前参考帧 · '+frameText,
-      '真实参考采样'+sceneText,'reference',
+    const frameText=`片段参考${promptTimeSeconds(frame.time_sec)}s · ${view.name} #${index+1}`;
+    const sceneText=Math.abs(frame.time_sec-state.time)>1e-7 ? `（场景${promptTimeSeconds(state.time)}s）` : '';
+    add('time:reference:'+view.clip_id+':'+frame.id,'当前参考帧 · '+promptTimeSeconds(frame.time_sec)+'s',
+      `${view.name} #${index+1}`+sceneText,'reference',
       {clipId:state.referenceClip.clip_id,viewId:view.clip_id,viewName:view.name,referenceId:frame.id,frameId:frame.id,
         frameIndex:index,timeSec:frame.time_sec,sceneTimeSec:state.time,referenceUrl:frame.url},
-      `参考帧（${frameText}${sceneText}）`,[view.name,index+1,frame.name,promptTimeSeconds(state.time)].join(' '));
+      frameText+sceneText,[view.name,index+1,frame.name,promptTimeSeconds(state.time)].join(' '));
   }
   const moments=state.dynamicSnapshots.map(promptTimeMoment).filter(Boolean);
   const frozen=state.sceneView === 'snapshot' && moments.find(member => member.id === state.snapshot?.id);
-  if (frozen) add('time:snapshot:'+frozen.id,'当前冻结场景截图 · 片段 '+promptTimeSeconds(frozen.timeSec)+' s',
-    promptTimeFrameText(frozen),'snapshot',{members:[frozen]},`场景截图（${promptTimeMomentText(frozen)}）`,frozen.viewName);
+  if (frozen) add('time:snapshot:'+frozen.id,'当前冻结场景截图 · '+promptTimeSeconds(frozen.timeSec)+'s',
+    [promptTimeNames([frozen.name]),promptTimeFrameText(frozen)].filter(Boolean).join(' · '),'snapshot',{members:[frozen]},
+    `${promptTimeNames([frozen.name]) || '截图'} · ${promptTimeMomentText(frozen)}`,[frozen.name,frozen.viewName].join(' '));
 
   // Multiple cameras/screenshots at the same source time are one option. Keep
   // all member IDs and mark names so deletion or source replacement invalidates
@@ -4995,31 +5101,34 @@ function getPromptTimeCandidates() {
   }
   const round=[...groups.values()].sort((a,b) => a.members[0].timeSec-b.members[0].timeSec);
   for (const group of round) {
-    const member=group.members[0], markNames=group.marks.map(mark => mark.name).join('、');
-    const source=member.viewName ? ' · 机位 '+member.viewName : member.referenceId ? ' · 场景截图与静态参考' : ' · 场景';
-    add('time:round:'+group.key,'本轮时刻 · 片段 '+promptTimeSeconds(member.timeSec)+' s'+source,
-      promptTimeFrameText(member)+(markNames ? ' · 标记：'+markNames : ' · 已保留时刻'),'round',
-      {members:group.members,marks:group.marks},`本轮时刻（${promptTimeMomentText(member)}${markNames ? '；标记：'+markNames : ''}）`,
-      group.members.map(item => item.name).join(' '));
+    const member=group.members[0], markNames=promptTimeNames(group.marks.map(mark => mark.name));
+    const snapshots=promptTimeNames(group.members.map(item => item.name));
+    const caption=markNames ? markNames+(group.members.length>1 && snapshots ? `（${snapshots}）` : '') : snapshots || '保留时刻';
+    add('time:round:'+group.key,'本轮时刻 · '+promptTimeSeconds(member.timeSec)+'s',
+      [markNames,snapshots,...new Set(group.members.map(promptTimeFrameText))].filter(Boolean).join(' · '),'round',
+      {members:group.members,marks:group.marks},`${caption} · ${promptTimeMomentText(group.members)}`,
+      [...group.members.map(item => item.name),...group.marks.map(mark => mark.name)].join(' '));
   }
   const distinctTimes=[...new Set(round.map(group => group.members[0].timeSec))];
   if (distinctTimes.length >= 2) {
     const start=Math.min(...distinctTimes), end=Math.max(...distinctTimes);
     const members=round.flatMap(group => group.members), marks=round.flatMap(group => group.marks);
     const views=[...new Set(members.map(member => member.viewName).filter(Boolean))];
-    const locations=views.length ? '机位 '+views.map(name => '「'+name+'」').join('、') : '保留场景截图';
-    add('time:range','本轮标记时段 · '+promptTimeSeconds(start)+'–'+promptTimeSeconds(end)+' s',
-      locations+' · '+distinctTimes.length+' 个时刻'+(marks.length ? ' · 标记：'+marks.map(mark => mark.name).join('、') : ' · 保留时刻'),
+    const locations=views.length ? views.join(' / ') : '场景';
+    add('time:range','本轮标记时段 · '+promptTimeSeconds(start)+'–'+promptTimeSeconds(end)+'s',
+      locations+' · '+distinctTimes.length+'个时刻'+(marks.length ? ' · '+promptTimeNames(marks.map(mark => mark.name)) : ''),
       'range',{startSec:start,endSec:end,members,marks},
-      `本轮标记时段（片段场景时间 ${promptTimeSeconds(start)}–${promptTimeSeconds(end)} s；${locations}）`);
+      `本轮标记时段 · 片段${promptTimeSeconds(start)}–${promptTimeSeconds(end)}s · ${locations}`,
+      [...members.map(member => member.name),...marks.map(mark => mark.name)].join(' '));
   }
   const duration=timelineDuration();
   if ((state.referenceClip || state.animations.size) && Number.isFinite(duration) && duration > 0) {
     const views=referenceViews().map(view => ({clipId:view.clip_id,name:view.name,durationSec:view.duration_sec}));
     const source=state.referenceClip?.name || '场景动画';
-    add('time:clip','整个片段 · 0.000–'+promptTimeSeconds(duration)+' s',source+(views.length>1 ? ' · 全部 '+views.length+' 个机位' : ''),
+    const locations=views.length>1 ? '全部机位' : views[0]?.name || source;
+    add('time:clip','整个片段 · 0.000–'+promptTimeSeconds(duration)+'s',views.length>1 ? '全部'+views.length+'个机位' : locations,
       'clip',{clipId:state.referenceClip?.clip_id || null,startSec:0,endSec:duration,views},
-      `整个片段（片段时间 0.000–${promptTimeSeconds(duration)} s；${source}）`,views.map(view => view.name).join(' '));
+      `整个片段 · 0.000–${promptTimeSeconds(duration)}s · ${locations}`,[source,...views.map(view => view.name)].join(' '));
   }
   return candidates;
 }
@@ -5039,6 +5148,11 @@ function promptTimeEmptyMessage() {
 function insertPromptMention(candidate) {
   if (!editable() || candidate.sessionId !== state.sessionId || candidate.disabled) return false;
   const descriptor=candidate.descriptor;
+  if (descriptor.kind === 'pose_edit') {
+    const sample=state.poseEdits.find(item => item.id === descriptor.poseEditId);
+    if (!sample?.edits.length) throw new Error('这份关键点修改已移除，请重新选择。');
+    return insertNoteText(promptReferenceText.remember(poseEditName(sample),poseEditToken(sample.id)).alias,{preserveTool:true});
+  }
   if (descriptor.kind === 'annotation') return insertPromptDragReference(descriptor);
   if (!['object','node'].includes(descriptor.kind)) return false;
   const selection=selectedPromptReference();
@@ -5170,7 +5284,7 @@ function bindCompactReferenceEditing() {
     }
   });
 }
-function insertNoteText(text, {replaceSelection=true,focus=true}={}) {
+function insertNoteText(text, {replaceSelection=true,focus=true,preserveTool=false}={}) {
   if (!editable()) return false;
   const [start,end]=promptInsertionRange(replaceSelection?ui.note.selectionStart:ui.note.selectionEnd,ui.note.selectionEnd);
   const before = start > 0 && !/\s/.test(ui.note.value[start - 1]) ? ' ' : '';
@@ -5181,13 +5295,18 @@ function insertNoteText(text, {replaceSelection=true,focus=true}={}) {
     announce('加入引用会超过提示的 10000 字上限，请先精简提示或逐条引用。', true);
     return false;
   }
+  if (preserveTool && !focus) {
+    ui.note.setRangeText(insertion,start,end,'end');
+    renderPromptImageReferences(); saveDraft();
+    return true;
+  }
   const previousFocus=document.activeElement;
   minimalLayout?.closeReferences();
   minimalLayout?.openChat();
   ui.note.focus({preventScroll:true});ui.note.setSelectionRange(start,end);
   if(!document.execCommand('insertText',false,insertion)) ui.note.setRangeText(insertion,start,end,'end');
   // Selecting or quoting a mark preserves the current screenshot.
-  setMode('select');
+  if (!preserveTool) setMode('select');
   if (focus) ui.note.focus();
   else if(previousFocus?.isConnected) previousFocus.focus({preventScroll:true});
   renderPromptImageReferences();
@@ -5281,6 +5400,7 @@ function clearSubmittedPrompt(submission) {
   promptReferenceText.reset();
   state.referencedSceneNodes = [];
   state.poseRefs = [];
+  if (state.poseEditor?.restoreLatest) state.humanOverlayChoice='latest';
   state.poseEdits = []; state.poseEditor=null; state.poseEditDrag=null;
   state.imageRefs = [];
   renderPromptImageReferences();
@@ -5646,7 +5766,7 @@ function bindEvents() {
   promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
     getCandidates:range => range.trigger === '/' ? getPromptTimeCandidates() : getPromptMentionCandidates(),
     onSelect:candidate => candidate.kind === 'time' ? insertPromptTimeCandidate(candidate) : insertPromptMention(candidate),isEnabled:editable,
-    getEmptyMessage:range => range.trigger === '/' ? promptTimeEmptyMessage() : '先选中物体或添加标记',
+    getEmptyMessage:range => range.trigger === '/' ? promptTimeEmptyMessage() : '先选中物体、添加标记或修改关键点',
     onError:(message) => announce(message,true)});
   promptAttachments=setupPromptAttachments({
     isEnabled:()=>editable() && state.imageReferencesSupported,
@@ -5701,7 +5821,7 @@ function bindEvents() {
     renderCreateTarget();
   });
   ui.createTarget.addEventListener('click', createTask);
-  document.querySelectorAll('.tool-button').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.tool)));
+  document.querySelectorAll('.tool-button[data-tool]').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.tool)));
   document.querySelectorAll('[data-selection-level]').forEach((button) => button.addEventListener('click', () => setSelectionLevel(button.dataset.selectionLevel)));
   updateSelectionLevelControls();
   ui.groupSelect.addEventListener('change', () => {
@@ -5796,7 +5916,7 @@ function bindEvents() {
     if (scope === 'round' ? id('clear-round').disabled : !marks.length) return;
     id('clear-annotations-title').textContent = scope === 'round' ? '清空本轮图片与标记？' : '清除本图标记？';
     id('clear-annotations-description').textContent = scope === 'round'
-      ? `将移除 ${state.sceneSnapshots.length} 张截图、${state.dynamicSnapshots.length} 个保留时刻和 ${marks.length} 个标记。参考素材、模型、文字与文字中的图片引用保留，可撤销。`
+      ? `将移除 ${state.sceneSnapshots.length} 张截图、${state.dynamicSnapshots.length} 个保留时刻、${marks.length} 个标记和 ${state.poseEdits.length} 份关键点修改。参考素材、模型、文字与文字中的图片引用保留，可撤销。`
       : `仅移除当前${state.toolPane === 'reference' ? '参考图' : '截图'}上的 ${marks.length} 个标记。图片和其他标记保留，可撤销。`;
     ui.confirmClear.textContent = scope === 'round' ? '确认清空本轮' : '确认清除';
     pauseTimeline(); ui.clearDialog.showModal(); ui.cancelClear.focus();
@@ -5819,6 +5939,9 @@ function bindEvents() {
     pauseTimeline(); hideTextEditor(); state.drag = null;
     const before = annotationEditState();
     if (clearRequest.scope === 'round') {
+      for (const sample of [...state.poseEdits]) removePoseEdit(sample,{record:false});
+      if (state.poseEditor?.restoreLatest) state.humanOverlayChoice='latest';
+      state.poseEditor=null;
       state.annotations = []; state.dynamicSnapshots = []; state.sceneSnapshots = [];
       state.snapshot = null; state.sceneView = 'live'; state.paneModes.scene = 'select';
       state.mode = toolMode(state.toolPane); renderSceneView();

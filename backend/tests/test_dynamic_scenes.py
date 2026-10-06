@@ -131,14 +131,20 @@ class DynamicSceneTests(unittest.TestCase):
         self.assertFalse(any(key.endswith("_data_url") for key in evidence))
         message, paths = self.gateway._turn_input(feedback)
         self.assertEqual(len(paths), 4)
-        self.assertIn("0.000000 秒", message)
-        self.assertIn("片段第 1 帧", message)
+        self.assertIn('"time_sec": 0.0', message)
+        self.assertIn('"frame_index": 0', message)
         self.assertIn("start_sec", message)
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
             tool_result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
         self.assertEqual(sum(item.type == "image" for item in tool_result.content), 4)
         self.assertIn("camera", tool_result.structured_content["items"][0]["dynamic_frames"][0])
-        self.assertTrue(any("clip frame 1, time 0.000000s" in item.text for item in tool_result.content if item.type == "text"))
+        summarized = json.loads(tool_result.content[0].text)["items"][0]
+        source = summarized["dynamic_frames"][0]
+        self.assertEqual((source["frame_index"], source["time_sec"], source["reference_frame_id"]),
+                         (0, 0.0, evidence["reference_frame_id"]))
+        self.assertEqual(summarized["cameras"][source["reference_camera"]]["intrinsics"],
+                         evidence["reference_camera"]["intrinsics"])
+        self.assertTrue(any(item.type == "text" and item.text == "F1 · reference original" for item in tool_result.content))
         # Replays are resolved before clip validation and remain exactly-once after replacement.
         self.store.set_reference_clip(self.session, {"clear": True})
         replay = self.store.submit_feedback(self.session, payload)
@@ -239,10 +245,12 @@ class DynamicSceneTests(unittest.TestCase):
         self.assertEqual(saved["inline_references"][0]["annotation"]["frame_index"], 2)
         self.assertEqual(payload, original_payload)
         message, _ = self.gateway._turn_input(saved)
-        self.assertIn("片段第 3 帧，4.800000 秒", message)
+        self.assertIn('"frame_index": 2', message)
+        self.assertIn('"time_sec": 4.8', message)
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
             result = mcp_server._visual_tool_result({"items": [copy.deepcopy(saved)]})
-        self.assertTrue(any("clip frame 3, time 4.800000s" in item.text for item in result.content if item.type == "text"))
+        source = json.loads(result.content[0].text)["items"][0]["dynamic_frames"][0]
+        self.assertEqual((source["frame_index"], source["time_sec"], source["reference_time_sec"]), (2, 4.8, 4.9))
         self.assertEqual(self.store.feedback_by_id(saved["feedback_id"]), saved)
 
     def test_old_clips_without_stored_indices_derive_ordinals_when_submitting(self) -> None:

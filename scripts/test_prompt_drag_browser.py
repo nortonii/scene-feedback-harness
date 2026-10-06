@@ -158,7 +158,7 @@ __promptDragCheck.selectModelPart = () => {
                 assert not errors, errors
 
                 # Capture two different camera images into one ordinary prompt.
-                page.locator("#reference-view-select").select_option(primary["clip_id"])
+                page.locator('#reference-strip button[data-view-id="' + primary["clip_id"] + '"]').first.click()
                 page.locator("#timeline-seek").focus()
                 page.locator("#timeline-seek").press("Home")
                 page.wait_for_function("(id) => __promptDragCheck.state.activeReferenceId === id && !__promptDragCheck.state.seeking",
@@ -168,7 +168,7 @@ __promptDragCheck.selectModelPart = () => {
                 first_image = image_refs(page)[0]
                 assert first_image.get("reference_id") == primary["frames"][0]["id"], first_image
 
-                page.locator("#reference-view-select").select_option(secondary["clip_id"])
+                page.locator('#reference-strip button[data-view-id="' + secondary["clip_id"] + '"]').first.click()
                 page.locator("#timeline-seek").focus()
                 page.locator("#timeline-seek").press("End")
                 page.wait_for_function("(id) => __promptDragCheck.state.activeReferenceId === id && !__promptDragCheck.state.seeking",

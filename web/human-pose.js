@@ -22,6 +22,28 @@ export function handJointLabel(name) {
   return match ? side + ' · ' + ({thumb:'拇指',forefinger:'食指',middle_finger:'中指',ring_finger:'无名指',pinky_finger:'小指'})[match[1]] +
     (match[2] === '4' ? '指尖' : '关节 ' + match[2]) : name;
 }
+export function poseJointIndices(names, region='all', groups={}) {
+  if (!Array.isArray(names)) return [];
+  if (region === 'all') return names.map((_,index) => index);
+  const group=groups[region === 'left' || region === 'right' ? region + '_hand' : region];
+  if (Array.isArray(group)) return group.filter(index => Number.isInteger(index) && index >= 0 && index < names.length);
+  if (region === 'left' || region === 'right') return handJointIndices(names,region);
+  return names.flatMap((name,index) => {
+    const face=/^face[-_]\d+$/.test(name), foot=/_(?:big_toe|small_toe|heel)$/.test(name);
+    const hand=/_(?:hand_root|thumb[1-4]|forefinger[1-4]|middle_finger[1-4]|ring_finger[1-4]|pinky_finger[1-4])$/.test(name);
+    return (region === 'face' ? face : region === 'feet' ? foot : region === 'body' && !face && !foot && !hand) ? [index] : [];
+  });
+}
+export function poseJointLabel(name) {
+  if (/_(?:hand_root|thumb[1-4]|forefinger[1-4]|middle_finger[1-4]|ring_finger[1-4]|pinky_finger[1-4])$/.test(name || '')) return handJointLabel(name);
+  const face=/^face[-_](\d+)$/.exec(name || '');
+  if (face) return '面部点 ' + (Number(face[1])+1);
+  if (name === 'nose') return '鼻尖';
+  const match=/^(left|right)_(.+)$/.exec(name || '');
+  const label={eye:'眼',ear:'耳',shoulder:'肩',elbow:'肘',wrist:'腕',hip:'髋',knee:'膝',ankle:'踝',
+    big_toe:'大脚趾',small_toe:'小脚趾',heel:'脚跟'}[match?.[2]];
+  return label ? (match[1] === 'left' ? '左' : '右') + label : name;
+}
 export function poseEditToken(editId) { return /^[0-9a-f]{32}$/.test(editId || '') ? `[[pose_edit:${editId}]]` : null; }
 export function validPoseEdit(sample) {
   return sample && poseEditToken(sample.id) && /^[0-9a-f]{32}$/.test(sample.job_id || '') &&
@@ -37,7 +59,7 @@ export function validPoseEdit(sample) {
 }
 export function collectPoseEdits(note,candidates) {
   const tokens=[...note.matchAll(/\[\[pose_edit:([0-9a-f]{32})\]\]/g)], starts=new Set(tokens.map((match) => match.index));
-  for (const match of note.matchAll(/\[\[pose_edit:/g)) if (!starts.has(match.index)) throw new Error('手部修正引用不完整，请重新点击「引用修正」。');
+  for (const match of note.matchAll(/\[\[pose_edit:/g)) if (!starts.has(match.index)) throw new Error('关键点修改引用不完整，请重新点击「引用」。');
   const ids=[...new Set(tokens.map((match) => match[1]))];
   if (ids.length > 8) throw new Error('一条提示最多引用 8 帧关键点修正。');
   return ids.map((id) => {
@@ -116,16 +138,10 @@ export function poseFrameLabel(frame, fallback='参考图') {
   if (Number.isFinite(frame.time_sec)) parts.push(frame.time_sec.toFixed(3) + ' s');
   return parts.join(' · ');
 }
-export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLORS[0], threshold=0.3, edges=COCO_EDGES, label='', fontFamily='sans-serif'}={}) {
+export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLORS[0], threshold=0.3, edges=COCO_EDGES}={}) {
   context.save();
   context.strokeStyle=color; context.fillStyle=color; context.lineWidth=2;
-  const bbox = validBBox(frame.bbox) ? frame.bbox : null;
   const lost = frame.tracking_status === 'lost' && !frame.keypoints?.some((point) => point.manual_visibility === 'visible');
-  if (bbox) {
-    context.setLineDash(lost ? [5,4] : [3,3]);
-    context.strokeRect(bbox[0]*width,bbox[1]*height,bbox[2]*width,bbox[3]*height);
-    context.setLineDash([]);
-  }
   const points = Array.isArray(frame.keypoints) ? frame.keypoints : [];
   const usable = (point) => point?.in_frame !== false && Number.isFinite(point?.x) && Number.isFinite(point?.y) &&
     point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1 && (point.manual_visibility !== undefined
@@ -139,16 +155,6 @@ export function drawPoseSkeleton(context, frame, width, height, {color=POSE_COLO
   for (const point of points) {
     if (!usable(point)) continue;
     context.beginPath(); context.arc(point.x*width,point.y*height,3,0,Math.PI*2); context.fill();
-  }
-  if (label) {
-    const x = Math.max(4, Math.min(width-4,(bbox?.[0] || 0)*width));
-    const y = Math.max(17,(bbox?.[1] || 0)*height-5);
-    const text = label + (lost ? ' · 未找到人物' : '');
-    context.font='11px ' + fontFamily;
-    const textWidth=Math.min(width-8,context.measureText(text).width+8);
-    const left=Math.min(x,Math.max(4,width-textWidth-4));
-    context.fillStyle='#f5f4efed'; context.fillRect(left-3,y-13,textWidth,17);
-    context.fillStyle=color; context.fillText(text,left,y,Math.max(1,width-left-4));
   }
   context.restore();
 }

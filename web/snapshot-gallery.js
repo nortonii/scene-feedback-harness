@@ -3,12 +3,12 @@ import {actionIcon} from './action-icons.js';
 // The live scene leads the collection; saved evidence keeps its creation order.
 export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabled:false}), getTimeline, onLive=()=>{}, onOpen, onRemove, resourceURL}) {
   const strip=document.getElementById('scene-snapshot-strip');
-  const gallery=document.getElementById('scene-snapshots'),stage=document.getElementById('scene-stage');
+  const gallery=document.getElementById('scene-snapshots'),footer=document.querySelector('.scene-pane-footer');
   function placeGallery() {
     if(document.documentElement.dataset.layout==='immersive') {
       if(gallery.parentElement!==document.body) document.body.append(gallery);
-    } else if(gallery.parentElement!==stage.parentElement || gallery.nextElementSibling!==stage) {
-      stage.parentElement.insertBefore(gallery,stage);
+    } else if(gallery.parentElement!==footer) {
+      footer.append(gallery);
     }
   }
   new MutationObserver(placeGallery).observe(document.documentElement,{attributes:true,attributeFilter:['data-layout']});
@@ -157,7 +157,14 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
     if(!buttons[next]) return;
     event.preventDefault();buttons[next].focus({preventScroll:true});buttons[next].scrollIntoView({block:'nearest',inline:'nearest'});
   });
-  new ResizeObserver(()=>document.documentElement.style.setProperty('--scene-gallery-height',gallery.getBoundingClientRect().height+'px')).observe(gallery);
+  const layoutSizes=new ResizeObserver(()=>{
+    const root=document.documentElement;
+    root.style.setProperty('--scene-gallery-height',gallery.getBoundingClientRect().height+'px');
+    root.style.setProperty('--workspace-footer-height',footer.getBoundingClientRect().height+'px');
+    const timeline=document.getElementById('timeline-panel');
+    root.style.setProperty('--workspace-timeline-height',(!timeline.classList.contains('hidden') && !timeline.classList.contains('reference-timeline') ? timeline.getBoundingClientRect().height : 0)+'px');
+  });
+  for(const node of [gallery,footer,document.getElementById('timeline-panel')]) layoutSizes.observe(node);
   preview.addEventListener('focusout',event=>{if(!preview.contains(event.relatedTarget)) hide();});
   document.addEventListener('pointerdown',event=>{if(!preview.contains(event.target) && event.target!==anchor) hide();},{capture:true});
   document.addEventListener('keydown',event=> {if(event.key==='Escape' && !preview.hidden) {const target=anchor;hide();target?.focus({preventScroll:true});event.stopImmediatePropagation();event.preventDefault();}},{capture:true});

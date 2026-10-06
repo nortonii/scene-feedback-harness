@@ -95,13 +95,15 @@ class MultiViewDynamicTests(unittest.TestCase):
         self.assertNotIn("frames", packet["reference_clip"]["views"][0])
         message, paths = self.gateway._turn_input(packet)
         self.assertEqual(len(paths), 8)
-        self.assertIn("机位 camera_B", message)
-        self.assertIn("参考采样时间 0.340000 秒", message)
+        self.assertIn('"view_name": "camera_B"', message)
+        self.assertIn('"reference_time_sec": 0.34', message)
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
             result = mcp_server._visual_tool_result({"items": [copy.deepcopy(packet)]})
         self.assertEqual(sum(item.type == "image" for item in result.content), 8)
-        self.assertTrue(any("view camera_B" in item.text and "reference sample time 0.340000s" in item.text
-                            for item in result.content if item.type == "text"))
+        sources = json.loads(result.content[0].text)["items"][0]["dynamic_frames"]
+        self.assertEqual([source["view_id"] for source in sources], [frame["view_id"] for frame in packet["dynamic_frames"]])
+        self.assertEqual([source["reference_time_sec"] for source in sources], [.5, .34])
+        self.assertTrue(any(item.type == "text" and item.text == "F2 · reference original" for item in result.content))
         self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(packet["feedback_id"]), packet)
 
     def test_cross_view_ids_and_missing_secondary_annotation_identity_are_rejected(self) -> None:

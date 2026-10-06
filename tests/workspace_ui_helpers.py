@@ -11,7 +11,10 @@ def open_annotation_tools(page, context=None):
     if panel.is_visible() and (context is None or panel.get_attribute('data-context') == context):
         return
     if context == 'scene':
-        page.locator('#scene-annotation-toggle').click()
+        surface = '#scene-snapshot-media' if page.locator('#scene-snapshot-media').is_visible() else '#viewport canvas'
+        page.locator(surface).hover(position={'x':20,'y':20})
+        expect(panel).to_be_visible()
+        panel.hover()
     else:
         if page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#reference-media').is_visible():
             page.locator('#immersive-reference-toggle').click()

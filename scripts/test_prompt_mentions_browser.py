@@ -176,7 +176,7 @@ def main():
                 left = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[0])")
                 assert left["reference_id"] == first["frames"][0]["id"]
                 assert left.get("annotated_data_url") != left["original_data_url"]
-                page.locator("#reference-view-select").select_option(second["clip_id"])
+                page.locator('#reference-strip button[data-view-id="' + second["clip_id"] + '"]').first.click()
                 page.wait_for_function("(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking && __mentionCheck.humanCurrentFrame(__mentionCheck.state.humanJobs[0])",arg=second["frames"][0]["id"])
                 page.locator('#timeline-seek').focus(); page.locator('#timeline-seek').press('End')
                 page.wait_for_function('(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking',arg=second['frames'][-1]['id'])

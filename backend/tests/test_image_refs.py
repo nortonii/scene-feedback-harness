@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import copy
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -232,23 +233,29 @@ class DraggedImageTests(unittest.TestCase):
         _, source, capture, reference = self.static_image()
         reference["annotated_data_url"] = self.marked_url
         scene = self.scene_image(annotated_data_url=self.marked_url)
-        saved = self.store.submit_feedback(self.session, self.payload(reference, scene))
+        saved = self.store.submit_feedback(self.session, self.payload(reference, scene, crops=[{
+            "source": "reference", "reference_id": reference["reference_id"], "data_url": self.marked_url}]))
         text, paths = self.gateway._turn_input(saved)
-        # One normal session reference, then raw/display/marked ref, then clean/marked scene.
-        self.assertEqual(len(paths), 6)
+        # Session reference, source-bound crop, raw/display/marked ref, clean/marked scene.
+        self.assertEqual(len(paths), 7)
         self.assertIn("[[image:ref1]]", text)
         self.assertIn("[[image:scene1]]", text)
         self.assertIn('"camera"', text)
-        self.assertEqual([Path(path).read_bytes() for path in paths], [source, source, capture, self.marked, self.data, self.marked])
+        self.assertEqual([Path(path).read_bytes() for path in paths], [source, self.marked, source, capture, self.marked, self.data, self.marked])
         result = mcp_server._visual_tool_result({"items": [copy.deepcopy(saved)]}, self.store.data_dir)
-        self.assertEqual(sum(item.type == "image" for item in result.content), 6)
+        self.assertEqual(sum(item.type == "image" for item in result.content), 7)
         refs = result.structured_content["items"][0]["image_refs"]
         self.assertTrue(all(Path(item["original_path"]).is_file() for item in refs))
         self.assertEqual(Path(refs[0]["display_original_path"]).read_bytes(), capture)
-        self.assertTrue(any("independently frozen scene revision 2" in item.text for item in result.content if item.type == "text"))
+        summarized = json.loads(result.content[0].text)["items"][0]["image_refs"]
+        self.assertEqual(summarized[1]["scene_revision"], 2)
+        self.assertEqual(summarized[1]["token"], "[[image:scene1]]")
+        self.assertTrue(any(item.type == "text" and item.text == "I2 · original" for item in result.content))
+        self.assertEqual(json.loads(result.content[0].text)["items"][0]["crops"],
+                         [{"key": "crop1", "source": "reference", "reference_id": reference["reference_id"]}])
         context = SimpleNamespace(store=self.store, gateway=self.gateway)
         plugin = PluginRPC(context).call_tool("workspace_get_feedback", {"feedback_id": saved["feedback_id"]})
-        self.assertEqual(sum(item["type"] == "image" for item in plugin["content"]), 6)
+        self.assertEqual(sum(item["type"] == "image" for item in plugin["content"]), 7)
         self.assertEqual(plugin["structuredContent"]["items"][0]["image_refs"][1]["camera"], self.camera)
 
     def test_feedback_evidence_survives_reference_scene_and_clip_replacement(self):

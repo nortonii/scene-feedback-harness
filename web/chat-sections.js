@@ -42,7 +42,7 @@ export function createChatSectionMotion({dock,panels,onFinish}) {
   return {run,finish,get active(){return !!running;}};
 }
 
-export function setupChatPanelSizing({getState,animateChange,beforeResize,onResize}) {
+export function setupChatPanelSizing({getState,animateChange,beforeResize,beforeViewportResize=beforeResize,onResize}) {
   const byId=id=>document.getElementById(id),dock=byId('chat-dock'),note=byId('feedback-note');
   const evidence=byId('feedback-evidence'),toggle=byId('feedback-evidence-summary');
   const scroll=byId('feedback-evidence-scroll');
@@ -63,14 +63,14 @@ export function setupChatPanelSizing({getState,animateChange,beforeResize,onResi
     return Math.max(control.min,Math.min(control.key==='note'?300:400,viewport*(control.key==='note' ? 0.38 : 0.46),budget-fixed-other));
   }
   function persist(){if(sessionId)try{localStorage.setItem(key(),JSON.stringify({noteHeight,evidenceHeight,evidenceOpen:opened}));}catch{}}
-  function apply() {
+  function apply({notify=true}={}) {
     for(const control of controls) {
       const preferred=control.key==='note'?noteHeight:evidenceHeight;
       const height=Math.round(Math.max(control.min,Math.min(max(control),preferred)));
       control.element.style.height=height+'px';
       for(const [name,value] of Object.entries({'aria-valuemin':control.min,'aria-valuemax':Math.round(max(control)),'aria-valuenow':height,'aria-valuetext':height+' 像素'})) control.handle.setAttribute(name,String(value));
     }
-    onResize?.();
+    if(notify) onResize?.();
   }
   function setOpen(value) {
     opened=value;evidence.classList.toggle('hidden',!opened);evidence.inert=!opened;
@@ -120,8 +120,8 @@ export function setupChatPanelSizing({getState,animateChange,beforeResize,onResi
     finishResize();animateChange(()=>{setOpen(!opened);apply();});persist();
   });
   window.addEventListener('blur',finishResize);
-  window.addEventListener('resize',()=>{beforeResize?.();apply();});
-  window.visualViewport?.addEventListener('resize',()=>{beforeResize?.();apply();});
+  window.addEventListener('resize',()=>{beforeViewportResize?.();apply();});
+  window.visualViewport?.addEventListener('resize',()=>{beforeViewportResize?.();apply();});
   setOpen(false);apply();
   return {finishResize,fit:apply,refresh(){
     const current=getState()?.sessionId;if(!current || current===sessionId)return;

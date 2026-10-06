@@ -182,8 +182,8 @@ def verify_live_scene_annotation(browser, server, store):
             control(page,'#immersive-toggle').click();settle(page)
             if page.locator('#immersive-reference-toggle').get_attribute('aria-expanded')=='true':
                 control(page,'#immersive-reference-toggle').click();settle(page)
-        expect(page.locator('#scene-annotation-toggle')).to_be_visible()
-        control(page,'#scene-annotation-toggle').click()
+        expect(page.locator('#scene-annotation-toggle')).to_have_count(0)
+        open_annotation_tools(page, 'scene')
         for tool in ['point','rectangle','line','arrow','text','freehand','erase','select']:
             choose_tool(page,tool,'scene')
             assert page.evaluate('__appearanceCheck.state.sceneView')=='live'
@@ -427,7 +427,7 @@ def main():
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 1')
                 control(page, '#capture-scene-button').click()
                 expect(page.locator('#annotation-context-label')).to_have_text('截图')
-                expect(page.locator('#scene-annotation-toggle')).to_have_attribute('aria-expanded','true')
+                expect(page.locator('#annotation-tool-panel')).to_have_attribute('data-context','scene')
                 choose_tool(page, 'point')
                 point(page, '#scene-annotations', .63, .55)
                 page.wait_for_function('__appearanceCheck.state.annotations.length === 2')
@@ -438,7 +438,7 @@ def main():
                 assert page.evaluate('__appearanceCheck.evidence()') == frozen
                 page.evaluate('__appearanceCheck.refreshWorkspace()')
                 expect(page.locator('#annotation-tool-panel')).to_be_hidden()
-                control(page, '#scene-annotation-toggle').click()
+                open_annotation_tools(page, 'scene')
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 open_annotation_tools(page, 'reference')
                 expect(page.locator('#annotation-context-label')).to_have_text('参考')
@@ -453,7 +453,7 @@ def main():
                 expect(page.locator('#annotation-tool-panel')).to_be_visible()
                 control(page, '#scene-live-card').click()
                 expect(page.locator('#annotation-tool-panel')).to_be_hidden()
-                expect(page.locator('#scene-annotation-toggle')).to_be_visible()
+                expect(page.locator('#scene-annotation-toggle')).to_have_count(0)
                 unobscured(page, '#viewport canvas')
                 assert page.evaluate('__appearanceCheck.model()') == model
                 print('PASS reference/scene context follows real marks; closing dock preserves screenshot, polling respects collapse and live browse restores clear canvas', flush=True)

@@ -112,7 +112,8 @@ select { min-width: 0; font-size: var(--text-control); }
 .pose-edit-controls label { display: flex; gap: 4px; align-items: center; }
 .pose-edit-controls select { max-width: 170px; padding: 4px; font-size: var(--text-caption); }
 .pose-edit-hint { margin: 6px 0; color: var(--muted); line-height: 1.5; }
-.pose-edit-actions { display: flex; gap: 14px; }
+.pose-edit-actions { display: flex; gap: 14px; flex-wrap: wrap; }
+.pose-edit-actions [aria-pressed="true"] { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
 .human-pose-edit-draft { margin-top: 7px; color: var(--muted); font-size: var(--text-caption); }
 .human-pose-results { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line); }
 .human-pose-display-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
@@ -146,15 +147,12 @@ select { min-width: 0; font-size: var(--text-control); }
 .reference-strip { display: flex; flex: none; align-items: center; gap: 7px; min-height: 34px; padding-top: 4px; overflow-x: auto; scrollbar-width: thin; }
 .reference-navigation { display: flex; flex: none; align-items: center; gap: 10px; min-width: 0; }
 .reference-navigation .reference-strip { flex: 1; min-width: 0; }
-.reference-view-control { display: flex; align-items: center; gap: 6px; flex: none; font-size: var(--text-caption); color: var(--muted); }
-.reference-view-control select { max-width: 170px; padding: 4px 6px; font-size: var(--text-caption); color: var(--ink); }
-.reference-strip:not(:has(.thumb + .thumb)):not(:has(.compact-button)) { display: none; }
+.reference-strip:not(:has(.thumb + .thumb)):not(.has-reference-clip) { display: none; }
 .thumb { flex: none; position: relative; width: 45px; height: 29px; padding: 0; background: var(--stage); border: 1px solid transparent; }
 .thumb.active { border-color: var(--ink); }
 .thumb img { height: 100%; width: 100%; object-fit: cover; }
-.thumb-count, .thumb-camera { position: absolute; bottom: 1px; background: var(--paper); color: var(--ink); font-size: var(--text-caption); line-height: 1.2; padding: 0 2px; }
+.thumb-count { position: absolute; bottom: 1px; background: var(--paper); color: var(--ink); font-size: var(--text-caption); line-height: 1.2; padding: 0 2px; }
 .thumb-count { right: 1px; }
-.thumb-camera { left: 1px; }
 .scene-pane .pane-head { flex-wrap: wrap; row-gap: 5px; }
 .scene-pane .pane-actions { min-width: 0; max-width: 100%; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
 .scene-pane .pane-heading { gap: 9px; }

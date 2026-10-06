@@ -89,7 +89,7 @@ def main():
     page.keyboard.press('Escape');expect(page.locator('#snapshot-gallery-preview')).to_be_hidden();expect(page.locator('#timeline-marks button').first).to_be_focused();page.wait_for_timeout(350);expect(preview).to_be_hidden();page.locator('#timeline-marks button').first.click()
     page.locator('#snapshot-gallery-preview button').first.click();page.wait_for_function(f'__appearanceCheck.state.snapshot.id==="{first_id}"')
     clip=store.set_reference_clip(session['session_id'],{'name':'侧面视频','fps':2,'frames':frames,'append_view':True})['reference_clip'];page.evaluate('__appearanceCheck.refreshWorkspace()');page.wait_for_function('__appearanceCheck.state.referenceClip.views?.length===1');side=clip['views'][0]['clip_id']
-    page.locator('#reference-view-select').select_option(side);page.wait_for_function(f'__appearanceCheck.state.activeViewId==="{side}"');expect(page.locator('#timeline-marks button')).to_have_count(0)
+    page.locator('#reference-strip button[data-view-id="' + side + '"]').first.click();page.wait_for_function(f'__appearanceCheck.state.activeViewId==="{side}"');expect(page.locator('#timeline-marks button')).to_have_count(0)
     assert page.evaluate('__appearanceCheck.state.snapshot.id')==first_id
     page.locator(f'.snapshot-open[data-snapshot-id="{second_id}"]').click();page.wait_for_function('__appearanceCheck.state.activeViewId===__appearanceCheck.state.referenceClip.clip_id');expect(page.locator('#timeline-marks button')).to_have_count(2)
     print('PASS same-time camera variants stay selectable and gallery entries restore their saved video view and time',flush=True)

@@ -5,7 +5,7 @@ description: Observe and manually correct COCO-WholeBody133 body, face, feet and
 
 # WholeBody Capsule 人体与手部
 
-Default to **COCO-WholeBody133**: 17 body, 6 foot, 68 face, and 21 keypoints per hand. Observe the actual exported reference frames, let the user correct visible hand joints in the workbench, then reconstruct a fixed capsule body and articulated fingers using calibrated multiple views. Deliver an editable animated human `.blend`, an integrated scene copy when alignment is supplied, and a GLB preview when requested. Face landmarks are evidence; this workflow does not reconstruct a detailed facial surface.
+Default to **COCO-WholeBody133**: 17 body, 6 foot, 68 face, and 21 keypoints per hand. Observe the actual exported reference frames, let the user review and correct body, foot, face and hand keypoints in the workbench, then reconstruct a fixed capsule body and articulated fingers using calibrated multiple views. Deliver an editable animated human `.blend`, an integrated scene copy when alignment is supplied, and a GLB preview when requested. Face landmarks are evidence; this workflow does not reconstruct a detailed facial surface.
 
 Read [pose-workbench.md](references/pose-workbench.md) for source export, real 133-point ViTPose inference, result import and manual correction merging. Read [wholebody-reconstruction.md](references/wholebody-reconstruction.md) before triangulation, fixed-template initialization or Blender delivery. Model execution stays in this skill, outside the lightweight MCP plugin. Legacy COCO17 evidence remains readable but cannot supply missing hand observations.
 
@@ -15,7 +15,7 @@ When applying submitted `[[pose_edit:ID]]` feedback, reopen its **original paren
 
 1. Call `workspace_export_pose_sources` for the current project. Verify the manifest before loading a model. Process every supplied view and frame at its imported sample rate; never silently substitute a prior project's footage, camera, identity or motion.
 2. Run `pose_evidence.py track` with a **verified 133-output checkpoint**, then `check-result` and `import-payload`; import through `workspace_import_human_pose`. Selecting ViTPose expert 5 on a 17-output model is insufficient. Model loading is local only; setup/download is a separate step.
-3. For hand corrections, open the result's “修正关键点”, choose left/right hand and joint, then click/drag on the source image and send the shared prompt. Read the attached original, orange overlay and source-bound correction JSON. `apply-corrections` merges into a new file; preserve model scores and distinguish visible, occluded and missing points. Projected joints cannot become measured observations by changing their label.
+3. For keypoint corrections, use “关键点” on the original reference image's hover toolbar. Drag declared body, foot, face or hand joints, or select a missing joint before placing it. Changes accumulate in one “关键点修改N” draft per source frame and insert into the shared prompt. Read the attached original, original/edited coordinates and source-bound correction JSON. This skill's `apply-corrections` requires a canonical WholeBody133 parent and merges into a new file; preserve model scores and distinguish visible, occluded and missing points. Projected joints cannot become measured observations by changing their label.
 4. Verify one actor across views and synchronized calibrated cameras. Run `capsule.py wholebody-reconstruct` with an explicit camera convention and identity association. Initialize body and each hand once from reliable evidence, then advance from the previous accepted state. Missing/occluded fingers hold their prior pose; report uninitialized hands as unsupported rather than inventing depth.
 5. Run `capsule.py wholebody-build` to create fixed meshes, animate segment transforms and reopen/audit the saved Blender files. Integrating into an existing scene requires an explicit world-to-Blender transform. Preserve input files and original scene objects; publish the inspected preview with `workspace_publish_scene` only for the authorized reconstruction task.
 
@@ -37,7 +37,7 @@ Use `python3 <skill-dir>/scripts/capsule.py --help`. All mutating stages require
 | Task | Command |
 |---|---|
 | Observe real WholeBody133 reference frames | `pose_evidence.py track` |
-| Merge source-bound manual hand corrections into a new result | `pose_evidence.py apply-corrections` |
+| Merge source-bound manual WholeBody133 keypoint corrections into a new result | `pose_evidence.py apply-corrections` |
 | Initialize and track body plus fingers from calibrated views | `capsule.py wholebody-reconstruct` |
 | Build/reopen WholeBody Blender and optional GLB | `capsule.py wholebody-build` |
 | Turn the tested case into an explicit input bundle | `import-spi102` |

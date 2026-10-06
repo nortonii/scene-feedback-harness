@@ -15,11 +15,12 @@ export function setupReferenceWindow({onChange=()=>{}}={}) {
   } catch { /* Optional browser preference. */ }
   function limits() {
     const margin = 10;
-    let top = Math.min(innerHeight - 100, document.querySelector('.topbar').getBoundingClientRect().bottom + 10);
+    const contentTop=immersive() ? parseFloat(getComputedStyle(root).getPropertyValue('--immersive-content-top')) || 0 : 0;
+    const top = Math.min(innerHeight - 100, Math.max(contentTop,document.querySelector('.topbar').getBoundingClientRect().bottom + 10));
     const gallery=document.getElementById('scene-snapshots');
-    if(immersive() && innerWidth<=640 && !gallery.classList.contains('hidden')) top=Math.min(innerHeight-100,Math.max(top,gallery.getBoundingClientRect().bottom+10));
+    const bottom=immersive() && !gallery.classList.contains('hidden') ? gallery.getBoundingClientRect().top-12 : innerHeight-margin;
     const maxWidth = Math.max(100, innerWidth - margin * 2);
-    const maxHeight = Math.max(80, innerHeight - top - margin);
+    const maxHeight = Math.max(80, bottom - top);
     const px = value => parseFloat(value) || 0;
     const style = getComputedStyle(pane);
     let chromeHeight = px(style.paddingTop)+px(style.paddingBottom)+px(style.borderTopWidth)+px(style.borderBottomWidth);
@@ -29,7 +30,7 @@ export function setupReferenceWindow({onChange=()=>{}}={}) {
       if (css.display === 'none' || ['absolute','fixed'].includes(css.position)) continue;
       chromeHeight += child.getBoundingClientRect().height+px(css.marginTop)+px(css.marginBottom);
     }
-    return {left:margin, top:Math.max(margin,top), right:innerWidth-margin, bottom:innerHeight-margin,
+    return {left:margin, top:Math.max(margin,top), right:innerWidth-margin, bottom,
       minWidth:Math.min(280,maxWidth), minHeight:Math.min(Math.max(220,chromeHeight+90),maxHeight), maxWidth, maxHeight};
   }
   function constrain(rect) {
