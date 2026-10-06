@@ -3,7 +3,6 @@
 :root {
   --chrome-radius: 14px;
   --chrome-gap: 10px;
-  --annotation-dock-width: 72px;
   --chrome-ease: cubic-bezier(.22,1,.36,1);
 }
 [hidden] { display: none !important; }
@@ -256,18 +255,19 @@
 #references-dialog-button #annotation-count { font-size: 11px; }
 #scene-stage .selected-chip { top: 56px; bottom: auto; left: 12px; max-width: calc(100% - 24px); border-radius: 7px; }
 
-/* A narrow drawing dock opens beside the active image and does not resize it. */
+/* A horizontal drawing bar floats at the image top without resizing it. */
 #annotation-tool-panel {
   position: fixed;
   z-index: 62;
   display: flex;
-  flex-direction: column;
-  flex-wrap: nowrap;
-  align-items: stretch;
-  width: var(--annotation-dock-width);
-  max-width: none;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  max-width: var(--annotation-dock-max-width,calc(100vw - 20px));
   min-height: 0;
-  padding: 6px;
+  padding: 6px 32px 6px 6px;
   gap: 5px;
   border: 1px solid var(--surface-border);
   border-radius: 16px;
@@ -285,45 +285,29 @@
   animation: annotation-dock-enter 260ms var(--chrome-ease);
 }
 #annotation-tool-panel[hidden] { display: none !important; }
-@keyframes annotation-dock-enter { from { opacity: 0; transform: translateX(8px) scale(.98); } to { opacity: 1; transform: none; } }
-.annotation-dock-heading {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  padding-bottom: 5px;
-  border-bottom: 1px solid var(--line);
-}
-#annotation-context-label {
-  padding-right: 12px;
-  color: var(--muted);
-  font-size: 10px;
-  white-space: nowrap;
-  letter-spacing: .01em;
-}
+@keyframes annotation-dock-enter { from { opacity: 0; transform: translateY(-6px) scale(.98); } to { opacity: 1; transform: none; } }
+.annotation-dock-heading { position: absolute; right: 6px; top: 6px; }
+#annotation-context-label { display: none; }
 #annotation-tools-close {
-  position: absolute;
-  right: -1px;
-  top: 0;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 22px;
+  width: 22px;
+  height: 32px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: 7px;
   color: var(--muted);
 }
 #annotation-tools-close:hover { background: var(--surface-hover); color: var(--ink); }
 #annotation-tools-close svg { width: 12px; height: 12px; }
-#annotation-tool-panel .tool-list { display: flex; flex-direction: column; align-items: stretch; gap: 2px; flex-wrap: nowrap; }
+#annotation-tool-panel .tool-list { display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 2px; flex-wrap: wrap; min-width: 0; max-width: 100%; }
 #annotation-tool-panel .tool-list > .tool-button {
   display: flex;
   justify-content: center;
-  min-width: 0;
-  width: 100%;
+  flex: none;
+  min-width: 32px;
+  width: auto;
   min-height: 34px;
-  padding: 5px 3px;
+  padding: 5px 7px;
   gap: 4px;
   border: 1px solid transparent;
   border-radius: 9px;
@@ -339,7 +323,7 @@
 #annotation-tool-panel #more-tools > summary {
   min-height: 30px;
   justify-content: center;
-  padding: 4px;
+  padding: 4px 7px;
   border: 1px solid transparent;
   border-radius: 8px;
   font-size: 11px;
@@ -348,15 +332,17 @@
 #annotation-tool-panel #more-tools[open] > summary,
 #annotation-tool-panel #more-tools > summary:hover { background: var(--surface-hover); }
 #annotation-tool-panel .popover-content {
-  top: auto;
-  bottom: 0;
+  top: calc(100% + 10px);
+  bottom: auto;
   left: auto;
-  right: calc(100% + 12px);
-  translate: 0 var(--annotation-popover-top,0px);
+  right: 0;
+  translate: var(--annotation-popover-x,0px) var(--annotation-popover-y,0px);
   width: 200px;
   min-width: 0;
-  max-width: calc(100vw - 96px);
+  max-width: calc(100vw - 24px);
   max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 12px;
   gap: 8px;
   border: 1px solid var(--surface-border);
@@ -369,17 +355,18 @@
 #annotation-tool-panel .popover-content .tool-button { min-height: 32px; border-radius: 8px; font-size: var(--text-caption); }
 #annotation-tool-panel .annotation-history-tools {
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
+  flex-direction: row;
+  align-items: center;
   flex-wrap: nowrap;
   gap: 1px;
-  padding-top: 5px;
-  border-top: 1px solid var(--line);
+  padding-left: 5px;
+  border-left: 1px solid var(--line);
 }
 #annotation-tool-panel .annotation-history-tools .compact-button {
   justify-content: center;
-  min-height: 29px;
-  padding: 3px;
+  min-height: 32px;
+  min-width: 28px;
+  padding: 3px 6px;
   margin: 0;
   gap: 4px;
   border: 1px solid transparent;
@@ -390,13 +377,13 @@
 #annotation-tool-panel .annotation-history-tools .compact-button > span:last-child { display: inline; }
 #annotation-tool-panel .annotation-history-tools .compact-button:hover:not(:disabled) { background: var(--surface-hover); color: var(--ink); }
 #annotation-tool-panel #scene-labels-toggle {
-  width: 100%;
-  min-height: 30px;
-  padding: 4px 1px;
-  border-top: 1px solid var(--line);
+  width: auto;
+  min-height: 32px;
+  padding: 4px 7px;
+  border-left: 1px solid var(--line);
   font-size: 10px;
   color: var(--muted);
-  white-space: normal;
+  white-space: nowrap;
 }
 #annotation-tool-panel #scene-labels-toggle:disabled { display: none; }
 
@@ -456,26 +443,14 @@
   [data-layout=immersive] #references-dialog-button { right: 10px; }
   [data-layout=immersive] #scene-stage .selected-chip { left: 10px; }
   [data-layout=immersive] .reference-pane { width: calc(100vw - 20px); }
-  #annotation-tool-panel .popover-content { max-width: calc(100vw - 94px); }
 }
-/* Keep the full dock usable on a short viewport without clipping its menus. */
-@media (max-height: 700px) {
-  :root { --annotation-dock-width: 56px; }
-  #annotation-tool-panel { gap: 3px; padding: 5px; }
-  #annotation-tool-panel .tool-list > .tool-button { min-height: 29px; height: 29px; padding: 3px; }
-  #annotation-tool-panel .tool-list > .tool-button > span:not(.tool-icon),
-  #annotation-tool-panel .annotation-history-tools .compact-button > span:last-child { display: none; }
-  #annotation-tool-panel .annotation-history-tools .compact-button { min-height: 25px; height: 25px; padding: 2px; }
-  #annotation-tool-panel #more-tools > summary { min-height: 26px; padding: 3px; }
-  .annotation-dock-heading { min-height: 23px; }
-}
-#annotation-tool-panel.is-compact { --annotation-dock-width: 56px; gap: 3px; padding: 5px; }
-#annotation-tool-panel.is-compact .tool-list > .tool-button { min-height: 29px; height: 29px; padding: 3px; }
+/* Keep small image panes compact while retaining all actions. */
+#annotation-tool-panel.is-compact { gap: 3px; padding: 5px 31px 5px 5px; }
+#annotation-tool-panel.is-compact .tool-list > .tool-button { min-height: 32px; padding: 4px 6px; }
 #annotation-tool-panel.is-compact .tool-list > .tool-button > span:not(.tool-icon),
 #annotation-tool-panel.is-compact .annotation-history-tools .compact-button > span:last-child { display: none; }
-#annotation-tool-panel.is-compact .annotation-history-tools .compact-button { min-height: 25px; height: 25px; padding: 2px; }
-#annotation-tool-panel.is-compact #more-tools > summary { min-height: 26px; padding: 3px; }
-#annotation-tool-panel.is-compact .annotation-dock-heading { min-height: 23px; }
+#annotation-tool-panel.is-compact .annotation-history-tools .compact-button { min-height: 30px; padding: 3px 5px; }
+#annotation-tool-panel.is-compact #more-tools > summary { min-height: 30px; padding: 4px 6px; }
 @media (hover: none) { #drag-scene-image { opacity: 1; } }
 @media (prefers-reduced-transparency: reduce) {
   #annotation-tool-panel, .reference-corner-tools, #workspace-menu > .popover-content,

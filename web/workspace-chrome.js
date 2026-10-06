@@ -61,26 +61,31 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   function position() {
     if (!opened) return;
     const immersive = root.dataset.layout === 'immersive';
-    const anchor = (target === 'reference' ? reference : byId('scene-stage')).getBoundingClientRect();
+    const anchor = byId(target === 'reference' ? 'reference-stage' : 'scene-stage').getBoundingClientRect();
     const sceneHead = scene.querySelector('.pane-head').getBoundingClientRect();
-    const top = Math.max(12, anchor.top + (target === 'reference' ? 46 : 60), immersive ? sceneHead.bottom + 64 : 0);
-    const available = innerHeight - top - 16;
-    dock.classList.toggle('is-compact', available < 530);
+    const headerBottom = immersive && target === 'scene'
+      ? Math.max(sceneHead.bottom, document.querySelector('.topbar').getBoundingClientRect().bottom) : 0;
+    const top = Math.max(10, anchor.top + 10, headerBottom + (headerBottom ? 10 : 0));
+    const availableWidth = Math.max(120, Math.min(anchor.width - 20, innerWidth - 20));
+    dock.style.setProperty('--annotation-dock-max-width', `${Math.round(availableWidth)}px`);
+    dock.classList.toggle('is-compact', availableWidth < 780);
     const rect = dock.getBoundingClientRect();
-    // Reference tools sit alongside the floating card when there is room.
-    const outside = target === 'reference' && immersive && anchor.right + rect.width + 20 < innerWidth;
-    const left = Math.min(innerWidth - rect.width - 10, Math.max(10, outside ? anchor.right + 10 : anchor.right - rect.width - 10));
+    const left = Math.max(10, Math.min(innerWidth - rect.width - 10, anchor.left + (anchor.width - rect.width) / 2));
     const y = Math.max(10, Math.min(top, innerHeight - rect.height - 12));
     dock.style.left = `${Math.round(left)}px`;
     dock.style.top = `${Math.round(y)}px`;
     for (const details of dock.querySelectorAll('details[open]')) {
       const popup = details.querySelector('.popover-content');
-      popup.style.setProperty('--annotation-popover-top', '0px');
+      popup.style.setProperty('--annotation-popover-x', '0px');
+      popup.style.setProperty('--annotation-popover-y', '0px');
       const bounds = popup.getBoundingClientRect();
+      const dx = Math.min(0, innerWidth - 12 - bounds.right) + Math.max(0, 12 - bounds.left);
       const dy = Math.min(0, innerHeight - 12 - bounds.bottom) + Math.max(0, 12 - bounds.top);
-      popup.style.setProperty('--annotation-popover-top', `${Math.round(dy)}px`);
+      popup.style.setProperty('--annotation-popover-x', `${Math.round(dx)}px`);
+      popup.style.setProperty('--annotation-popover-y', `${Math.round(dy)}px`);
     }
   }
+
   function schedulePosition() {
     if (frame) return;
     frame = requestAnimationFrame(() => { frame = 0; position(); });
@@ -111,7 +116,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     activateToolPane?.(pane);
     animation?.cancel(); render();
     if (!wasOpen && !reduced.matches) animation = dock.animate([
-      {opacity:0, translate:'6px 0'}, {opacity:1, translate:'0 0'}
+      {opacity:0, translate:'0 -6px'}, {opacity:1, translate:'0 0'}
     ], {duration:240,easing:'cubic-bezier(.22,1,.36,1)'});
   }
   function close({focus=false, resetTool=true}={}) {

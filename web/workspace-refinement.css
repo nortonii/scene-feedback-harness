@@ -9,9 +9,7 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 #workspace-menu #revision-label, #compare-summary { font-size: 12px; }
 #annotation-context-label { font-size: 12px; font-weight: 500; }
 #annotation-tool-panel .eraser-tool > span { font-size: 12px; letter-spacing: 0; }
-#annotation-tool-panel { --annotation-dock-width: 84px; }
 #annotation-tool-panel .annotation-history-tools .compact-button { font-size: 12px; }
-#annotation-tool-panel.is-compact { --annotation-dock-width: 60px; }
 #annotation-tool-panel.is-compact .tool-list > .tool-button { min-height: 32px; }
 #annotation-tool-panel #more-tools > summary { font-size: 12px; }
 #annotation-tool-panel #scene-labels-toggle { font-size: 12px; }
