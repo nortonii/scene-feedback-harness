@@ -9,6 +9,9 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
   const reference = document.querySelector('.reference-pane');
   const compareToggle = document.getElementById('comparison-layout-button');
   const stage = document.getElementById('scene-stage');
+  const alignmentButton = document.getElementById('align-reference-button');
+  const alignmentBetween = document.getElementById('alignment-between-views');
+  const alignmentHome = document.getElementById('camera-alignment-status');
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   let immersive = root.dataset.layout === 'immersive';
   let referenceVisible = false;
@@ -32,6 +35,14 @@ export function setupImmersive({onResize=() => {}, onLayoutChange=() => {}, hasA
   }
   function refresh() {
     root.dataset.layout = immersive ? 'immersive' : 'compare';
+    // Move the same control so camera state, focus targets and listeners stay
+    // attached to one button across the two layouts.
+    if (immersive) {
+      if (alignmentButton.parentElement !== alignmentHome.parentElement)
+        alignmentHome.before(alignmentButton);
+    } else if (alignmentButton.parentElement !== alignmentBetween) {
+      alignmentBetween.append(alignmentButton);
+    }
     sceneToolbar.refresh();
     root.dataset.referenceVisible = String(referenceVisible);
     toggle.setAttribute('aria-pressed', String(immersive));

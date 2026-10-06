@@ -113,10 +113,35 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .scene-pane .ground-axis-label select { max-width: 104px; padding: 4px 6px; min-height: 30px; color: var(--ink); background: var(--surface); border-color: var(--line); }
 .scene-pane .ground-axis-label:has(select:disabled) { color: var(--muted); }
 .scene-pane .ground-axis-label select:disabled { opacity: 1; color: var(--muted); -webkit-text-fill-color: var(--muted); cursor: not-allowed; }
-.scene-pane .pane-actions > #align-reference-button { opacity: 1; color: var(--ink); background: var(--surface); border-color: var(--line); }
-.scene-pane .pane-actions > #align-reference-button.aligned:not(:disabled) { color: var(--ink); background: var(--surface); border-color: var(--ink); }
-.scene-pane .pane-actions > #align-reference-button:hover:not(:disabled) { background: var(--surface); border-color: var(--ink); }
-.scene-pane .pane-actions > #align-reference-button:disabled { opacity: 1; color: var(--muted); background: var(--surface); border-color: var(--line); cursor: not-allowed; }
+#align-reference-button { opacity: 1; color: var(--ink); background: var(--surface); border-color: var(--line); }
+#align-reference-button.aligned:not(:disabled) { color: var(--ink); background: var(--surface); border-color: var(--ink); }
+#align-reference-button:hover:not(:disabled) { background: var(--surface); border-color: var(--ink); }
+#align-reference-button:disabled { opacity: 1; color: var(--muted); background: var(--surface); border-color: var(--line); cursor: not-allowed; }
+/* The alignment action connects the two comparison images. */
+#alignment-between-views {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  pointer-events: none;
+}
+#alignment-between-views:empty, [data-layout=immersive] #alignment-between-views { display: none; }
+#alignment-between-views > #align-reference-button {
+  flex: none;
+  min-width: 48px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border-radius: 12px;
+  box-shadow: 0 3px 14px #17171512;
+  pointer-events: auto;
+}
+@media (max-width: 640px) {
+  #alignment-between-views { grid-column: 1; grid-row: auto; }
+}
 @media (max-width: 640px) {
   .scene-pane > .pane-head > .pane-actions { min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
   .scene-pane .compare-inline #compare-opacity { width: 68px; }
