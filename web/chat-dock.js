@@ -11,7 +11,7 @@ export function setupChatDock({getState}) {
   const resizeHandle = byId('chat-resize-handle');
   let sessionId = null;
   let collapsed = false;
-  let historyCollapsed = false;
+  let historyCollapsed = true;
   let followingLatest = true;
   let savedScrollTop = 0;
   let unread = 0;
@@ -76,6 +76,11 @@ export function setupChatDock({getState}) {
     previewAnimation?.cancel();previewAnimation=null;
     dock.classList.remove('preview-animating','preview-measuring');
   }
+  function foldHistory() {
+    // Each new preview shows the composer. History is opened explicitly.
+    historyCollapsed=true;
+    history.classList.add('hidden');dock.classList.add('history-collapsed');
+  }
   function setCompact(value,{animate=true}={}) {
     clearTimeout(previewCloseTimer);previewCloseTimer=null;
     if(value===compact) {if(!animate) {finishPreview();applyHeight();}return;}
@@ -83,6 +88,7 @@ export function setupChatDock({getState}) {
     const before=dock.getBoundingClientRect(),beforeMax=getComputedStyle(dock).maxHeight;
     finishPreview();sectionMotion?.finish();
     dock.classList.add('preview-measuring');
+    if(value)foldHistory();
     compact=value;renderPreview();
     if(!compact)panelSizing?.fit({notify:false});
     applyHeight({restoreScroll:false});applyPosition();
@@ -408,6 +414,7 @@ export function setupChatDock({getState}) {
   }
 
   function open({focus=false, approval=false}={}) {
+    if(collapsed)foldHistory();
     expandPreview({animate:false});
     if (collapsed) {
       collapsed = false;
@@ -432,11 +439,11 @@ export function setupChatDock({getState}) {
     if (state.sessionId && state.sessionId !== sessionId) {
       clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
       finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();
-      compact=true;renderPreview();
+      foldHistory();compact=true;renderPreview();
       sessionId = state.sessionId;
       panelSizing?.refresh();
       collapsed = false;
-      historyCollapsed = false;
+      historyCollapsed = true;
       followingLatest = true;
       savedScrollTop = 0;
       unread = 0;
@@ -446,7 +453,6 @@ export function setupChatDock({getState}) {
       try {
         const stored = JSON.parse(localStorage.getItem(storageKey()) || 'null');
         collapsed = stored?.collapsed === true;
-        historyCollapsed = stored?.historyCollapsed === true;
         if (Number.isFinite(stored?.dockHeight) && stored.dockHeight > 0) dockHeight = stored.dockHeight;
         for(const layout of ['compare','immersive']) {
           const position=stored?.dockPositions?.[layout];
@@ -662,7 +668,6 @@ export function setupChatDock({getState}) {
     previewRevealTarget=null;
     if(event.pointerType==='mouse')return;
     if(compact) {
-      if(event.target.closest('#chat-history-toggle') && !historyCollapsed)previewRevealTarget='chat-history-toggle';
       if(event.target.closest('#feedback-evidence-summary') && panelSizing.opened)previewRevealTarget='feedback-evidence-summary';
     }
     expandPreview({animate:false});
