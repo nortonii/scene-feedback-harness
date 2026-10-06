@@ -190,6 +190,35 @@ class SharedDesktopAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "workbench-owned"):
             SharedDesktopAdapter(THREAD_ID, lambda _event: None, permission_mode="full_access")
 
+    def test_bound_external_resume_flag_is_scoped_and_preserves_turn_settings(self) -> None:
+        config = {"mcp_servers": {"scene_feedback": {"command": "python3"}}}
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_bound_resume=True, thread_config=config)
+        try:
+            with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread", return_value=FakeBridge()) as connect:
+                adapter.start()
+                self.assertTrue(connect.call_args.kwargs["allow_bound_resume"])
+                self.assertFalse(connect.call_args.kwargs["allow_owned_resume"])
+                self.assertFalse(connect.call_args.kwargs["subscribe"])
+                adapter.start_turn("feedback", [], message_id="feedback-bound")
+                self.assertTrue(connect.call_args.kwargs["allow_bound_resume"])
+                self.assertTrue(connect.call_args.kwargs["subscribe"])
+                self.assertEqual(connect.call_args.kwargs["thread_config"], config)
+                self.assertNotIn("permission_mode", connect.call_args.kwargs)
+        finally:
+            adapter.close()
+        with self.assertRaisesRegex(ValueError, "separate modes"):
+            SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_bound_resume=True, allow_owned_resume=True)
+
+    def test_bound_verification_failure_never_reaches_turn_start(self) -> None:
+        adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_bound_resume=True)
+        with patch("shared_thread_adapter.SharedThreadBridge.connect_for_thread",
+                   side_effect=SharedThreadBridgeError("bound Codex task sandbox changed")) as connect:
+            with self.assertRaisesRegex(DeliveryNotReadyError, "sandbox changed"):
+                adapter.start_turn("feedback", [], message_id="feedback-bound")
+            self.assertEqual(connect.call_count, 1)
+            self.assertFalse(adapter.status()["connected"])
+        adapter.close()
+
     def test_owned_task_reconnect_carries_its_scene_mcp_config(self) -> None:
         config = {"mcp_servers": {"scene_feedback": {"env": {"SCENE_FEEDBACK_DATA_DIR": "/tmp/new-scene"}}}}
         adapter = SharedDesktopAdapter(THREAD_ID, lambda _event: None, allow_owned_resume=True, thread_config=config)

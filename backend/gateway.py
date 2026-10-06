@@ -788,7 +788,7 @@ class WorkspaceGateway:
         with self.store.lock:
             owned = thread_id in self.store.state["workspace"].get("created_thread_ids", [])
         replacement_token = object()
-        kwargs = {"allow_owned_resume": True} if owned else {}
+        kwargs = {"allow_owned_resume": True} if owned else {"allow_bound_resume": True}
         kwargs.update(self._owned_adapter_config(thread_id))
         replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token), **kwargs)
         try:
@@ -859,7 +859,8 @@ class WorkspaceGateway:
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
                     active_id = workspace.get("active_feedback_id")
-                    if not active_id and workspace["agent"].get("status") != "disconnected":
+                    if not active_id and (workspace["agent"].get("status") != "disconnected"
+                                          or workspace["agent"].get("error") != error):
                         workspace["agent"] = {"status": "disconnected", "turn_id": None, "error": error}
                         self.store._save()
                         self.store.workspace_event("disconnected", {"message": error})
@@ -1526,7 +1527,8 @@ class WorkspaceGateway:
                     current["turn_id"] = response.get("turn_id")
                     current["error"] = None
                     current.pop("uncertain_since", None)
-                    workspace["agent"] = {"status": "running", "turn_id": response.get("turn_id"), "error": None}
+                    workspace["agent"] = {"status": "awaiting_approval" if workspace["approvals"] else "running",
+                                          "turn_id": response.get("turn_id"), "error": None}
                     self.store._save()
                     self.store.workspace_event("turn_started", {"feedback_id": feedback["feedback_id"], "turn_id": response.get("turn_id")})
         except Exception as exc:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared_thread_bridge import (  # noqa: E402
+    ExternalSettingsUnavailable,
     SharedThreadBridge,
     SharedThreadBridgeError,
     SharedThreadNotIdle,
@@ -108,6 +110,61 @@ class FakeWebSocket:
 
     def close(self) -> None:
         self.closed = True
+
+
+BOUND_SETTINGS = {
+    "model": "gpt-6-astra", "reasoningEffort": "xhigh", "approvalPolicy": "never",
+    "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"},
+    "activePermissionProfile": {"id": ":danger-full-access"},
+}
+
+
+def write_bound_rollout(home: Path, *, settings: dict | None = None) -> Path:
+    folder = home / "sessions" / "2026" / "10" / "05"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"rollout-2026-10-05T21-09-51-{THREAD_ID}.jsonl"
+    payload = settings if settings is not None else {
+        "model": "gpt-6-astra", "effort": "xhigh", "approval_policy": "never",
+        "approvals_reviewer": "user", "sandbox_policy": {"type": "danger-full-access"},
+        "active_permission_profile": {"id": ":danger-full-access"},
+    }
+    path.write_text("\n".join((json.dumps({"type": "session_meta", "payload": {"id": THREAD_ID}}),
+                               json.dumps({"type": "turn_context", "payload": payload}))) + "\n", encoding="utf-8")
+    return path
+
+
+class BoundWebSocket(FakeWebSocket):
+    def __init__(self, path: Path, *, status: str = "notLoaded", resume_status: str = "idle",
+                 resume_settings: dict | None = None, wrong_resume_id: bool = False,
+                 reject_resume: bool = False, thread_fields: dict | None = None) -> None:
+        super().__init__(status)
+        self.path = path
+        self.resume_status = resume_status
+        self.resume_settings = resume_settings or BOUND_SETTINGS
+        self.wrong_resume_id = wrong_resume_id
+        self.reject_resume = reject_resume
+        self.thread_fields = thread_fields or {}
+
+    def send(self, data: str) -> None:
+        message = json.loads(data)
+        method = message.get("method")
+        if method == "thread/resume" and self.reject_resume:
+            self.sent.append(message)
+            self.responses.append({"id": message["id"], "error": {"code": -32600, "message": "already has an active writer"}})
+            return
+        if method == "thread/resume":
+            self.status = self.resume_status
+        super().send(data)
+        if method == "thread/read":
+            self.responses[-1]["result"]["thread"].update({
+                "path": str(self.path), "source": "vscode", "parentThreadId": None, "ephemeral": False,
+                **self.thread_fields,
+            })
+        elif method == "thread/resume":
+            result = self.responses[-1]["result"]
+            result.update(self.resume_settings)
+            if self.wrong_resume_id:
+                result["thread"]["id"] = "01a0d906-146e-7762-a1f9-49baeda8e271"
 
 
 class SharedThreadBridgeTests(unittest.TestCase):
@@ -442,6 +499,204 @@ class SharedThreadBridgeTests(unittest.TestCase):
                         THREAD_ID, socket_dir=root, connector=lambda path, _timeout: connections[path], allow_owned_resume=True,
                     )
                 self.assertFalse(any(item["method"] == "thread/resume" for ws in connections.values() for item in ws.sent))
+
+    def test_bound_cold_resume_preserves_settings_and_only_adds_project_mcp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            ws = BoundWebSocket(rollout)
+            config = {"mcp_servers": {"scene_feedback": {"command": "python3"}}}
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64)]
+            ):
+                bridge = SharedThreadBridge.connect_for_thread(
+                    THREAD_ID, allow_bound_resume=True, subscribe=True, thread_config=config,
+                    connector=lambda _path, _timeout: ws,
+                )
+                try:
+                    self.assertEqual(bridge.read_thread()["status"]["type"], "idle")
+                    resumes = [item["params"] for item in ws.sent if item.get("method") == "thread/resume"]
+                    self.assertEqual(resumes, [{"threadId": THREAD_ID}, {"threadId": THREAD_ID, "config": config}])
+                    for params in resumes:
+                        self.assertFalse({"model", "approvalPolicy", "approvalsReviewer", "sandbox", "permissions"} & params.keys())
+                finally:
+                    bridge.close()
+
+    def test_bound_failed_cold_verification_cannot_escape_on_loaded_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            changed = {**BOUND_SETTINGS, "sandbox": {"type": "workspaceWrite"}}
+            ws = BoundWebSocket(rollout, resume_settings=changed)
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64)]
+            ):
+                for status in ("notLoaded", "idle"):
+                    self.assertEqual(ws.status, status)
+                    with self.assertRaisesRegex(SharedThreadBridgeError, "sandbox changed"):
+                        SharedThreadBridge.connect_for_thread(
+                            THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                        )
+                self.assertEqual([item["method"] for item in ws.sent].count("thread/resume"), 2)
+                self.assertFalse(any(item["method"] == "turn/start" for item in ws.sent))
+
+    def test_bound_resume_rejects_ambiguous_or_unverified_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            first = BoundWebSocket(rollout)
+            second = BoundWebSocket(rollout)
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64), Path("b" * 64)]
+            ):
+                with self.assertRaisesRegex(SharedThreadBridgeError, "not loaded"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True,
+                        connector=lambda path, _timeout: first if path.name.startswith("a") else second,
+                    )
+            self.assertFalse(any(item["method"] == "thread/resume" for ws in (first, second) for item in ws.sent))
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64)]
+            ):
+                with self.assertRaisesRegex(SharedThreadBridgeError, "not loaded"):
+                    SharedThreadBridge.connect_for_thread(THREAD_ID, connector=lambda _path, _timeout: first)
+            self.assertFalse(any(item["method"] == "thread/resume" for item in first.sent))
+
+    def test_bound_resume_rejects_missing_baseline_bad_path_and_native_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            socket_path = Path("a" * 64)
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[socket_path]
+            ):
+                missing = {"model": "gpt-6-astra", "effort": "xhigh"}
+                write_bound_rollout(home, settings=missing)
+                ws = BoundWebSocket(rollout)
+                with self.assertRaisesRegex(SharedThreadBridgeError, "complete settings baseline"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                    )
+                self.assertFalse(any(item["method"] == "thread/resume" for item in ws.sent))
+                write_bound_rollout(home)
+                for options, message in (
+                    ({"wrong_resume_id": True}, "wrong bound task"),
+                    ({"resume_status": "notLoaded"}, "did not safely load"),
+                    ({"reject_resume": True}, "active writer"),
+                    ({"thread_fields": {"parentThreadId": THREAD_ID}}, "persisted user task"),
+                    ({"thread_fields": {"ephemeral": True}}, "persisted user task"),
+                ):
+                    with self.subTest(options=options):
+                        ws = BoundWebSocket(rollout, **options)
+                        with self.assertRaisesRegex(SharedThreadBridgeError, message):
+                            SharedThreadBridge.connect_for_thread(
+                                THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                            )
+                other = Path(directory) / f"rollout-2026-10-05T21-09-51-{THREAD_ID}.jsonl"
+                other.write_text(rollout.read_text(encoding="utf-8"), encoding="utf-8")
+                ws = BoundWebSocket(other)
+                with self.assertRaisesRegex(SharedThreadBridgeError, "outside this user's sessions"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                    )
+                self.assertFalse(any(item["method"] == "thread/resume" for item in ws.sent))
+                real_rollout = rollout.with_name("saved-rollout.jsonl")
+                rollout.rename(real_rollout)
+                rollout.symlink_to(real_rollout)
+                ws = BoundWebSocket(rollout)
+                with self.assertRaisesRegex(SharedThreadBridgeError, "cannot safely read"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                    )
+                self.assertFalse(any(item["method"] == "thread/resume" for item in ws.sent))
+
+    def test_loaded_zero_turn_bound_task_keeps_existing_subscription_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": THREAD_ID}}) + "\n", encoding="utf-8")
+            ws = BoundWebSocket(rollout, status="idle")
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64)]
+            ):
+                bridge = SharedThreadBridge.connect_for_thread(
+                    THREAD_ID, allow_bound_resume=True, subscribe=True,
+                    thread_config={"mcp_servers": {"scene_feedback": {"command": "python3"}}},
+                    connector=lambda _path, _timeout: ws,
+                )
+                bridge.close()
+                self.assertEqual([item["method"] for item in ws.sent].count("thread/resume"), 1)
+                ws.status = "notLoaded"
+                with self.assertRaisesRegex(SharedThreadBridgeError, "no recent turn settings"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                    )
+                rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": THREAD_ID}})
+                                   + '\n{"type":"turn_context","payload":\n', encoding="utf-8")
+                ws = BoundWebSocket(rollout, status="idle")
+                with self.assertRaisesRegex(SharedThreadBridgeError, "malformed settings"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                    )
+
+    def test_loaded_empty_bound_task_can_have_no_native_path_or_rollout_yet(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64)]
+            ):
+                for fields in ({"path": None}, {}):
+                    with self.subTest(fields=fields):
+                        if not fields:
+                            rollout.unlink()
+                        ws = BoundWebSocket(rollout, status="idle", thread_fields=fields)
+                        bridge = SharedThreadBridge.connect_for_thread(
+                            THREAD_ID, allow_bound_resume=True, subscribe=True,
+                            thread_config={"mcp_servers": {"scene_feedback": {"command": "python3"}}},
+                            connector=lambda _path, _timeout: ws,
+                        )
+                        bridge.close()
+                        resumes = [item["params"] for item in ws.sent if item.get("method") == "thread/resume"]
+                        self.assertEqual(len(resumes), 1)
+                        self.assertEqual(set(resumes[0]), {"threadId", "config"})
+                        self.assertTrue(any(item.get("method") == "thread/read" and item["params"]["includeTurns"]
+                                            for item in ws.sent))
+                        cold = BoundWebSocket(rollout, status="notLoaded", thread_fields=fields)
+                        with self.assertRaises(ExternalSettingsUnavailable):
+                            SharedThreadBridge.connect_for_thread(
+                                THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: cold,
+                            )
+                        self.assertFalse(any(item["method"] == "thread/resume" for item in cold.sent))
+
+    def test_loaded_missing_baseline_requires_proven_empty_user_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            rollout = write_bound_rollout(home)
+            rollout.unlink()
+            with patch.dict(os.environ, {"CODEX_HOME": str(home)}), patch(
+                "shared_thread_bridge._private_socket_candidates", return_value=[Path("a" * 64)]
+            ):
+                for fields in (
+                    {"path": None, "turns": [{"id": "turn-1", "status": "completed"}]},
+                    {"source": {"subAgent": {"threadSpawn": {}}}},
+                    {"parentThreadId": THREAD_ID},
+                    {"ephemeral": True},
+                ):
+                    with self.subTest(fields=fields):
+                        ws = BoundWebSocket(rollout, status="idle", thread_fields=fields)
+                        with self.assertRaises(SharedThreadBridgeError):
+                            SharedThreadBridge.connect_for_thread(
+                                THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                            )
+                        self.assertFalse(any(item["method"] == "thread/resume" for item in ws.sent))
+                rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": "wrong-task"}}) + "\n", encoding="utf-8")
+                ws = BoundWebSocket(rollout, status="idle")
+                with self.assertRaisesRegex(SharedThreadBridgeError, "different task"):
+                    SharedThreadBridge.connect_for_thread(
+                        THREAD_ID, allow_bound_resume=True, connector=lambda _path, _timeout: ws,
+                    )
+                self.assertFalse(any(item["method"] == "thread/resume" for item in ws.sent))
 
     def test_model_catalog_and_task_creation_use_same_connection(self) -> None:
         created = "01a0de73-9763-7432-8ca4-5892c0904234"

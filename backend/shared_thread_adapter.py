@@ -1,4 +1,4 @@
-"""Deliver workbench feedback to a task loaded in the current Codex Desktop daemon."""
+"""Deliver workbench feedback through the current shared Codex daemon."""
 
 from __future__ import annotations
 
@@ -33,13 +33,15 @@ class DeliveryRejectedError(RuntimeError):
 class SharedDesktopAdapter:
     """The WorkspaceGateway adapter interface for an existing desktop task.
 
-    The daemon and task must already exist.  A separate Codex process cannot
-    safely resume a desktop-owned rollout.  Each submitted turn keeps its own
-    connection open until the terminal notification arrives, including any
-    human approval requests.
+    The daemon and task must already exist. An explicitly bound external task
+    may be resumed on one verified daemon after its saved settings are checked;
+    workbench-owned recovery has a separate path. Each submitted turn keeps
+    its connection open through completion and human approval requests.
     """
 
-    def __init__(self, thread_id: str, on_event: Callable[[dict[str, Any]], None], *, allow_owned_resume: bool = False, initial_bridge: SharedThreadBridge | None = None, thread_config: dict[str, Any] | None = None, permission_mode: str | None = None):
+    def __init__(self, thread_id: str, on_event: Callable[[dict[str, Any]], None], *, allow_owned_resume: bool = False, allow_bound_resume: bool = False, initial_bridge: SharedThreadBridge | None = None, thread_config: dict[str, Any] | None = None, permission_mode: str | None = None):
+        if allow_owned_resume and allow_bound_resume:
+            raise ValueError("owned and external resume are separate modes")
         if permission_mode is not None:
             if not isinstance(permission_mode, str) or permission_mode not in {"full_access", "workspace_write", "read_only"}:
                 raise ValueError("permission_mode must be full_access, workspace_write, or read_only")
@@ -48,6 +50,7 @@ class SharedDesktopAdapter:
         self.thread_id = thread_id
         self.on_event = on_event
         self.allow_owned_resume = allow_owned_resume
+        self.allow_bound_resume = allow_bound_resume
         self.thread_config = thread_config
         self.permission_mode = permission_mode
         self._initial_bridge = initial_bridge
@@ -76,6 +79,7 @@ class SharedDesktopAdapter:
             require_idle=require_idle,
             subscribe=subscribe,
             allow_owned_resume=self.allow_owned_resume and (self.permission_mode is None or restore_permissions),
+            allow_bound_resume=self.allow_bound_resume,
             **kwargs,
         )
 
