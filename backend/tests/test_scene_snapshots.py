@@ -1,5 +1,6 @@
 """Saved static camera views keep separate pixels, cameras and annotations."""
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,10 +50,13 @@ class SceneSnapshotTests(unittest.TestCase):
         message, paths = self.gateway._turn_input(packet)
         self.assertIn('截图 1', message)
         self.assertIn('截图 2', message)
-        self.assertEqual(len(paths), 4)
+        self.assertEqual(len(paths), 2)  # Each snapshot's original and annotation have identical bytes.
         with patch.object(mcp_server, 'DATA_DIR', self.store.data_dir):
-            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]})
-        self.assertEqual(sum(item.type == 'image' for item in result.content), 4)
+            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]}, include_details=True)
+        self.assertEqual(sum(item.type == 'image' for item in result.content), len(paths))
+        images = json.loads(result.content[0].text)['items'][0]['images']
+        self.assertEqual([item['source'] for item in images], ['S1', 'S2'])
+        self.assertTrue(all(item['aliases'][0]['role'] == '场景标记或高亮' for item in images))
         self.assertTrue(all(view.get('scene_original_path') for view in result.structured_content['items'][0]['scene_snapshots']))
         self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(packet['feedback_id']), packet)
 
@@ -82,10 +86,10 @@ class SceneSnapshotTests(unittest.TestCase):
         self.assertEqual(packet['annotations'], payload['annotations'])
         self.assertEqual([item['annotation']['name'] for item in packet['inline_references']], ['点1', '点2'])
         message, _ = self.gateway._turn_input(packet)
-        for name in ('点1', '点2'):
-            self.assertIn(f'"name": "{name}"', message)
+        evidence = json.loads(message.split('证据：', 1)[1].split('\n附件：', 1)[0])
+        self.assertEqual([mark['name'] for mark in evidence['annotations']], ['点1', '点2'])
         with patch.object(mcp_server, 'DATA_DIR', self.store.data_dir):
-            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]})
+            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]}, include_details=True)
         self.assertEqual(result.structured_content['items'][0]['annotations'], payload['annotations'])
         saved = SceneStore(self.store.data_dir).feedback_by_id(packet['feedback_id'])
         self.assertEqual(saved['annotations'], payload['annotations'])
@@ -115,15 +119,15 @@ class SceneSnapshotTests(unittest.TestCase):
             self.assertEqual(saved['comparison_reference_url'], reference['url'])
             self.assertNotEqual(saved['scene_comparison_url'], saved['scene_original_url'])
         message, paths = self.gateway._turn_input(packet)
-        self.assertIn('透明重影不是新增物体', message)
-        self.assertIn('normalized_scene_image', message)
+        self.assertIn('叠图重影不是新增物体', message)
+        self.assertIn('叠图对比（辅助）', message)
         composite_path = str(self.store.media_dir / packet['scene_snapshots'][0]['scene_comparison_url'].rsplit('/', 1)[-1])
-        self.assertIn(composite_path, paths)
+        self.assertTrue(any(Path(path).read_bytes() == Path(composite_path).read_bytes() for path in paths))
         with patch.object(mcp_server, 'DATA_DIR', self.store.data_dir):
-            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]})
+            result = mcp_server._visual_tool_result({'items': [copy.deepcopy(packet)]}, include_details=True)
         saved = result.structured_content['items'][0]['scene_snapshots'][0]
         self.assertEqual(saved['scene_comparison_path'], composite_path)
-        self.assertTrue(any(content.type == 'text' and 'not new model geometry' in content.text for content in result.content))
+        self.assertTrue(any(content.type == 'text' and 'overlay ghosting is not geometry' in content.text for content in result.content))
         self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(packet['feedback_id']), packet)
 
     def test_disabled_overlay_preserves_settings_without_a_misleading_composite(self):
@@ -197,8 +201,12 @@ class SceneSnapshotTests(unittest.TestCase):
         self.assertEqual(saved['time_sec'], 0)
         self.assertTrue(saved['scene_comparison_url'])
         message, paths = self.gateway._turn_input(packet)
-        self.assertIn('带标记的叠图对比', message)
-        self.assertIn(str(self.store.media_dir / saved['scene_comparison_url'].rsplit('/', 1)[-1]), paths)
+        self.assertIn('叠图对比（辅助）', message)
+        composite = self.store.media_dir / saved['scene_comparison_url'].rsplit('/', 1)[-1]
+        self.assertTrue(any(Path(path).read_bytes() == composite.read_bytes() for path in paths))
+        evidence = json.loads(message.split('证据：', 1)[1].split('\n附件：', 1)[0])
+        self.assertTrue(any(alias['role'] == '叠图对比（辅助）'
+                            for image in evidence['images'] for alias in image.get('aliases', [])))
 
     def test_mixed_static_and_dynamic_versions_preserve_oldest_revision(self):
         self.store.state['scene']['revision'] = 2

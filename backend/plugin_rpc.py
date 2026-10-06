@@ -41,8 +41,8 @@ def tool(name: str, description: str, properties: dict | None = None, required: 
 TOOLS = [
     tool("workspace_open", "Show this project's workbench URL, session and event subscription status.", readonly=True),
     tool("workspace_get_context", "Read scene, camera/reference metadata and actual original image blocks.", readonly=True),
-    tool("workspace_get_feedback", "Read one immutable feedback packet including actual original/annotated images, frozen views, frame references and selected objects.",
-         {"feedback_id": ID}, ["feedback_id"], readonly=True),
+    tool("workspace_get_feedback", "Read compact feedback and relevant images. Set include_details to read all immutable archived fields.",
+         {"feedback_id": ID, "include_details": {"type": "boolean", "default": False}}, ["feedback_id"], readonly=True),
     tool("request_visual_feedback", "Enter human visual debugging. Import project-local references/GLB if supplied, show workbench and return immediately. The host must subscribe to visual_feedback.submitted to receive future submissions.",
          {"reference_images": {"type": "array", "items": PATH, "maxItems": 8}, "scene_glb_path": PATH,
           "current_scene": {"type": "object", "properties": {"objects": {"type": "array"}}, "required": ["objects"], "additionalProperties": False},
@@ -148,7 +148,8 @@ class PluginRPC:
         if name == "workspace_get_feedback":
             from mcp_server import _visual_tool_result
             packet = self.store.feedback_by_id(args["feedback_id"])
-            return _visual_tool_result({"items": [packet], "next_cursor": 1, "session_id": packet["session_id"]}, self.store.data_dir).model_dump(by_alias=True, exclude_none=True)
+            return _visual_tool_result({"items": [packet], "next_cursor": 1, "session_id": packet["session_id"]}, self.store.data_dir,
+                                       include_details=args.get("include_details", False)).model_dump(by_alias=True, exclude_none=True)
         if name == "workspace_get_context":
             from mcp_server import _image_path, _preview_image
             state = self.gateway.state()

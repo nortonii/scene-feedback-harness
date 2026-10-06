@@ -16,6 +16,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
+from feedback_summary import model_input_plan
 import mcp_server
 from plugin_rpc import PluginRPC
 
@@ -148,7 +149,10 @@ class DraggedImageTests(unittest.TestCase):
         self.assertEqual(saved["image_refs"][0]["scene_revision"], 2)
         self.assertTrue(saved["image_refs"][0]["from_stale_snapshot"])
         text, _ = self.gateway._turn_input(saved)
-        self.assertIn("独立于本轮反馈版本 3", text)
+        source = json.loads(text.splitlines()[2].removeprefix("证据："))["image_refs"][0]
+        self.assertEqual(source["scene_revision"], 2)
+        self.assertTrue(source["from_stale_snapshot"])
+        self.assertEqual(json.loads(text.splitlines()[2].removeprefix("证据："))["scene_revision"], 3)
 
     def test_scene_capture_revision_camera_and_selection_validation(self):
         changes = [{"scene_revision": 99}, {"scene_revision": True}, {"camera": {}}, {"camera": None},
@@ -236,26 +240,27 @@ class DraggedImageTests(unittest.TestCase):
         saved = self.store.submit_feedback(self.session, self.payload(reference, scene, crops=[{
             "source": "reference", "reference_id": reference["reference_id"], "data_url": self.marked_url}]))
         text, paths = self.gateway._turn_input(saved)
-        # Session reference, source-bound crop, raw/display/marked ref, clean/marked scene.
-        self.assertEqual(len(paths), 7)
+        plan = model_input_plan(saved, self.store.data_dir)
+        self.assertEqual(paths, [item["path"] for item in plan["images"]])
+        self.assertEqual(len(paths), 3)  # Three unique source, marked and scene byte streams.
         self.assertIn("[[image:ref1]]", text)
         self.assertIn("[[image:scene1]]", text)
         self.assertIn('"camera"', text)
-        self.assertEqual([Path(path).read_bytes() for path in paths], [source, self.marked, source, capture, self.marked, self.data, self.marked])
-        result = mcp_server._visual_tool_result({"items": [copy.deepcopy(saved)]}, self.store.data_dir)
-        self.assertEqual(sum(item.type == "image" for item in result.content), 7)
+        self.assertEqual({Path(path).read_bytes() for path in paths}, {source, self.marked, self.data})
+        result = mcp_server._visual_tool_result({"items": [copy.deepcopy(saved)]}, self.store.data_dir, include_details=True)
+        self.assertEqual(sum(item.type == "image" for item in result.content), len(paths))
         refs = result.structured_content["items"][0]["image_refs"]
         self.assertTrue(all(Path(item["original_path"]).is_file() for item in refs))
         self.assertEqual(Path(refs[0]["display_original_path"]).read_bytes(), capture)
         summarized = json.loads(result.content[0].text)["items"][0]["image_refs"]
         self.assertEqual(summarized[1]["scene_revision"], 2)
         self.assertEqual(summarized[1]["token"], "[[image:scene1]]")
-        self.assertTrue(any(item.type == "text" and item.text == "I2 · original" for item in result.content))
-        self.assertEqual(json.loads(result.content[0].text)["items"][0]["crops"],
-                         [{"key": "crop1", "source": "reference", "reference_id": reference["reference_id"]}])
+        self.assertTrue(any(item.type == "text" and "I2 · 引用原图" in item.text for item in result.content))
+        self.assertEqual(json.loads(result.content[0].text)["items"][0]["crops"][0]["reference_id"],
+                         reference["reference_id"])
         context = SimpleNamespace(store=self.store, gateway=self.gateway)
-        plugin = PluginRPC(context).call_tool("workspace_get_feedback", {"feedback_id": saved["feedback_id"]})
-        self.assertEqual(sum(item["type"] == "image" for item in plugin["content"]), 7)
+        plugin = PluginRPC(context).call_tool("workspace_get_feedback", {"feedback_id": saved["feedback_id"], "include_details": True})
+        self.assertEqual(sum(item["type"] == "image" for item in plugin["content"]), len(paths))
         self.assertEqual(plugin["structuredContent"]["items"][0]["image_refs"][1]["camera"], self.camera)
 
     def test_feedback_evidence_survives_reference_scene_and_clip_replacement(self):
@@ -268,7 +273,8 @@ class DraggedImageTests(unittest.TestCase):
         fetched = self.store.feedback_by_id(saved["feedback_id"])
         self.assertEqual(fetched["image_refs"], original_images)
         result = mcp_server._visual_tool_result({"items": [fetched]}, self.store.data_dir)
-        self.assertEqual(sum(item.type == "image" for item in result.content), 3)
+        self.assertEqual(sum(item.type == "image" for item in result.content),
+                         len(model_input_plan(fetched, self.store.data_dir)["images"]))
 
     def test_idempotent_replay_keeps_same_evidence_after_source_replacement(self):
         clip = self.import_views()
