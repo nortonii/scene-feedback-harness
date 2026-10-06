@@ -42,7 +42,7 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
   // it so viewport coordinates and mobile keyboard bounds stay correct.
   document.body.append(menu);
   let range=null, candidates=[], activeKey=null, composing=false, dismissed=null;
-  let selecting=false;
+  let selecting=false,previewDismissed=null;
   const identity=(value) => value ? (value.value ?? input.value)+'\u0000'+value.start+':'+value.end : null;
   const isComposing=(event) => composing || event?.isComposing || event?.keyCode === 229;
   input.setAttribute('aria-autocomplete','list');
@@ -51,7 +51,7 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
   input.setAttribute('aria-expanded','false');
 
   function close({dismiss=false}={}) {
-    if (dismiss) dismissed=identity(range);
+    if (dismiss) {dismissed=identity(range);previewDismissed=null;}
     range=null; candidates=[]; activeKey=null;
     menu.classList.add('hidden');
     input.setAttribute('aria-expanded','false');
@@ -158,13 +158,19 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
     }
     return true;
   }
-  input.addEventListener('input',() => { dismissed=null; refresh(); });
+  function resumePreviewQuery() {
+    if(previewDismissed && dismissed===previewDismissed) {dismissed=null;previewDismissed=null;}
+  }
+  input.addEventListener('input',() => { dismissed=null;previewDismissed=null;refresh(); });
+  for(const event of ['click','focus'])input.addEventListener(event,resumePreviewQuery);
+  input.addEventListener('keydown',event=>{if(['ArrowUp','ArrowDown','Enter'].includes(event.key) && !isComposing(event))resumePreviewQuery();});
   for (const event of ['click','keyup','select','focus']) input.addEventListener(event,refresh);
   input.addEventListener('blur',() => { if (!menu.contains(document.activeElement)) close(); });
   input.addEventListener('compositionstart',() => { composing=true; close(); });
   input.addEventListener('compositionend',() => { composing=false; dismissed=null; setTimeout(refresh,0); });
   input.addEventListener('scroll',position);
   document.addEventListener('pointerdown',(event) => { if (event.target !== input && !menu.contains(event.target)) close({dismiss:true}); });
+  document.addEventListener('chat-preview-compact',()=>{close({dismiss:true});previewDismissed=dismissed;});
   window.addEventListener('resize',position);
   window.visualViewport?.addEventListener('resize',position);
   window.visualViewport?.addEventListener('scroll',position);

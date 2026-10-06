@@ -23,7 +23,8 @@ export function setupChatDock({getState}) {
   let lastHeightBounds = {min:1, max:window.innerHeight};
   let launcherStatus = '';
   let sectionMotion=null,panelSizing=null;
-  let compact=true,previewAnimation=null,previewCloseTimer=null,pointerInside=false,dropActive=false,dropDepth=0,previewRevealTarget=null;
+  let compact=true,previewAnimation=null,previewCloseTimer=null,dropActive=false,dropDepth=0,previewRevealTarget=null;
+  let mousePoint=null,inputMode='mouse',pointerPress=false,composing=false,editUntil=0,editTimer=null;
   const visibilityTransitions = new Map();
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
@@ -42,18 +43,22 @@ export function setupChatDock({getState}) {
   const positionLayout = () => document.documentElement.dataset.layout === 'immersive' ? 'immersive' : 'compare';
   const customPosition = () => dockPositions[positionLayout()];
   const popupNodes = () => [byId('prompt-attach-menu'),byId('prompt-mentions')].filter(Boolean);
+  const editable = element => !!element?.matches('input,textarea,select,[contenteditable=true]');
+  const popupVisible = element => !element.hidden && !element.inert && !element.classList.contains('hidden');
+  const mouseWithin = element => !!mousePoint && element.contains(document.elementFromPoint(mousePoint.x,mousePoint.y));
   function previewHeld() {
     const active=document.activeElement;
     const state=getState() || {};
     const pending=(state.approvals || []).length || (state.queue || []).some(item =>
       ['blocked_stale','delivery_uncertain'].includes(item.status) || item.status==='failed' && !item.turn_id);
-    const selection=window.getSelection();
-    const focusHeld=dock.contains(active) && (active.matches('input,textarea,select,[contenteditable=true]') || active.matches(':focus-visible'));
-    return pointerInside || dock.matches(':hover') || focusHeld ||
-      popupNodes().some(element=>!element.hidden && !element.classList.contains('hidden')) ||
+    const surfaces=[dock,...popupNodes().filter(popupVisible)];
+    const focusWithin=surfaces.some(element=>element.contains(active));
+    const focusHeld=document.hasFocus() && focusWithin && (inputMode==='keyboard' || inputMode==='touch' && editable(active));
+    const editing=focusWithin && editable(active) && (composing || performance.now()<editUntil);
+    return surfaces.some(mouseWithin) || focusHeld || editing || pointerPress ||
+      popupNodes().some(element=>popupVisible(element) && element.getAttribute('aria-busy')==='true') ||
       !!document.querySelector('dialog[open]') || pending || state.agent?.status==='awaiting_approval' ||
-      moveDrag || resizeDrag || dock.classList.contains('panel-resizing') || dropActive ||
-      selection?.type==='Range' && dock.contains(selection.anchorNode);
+      moveDrag || resizeDrag || dock.classList.contains('panel-resizing') || dropActive;
   }
   function renderPreview() {
     dock.classList.toggle('is-compact',compact);dock.classList.toggle('is-expanded',!compact);
@@ -90,6 +95,7 @@ export function setupChatDock({getState}) {
     dock.classList.add('preview-measuring');
     if(value)foldHistory();
     compact=value;renderPreview();
+    if(compact)document.dispatchEvent(new CustomEvent('chat-preview-compact'));
     if(!compact)panelSizing?.fit({notify:false});
     applyHeight({restoreScroll:false});applyPosition();
     const after=dock.getBoundingClientRect(),afterMax=getComputedStyle(dock).maxHeight;
@@ -109,14 +115,18 @@ export function setupChatDock({getState}) {
     }).catch(()=>{});
   }
   function scheduleCompact() {
-    clearTimeout(previewCloseTimer);previewCloseTimer=null;
-    if(compact || collapsed)return;
+    if(compact || collapsed || previewCloseTimer!==null)return;
     previewCloseTimer=setTimeout(()=>{
       previewCloseTimer=null;
       if(!previewHeld())setCompact(true);
     },260);
   }
   function expandPreview({animate=true}={}) {setCompact(false,{animate});}
+  function editingActivity() {
+    editUntil=performance.now()+900;
+    clearTimeout(editTimer);editTimer=setTimeout(()=>{editTimer=null;scheduleCompact();},900);
+    expandPreview();scheduleCompact();
+  }
   function viewportBounds() {
     const viewport=window.visualViewport;
     const left=viewport?.offsetLeft || 0,top=viewport?.offsetTop || 0;
@@ -438,6 +448,7 @@ export function setupChatDock({getState}) {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
       clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
+      clearTimeout(editTimer);editTimer=null;editUntil=0;composing=false;pointerPress=false;
       finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();
       foldHistory();compact=true;renderPreview();
       sessionId = state.sessionId;
@@ -617,14 +628,14 @@ export function setupChatDock({getState}) {
     // A viewport change invalidates the launcher-to-panel path. Settle at the
     // requested state before fitting the new screen instead of drifting outside it.
     if ([dock, launcher].some(element => visibilityTransitions.get(element)?.animation)) applyLayout();
-    scheduleHeightUpdate();
+    scheduleHeightUpdate();scheduleCompact();
   }
   window.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
   new MutationObserver(()=>{
     clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
-    finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();applyLayout();
+    finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();applyLayout();scheduleCompact();
   }).observe(document.documentElement,{attributes:true,attributeFilter:['data-layout']});
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
@@ -660,10 +671,13 @@ export function setupChatDock({getState}) {
     if (followingLatest) unread = 0;
     updateCounts();
   });
-  dock.addEventListener('pointerenter',event=>{if(event.pointerType==='mouse'){pointerInside=true;expandPreview();}});
-  dock.addEventListener('pointerleave',event=>{if(event.pointerType==='mouse'){pointerInside=false;scheduleCompact();}});
-  dock.addEventListener('focusin',()=>expandPreview());
+  dock.addEventListener('pointerenter',event=>{if(event.pointerType==='mouse'){mousePoint={x:event.clientX,y:event.clientY};expandPreview();}});
+  dock.addEventListener('pointerleave',event=>{if(event.pointerType==='mouse'){mousePoint={x:event.clientX,y:event.clientY};scheduleCompact();}});
+  dock.addEventListener('focusin',()=>{expandPreview();scheduleCompact();});
   dock.addEventListener('focusout',scheduleCompact);
+  for(const name of ['beforeinput','input'])dock.addEventListener(name,event=>{if(editable(event.target))editingActivity();});
+  dock.addEventListener('compositionstart',()=>{composing=true;expandPreview();});
+  dock.addEventListener('compositionend',()=>{composing=false;editingActivity();});
   dock.addEventListener('pointerdown',event=>{
     previewRevealTarget=null;
     if(event.pointerType==='mouse')return;
@@ -679,14 +693,35 @@ export function setupChatDock({getState}) {
   dock.addEventListener('dragenter',()=>{dropDepth+=1;dropActive=true;expandPreview();});
   dock.addEventListener('dragleave',()=>{dropDepth=Math.max(0,dropDepth-1);if(!dropDepth){dropActive=false;scheduleCompact();}});
   for(const name of ['drop','dragend'])document.addEventListener(name,()=>{dropDepth=0;dropActive=false;scheduleCompact();});
-  window.addEventListener('blur',()=>{dropDepth=0;dropActive=false;scheduleCompact();});
+  window.addEventListener('blur',()=>{mousePoint=null;pointerPress=false;composing=false;editUntil=0;dropDepth=0;dropActive=false;scheduleCompact();});
   for(const popup of popupNodes()) {
-    popup.addEventListener('pointerenter',()=>{clearTimeout(previewCloseTimer);previewCloseTimer=null;});
+    popup.addEventListener('pointerenter',event=>{if(event.pointerType==='mouse')mousePoint={x:event.clientX,y:event.clientY};expandPreview();});
     popup.addEventListener('pointerleave',scheduleCompact);popup.addEventListener('focusout',scheduleCompact);
-    new MutationObserver(()=>{if(!previewHeld())scheduleCompact();}).observe(popup,{attributes:true,attributeFilter:['hidden','class']});
+    new MutationObserver(()=>{if(!previewHeld())scheduleCompact();}).observe(popup,{attributes:true,attributeFilter:['hidden','inert','class','aria-busy']});
   }
   document.addEventListener('focusin',()=>{if(!previewHeld())scheduleCompact();});
-  document.addEventListener('pointerdown',event=>{if(!dock.contains(event.target))scheduleCompact();}, {capture:true});
+  document.addEventListener('pointermove',event=>{
+    if(event.pointerType!=='mouse')return;
+    if(!event.buttons)pointerPress=false;
+    mousePoint={x:event.clientX,y:event.clientY};inputMode='mouse';
+    if(mouseWithin(dock) || popupNodes().some(element=>popupVisible(element) && mouseWithin(element)))expandPreview();
+    else scheduleCompact();
+  }, {capture:true});
+  document.addEventListener('pointerdown',event=>{
+    inputMode=event.pointerType==='mouse'?'mouse':'touch';
+    mousePoint=inputMode==='mouse'?{x:event.clientX,y:event.clientY}:null;
+    pointerPress=dock.contains(event.target) || popupNodes().some(element=>element.contains(event.target));
+    if(!pointerPress)scheduleCompact();
+  }, {capture:true});
+  for(const name of ['pointerup','pointercancel'])document.addEventListener(name,()=>{pointerPress=false;scheduleCompact();}, {capture:true});
+  document.documentElement.addEventListener('pointerleave',event=>{if(event.pointerType==='mouse'){mousePoint=null;scheduleCompact();}});
+  document.addEventListener('keydown',event=>{
+    if(event.key==='Tab')inputMode='keyboard';
+    if(['ArrowUp','ArrowDown','Home','End','Enter',' '].includes(event.key) && popupNodes().some(element=>popupVisible(element) && element.contains(event.target))) {
+      inputMode='keyboard';expandPreview();
+    }
+    if(dock.contains(event.target) && editable(event.target) && !['Tab','Escape','Shift','Control','Alt','Meta'].includes(event.key))editingActivity();
+  }, {capture:true});
   document.addEventListener('selectionchange',()=>{if(!previewHeld())scheduleCompact();});
   for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('close',scheduleCompact);
   renderPreview();

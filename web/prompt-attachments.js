@@ -37,6 +37,7 @@ export function setupPromptAttachments({getOptions,getSaved,onCapture,onSaved,is
   function refresh() {
     button.disabled=!isEnabled();
     if(!opened) return;
+    menu.setAttribute('aria-busy',String(busy));
     if(button.disabled || byId('chat-dock').hidden || byId('chat-dock').inert) {close();return;}
     for(const [pane,option] of Object.entries(getOptions())) {
       const target=options[pane];target.textContent=option.label;target.disabled=busy || !!option.disabled;target.title=option.disabled || option.label;
@@ -85,6 +86,7 @@ export function setupPromptAttachments({getOptions,getSaved,onCapture,onSaved,is
   document.addEventListener('keydown',event=>{if(opened && event.key==='Escape') {event.preventDefault();event.stopImmediatePropagation();close({focus:true});}},true);
   document.addEventListener('pointerdown',event=>{if(opened && !menu.contains(event.target) && !button.contains(event.target)) close();});
   document.addEventListener('focusin',event=>{if(opened && !menu.contains(event.target) && !button.contains(event.target)) close();});
+  document.addEventListener('chat-preview-compact',()=>close());
   new MutationObserver(()=>{if(opened && (byId('chat-dock').inert || byId('chat-dock').hidden)) close();}).observe(byId('chat-dock'),{attributes:true,attributeFilter:['inert','hidden']});
   window.addEventListener('resize',position);window.addEventListener('scroll',position,true);
   window.visualViewport?.addEventListener('resize',position);window.visualViewport?.addEventListener('scroll',position);
