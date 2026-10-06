@@ -10,17 +10,20 @@ def open_annotation_tools(page, context=None):
         context = 'scene' if page.locator('#scene-live-card').get_attribute('aria-pressed') == 'false' and page.locator('#scene-snapshot-media').is_visible() else 'reference'
     if panel.is_visible() and (context is None or panel.get_attribute('data-context') == context):
         return
-    if context == 'scene':
-        surface = '#scene-snapshot-media' if page.locator('#scene-snapshot-media').is_visible() else '#viewport canvas'
-        page.locator(surface).hover(position={'x':20,'y':20})
-        expect(panel).to_be_visible()
-        panel.hover()
-    else:
-        if page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#reference-media').is_visible():
-            page.locator('#immersive-reference-toggle').click()
-        page.locator('#reference-media').hover()
-        expect(panel).to_be_visible()
-        panel.hover()
+    if context == 'reference' and page.locator('html').get_attribute('data-layout') == 'immersive' and not page.locator('#reference-media').is_visible():
+        page.locator('#immersive-reference-toggle').click()
+    stage_locator = page.locator('#scene-stage' if context == 'scene' else '#reference-stage')
+    stage_locator.wait_for(state='visible')
+    stage = stage_locator.bounding_box()
+    top = max(10, stage['y'] + 10)
+    if context == 'scene' and page.locator('html').get_attribute('data-layout') == 'immersive':
+        header_bottom = page.locator('.scene-pane .pane-head').evaluate('el => el.getBoundingClientRect().bottom')
+        topbar_bottom = page.locator('.topbar').evaluate('el => el.getBoundingClientRect().bottom')
+        top = max(top, header_bottom + 10, topbar_bottom + 10)
+    page.mouse.move(0, 0)  # Leave the previous pane and clear a dismissed hover.
+    page.mouse.move(stage['x'] + stage['width'] / 2, top + 20)
+    expect(panel).to_be_visible()
+    panel.hover()
     expect(panel).to_be_visible()
 
 

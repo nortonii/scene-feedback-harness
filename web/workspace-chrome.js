@@ -5,6 +5,8 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   const dock = byId('annotation-tool-panel');
   const reference = byId('reference-pane');
   const referenceMedia = byId('reference-media');
+  const referenceStage = byId('reference-stage');
+  const sceneStage = byId('scene-stage');
   const referenceCanvas = byId('reference-annotations');
   const sceneViewport = byId('viewport');
   const sceneMedia = byId('scene-snapshot-media');
@@ -19,8 +21,8 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   let frame = 0;
   let closeTimer = null;
   const automatic = {
-    reference:{media:[referenceMedia],touch:false,dismissed:false,suppressFocus:false},
-    scene:{media:[sceneViewport,sceneMedia],touch:false,dismissed:false,suppressFocus:false}
+    reference:{stage:referenceStage,media:[referenceMedia],upperHover:false,pointer:null,touch:false,dismissed:false,suppressFocus:false},
+    scene:{stage:sceneStage,media:[sceneViewport,sceneMedia],upperHover:false,pointer:null,touch:false,dismissed:false,suppressFocus:false}
   };
   const activePointers = new Set();
 
@@ -34,11 +36,11 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     return activePointers.size || state.drag || state.referencePanning || state.poseEditDrag || state.textPending;
   }
   function inPaneArea(pane,element) {
-    return !!element && (automatic[pane].media.some(media=>media.contains(element)) || dock.contains(element) || textEditor.contains(element));
+    return !!element && (automatic[pane].stage.contains(element) || dock.contains(element) || textEditor.contains(element));
   }
   function paneAreaActive(pane) {
     const focused = document.activeElement;
-    return automatic[pane].media.some(media=>media.matches(':hover')) || dock.matches(':hover') || textEditor.matches(':hover') ||
+    return automatic[pane].upperHover || dock.matches(':hover') || textEditor.matches(':hover') ||
       (focused?.matches(':focus-visible') && inPaneArea(pane,focused));
   }
   function cancelAutomaticClose() { clearTimeout(closeTimer); closeTimer = null; }
@@ -58,14 +60,28 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     if (!opened || target !== pane) open(pane);
   }
 
+  function upperArea(pane) {
+    const anchor = automatic[pane].stage.getBoundingClientRect();
+    const immersiveScene = root.dataset.layout === 'immersive' && pane === 'scene';
+    const headerBottom = immersiveScene
+      ? Math.max(scene.querySelector('.pane-head').getBoundingClientRect().bottom,
+                 document.querySelector('.topbar').getBoundingClientRect().bottom) : 0;
+    return {anchor, top:Math.max(10, anchor.top + 10, headerBottom + (headerBottom ? 10 : 0))};
+  }
+  function inUpperArea(pane, pointer) {
+    if (!pointer) return false;
+    const {anchor,top} = upperArea(pane);
+    return pointer.clientX >= anchor.left && pointer.clientX <= anchor.right &&
+      pointer.clientY >= Math.max(anchor.top,top - 10) && pointer.clientY <= Math.min(anchor.bottom,top + 70);
+  }
+  function refreshUpperHover() {
+    for (const [pane,settings] of Object.entries(automatic)) settings.upperHover = inUpperArea(pane,settings.pointer);
+  }
   function position() {
     if (!opened) return;
-    const immersive = root.dataset.layout === 'immersive';
-    const anchor = byId(target === 'reference' ? 'reference-stage' : 'scene-stage').getBoundingClientRect();
-    const sceneHead = scene.querySelector('.pane-head').getBoundingClientRect();
-    const headerBottom = immersive && target === 'scene'
-      ? Math.max(sceneHead.bottom, document.querySelector('.topbar').getBoundingClientRect().bottom) : 0;
-    const top = Math.max(10, anchor.top + 10, headerBottom + (headerBottom ? 10 : 0));
+    refreshUpperHover();
+    if (!paneAreaActive(target) && !closeTimer) scheduleAutomaticClose();
+    const {anchor,top} = upperArea(target);
     const availableWidth = Math.max(120, Math.min(anchor.width - 20, innerWidth - 20));
     dock.style.setProperty('--annotation-dock-max-width', `${Math.round(availableWidth)}px`);
     dock.classList.toggle('is-compact', availableWidth < 780);
@@ -123,7 +139,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     cancelAutomaticClose();
     if (!opened) return;
     const trigger = target === 'reference' ? referenceCanvas : getState().sceneView === 'live' ? sceneViewport.querySelector('canvas') : byId('scene-annotations');
-    automatic[target].dismissed = automatic[target].media.some(media=>media.matches(':hover')) || dock.matches(':hover');
+    automatic[target].dismissed = automatic[target].upperHover || dock.matches(':hover');
     automatic[target].touch = false;
     animation?.cancel();
     opened = false;
@@ -140,30 +156,41 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     byId('selection-level-switch').hidden = state.sceneView !== 'live';
     if (opened && !paneReady(target)) close({resetTool:false});
     const viewChanged = previousView !== state.sceneView;
-    const newSnapshot = state.sceneView === 'snapshot' && viewChanged;
     const newTool = state.mode !== 'select' && previousMode !== state.mode;
     previousView = state.sceneView; previousMode = state.mode;
-    if (newSnapshot) { open('scene'); scheduleAutomaticClose(); }
-    else if (newTool && !opened) open(state.toolPane === 'reference' && !reference.inert ? 'reference' : 'scene');
+    if (newTool && !opened) open(state.toolPane === 'reference' && !reference.inert ? 'reference' : 'scene');
     else if (viewChanged) render();
+    if (viewChanged) scheduleAutomaticClose();
     schedulePosition();
   }
   function layoutChanged() {
+    refreshUpperHover();
     if (opened && target === 'reference' && reference.inert) close({resetTool:false});
     schedulePosition();
   }
   for (const [pane,settings] of Object.entries(automatic)) {
-    for (const media of settings.media) {
-      media.addEventListener('pointerenter', event => {
-        if (event.pointerType !== 'mouse') return;
+    const hoverUpper = event => {
+      if (event.pointerType !== 'mouse') return;
+      const wasUpper = settings.upperHover;
+      settings.pointer = {clientX:event.clientX, clientY:event.clientY};
+      settings.upperHover = inUpperArea(pane,settings.pointer);
+      if (settings.upperHover) {
         settings.touch = false; openAutomatically(pane);
-      });
-      media.addEventListener('pointerleave', event => {
-        if (event.pointerType !== 'mouse') return;
-        settings.dismissed = false; scheduleAutomaticClose();
-      });
-      media.addEventListener('focusin', () => {
-        if (settings.suppressFocus) return;
+      } else {
+        settings.dismissed = false;
+        if (wasUpper || opened && target === pane && !closeTimer) scheduleAutomaticClose();
+      }
+    };
+    settings.stage.addEventListener('pointerenter', hoverUpper);
+    settings.stage.addEventListener('pointermove', hoverUpper);
+    settings.stage.addEventListener('pointerleave', event => {
+      if (event.pointerType !== 'mouse') return;
+      settings.pointer = null; settings.upperHover = false;
+      settings.dismissed = false; scheduleAutomaticClose();
+    });
+    for (const media of settings.media) {
+      media.addEventListener('focusin', event => {
+        if (settings.suppressFocus || !event.target.matches(':focus-visible')) return;
         settings.dismissed = false; openAutomatically(pane);
       });
       media.addEventListener('focusout', scheduleAutomaticClose);
@@ -177,19 +204,20 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
   }
   byId('annotation-tools-close').addEventListener('click', () => close({focus:true}));
   document.addEventListener('click', event => { if (event.target.closest('#scene-live-card')) close(); });
-  // Context follows the actual clicked image, retaining cross-pane annotation.
+  // Top-strip activation is separate from image gestures, so drawing or
+  // rotating in the rest of the image never reopens the toolbar.
   document.addEventListener('pointerdown', event => {
-    const pane = event.target.closest('#reference-media') ? 'reference'
+    const gesturePane = event.target.closest('#reference-media') ? 'reference'
       : event.target.closest('#scene-snapshot-media, #viewport canvas') ? 'scene' : null;
+    const triggerPane = event.target.closest('#reference-stage') ? 'reference'
+      : event.target.closest('#scene-stage') ? 'scene' : null;
     if (opened && !inPaneArea(target,event.target) && !gestureActive()) close({resetTool:false});
-    if (!pane) {
-      if (dock.contains(event.target)) activePointers.add(event.pointerId);
-      return;
+    if (triggerPane && inUpperArea(triggerPane,event)) {
+      automatic[triggerPane].dismissed = false;
+      automatic[triggerPane].touch = event.pointerType !== 'mouse';
+      openAutomatically(triggerPane);
     }
-    automatic[pane].dismissed = false;
-    automatic[pane].touch = event.pointerType !== 'mouse';
-    openAutomatically(pane);
-    activePointers.add(event.pointerId);
+    if (gesturePane || dock.contains(event.target)) activePointers.add(event.pointerId);
   }, {capture:true});
   for (const type of ['pointerup','pointercancel']) document.addEventListener(type, event => {
     activePointers.delete(event.pointerId); scheduleAutomaticClose();
