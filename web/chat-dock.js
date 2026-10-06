@@ -23,10 +23,11 @@ export function setupChatDock({getState}) {
   let lastHeightBounds = {min:1, max:window.innerHeight};
   let launcherStatus = '';
   let sectionMotion=null,panelSizing=null;
+  let compact=true,previewAnimation=null,previewCloseTimer=null,pointerInside=false,dropActive=false,dropDepth=0,previewRevealTarget=null;
   const visibilityTransitions = new Map();
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-  const historyVisible = () => !!dock && !collapsed && !historyCollapsed;
+  const historyVisible = () => !!dock && !collapsed && !compact && !historyCollapsed;
   const atLatest = () => !conversation ||
     conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 32;
   const storageKey = () => 'astra-visual-layout:' + sessionId;
@@ -40,6 +41,76 @@ export function setupChatDock({getState}) {
 
   const positionLayout = () => document.documentElement.dataset.layout === 'immersive' ? 'immersive' : 'compare';
   const customPosition = () => dockPositions[positionLayout()];
+  const popupNodes = () => [byId('prompt-attach-menu'),byId('prompt-mentions')].filter(Boolean);
+  function previewHeld() {
+    const active=document.activeElement;
+    const state=getState() || {};
+    const pending=(state.approvals || []).length || (state.queue || []).some(item =>
+      ['blocked_stale','delivery_uncertain'].includes(item.status) || item.status==='failed' && !item.turn_id);
+    const selection=window.getSelection();
+    const focusHeld=dock.contains(active) && (active.matches('input,textarea,select,[contenteditable=true]') || active.matches(':focus-visible'));
+    return pointerInside || dock.matches(':hover') || focusHeld ||
+      popupNodes().some(element=>!element.hidden && !element.classList.contains('hidden')) ||
+      !!document.querySelector('dialog[open]') || pending || state.agent?.status==='awaiting_approval' ||
+      moveDrag || resizeDrag || dock.classList.contains('panel-resizing') || dropActive ||
+      selection?.type==='Range' && dock.contains(selection.anchorNode);
+  }
+  function renderPreview() {
+    dock.classList.toggle('is-compact',compact);dock.classList.toggle('is-expanded',!compact);
+    const historyHidden=historyCollapsed || compact;
+    history.inert=historyHidden;history.setAttribute('aria-hidden',String(historyHidden));
+    historyToggle.setAttribute('aria-expanded',String(!historyHidden));
+    const evidence=byId('feedback-evidence'),toggle=byId('feedback-evidence-summary');
+    const evidenceHidden=compact || !(panelSizing?.opened ?? !evidence.classList.contains('hidden'));
+    evidence.inert=evidenceHidden;evidence.setAttribute('aria-hidden',String(evidenceHidden));
+    const wasOpen=toggle.getAttribute('aria-expanded')==='true';
+    toggle.setAttribute('aria-expanded',String(!evidenceHidden));
+    toggle.title=evidenceHidden?'展开本次反馈':'收起本次反馈';
+    if(!evidenceHidden && !wasOpen)evidence.dispatchEvent(new CustomEvent('evidence-visibility',{detail:{open:true}}));
+    const canResize=!compact && !collapsed && !historyCollapsed;
+    resizeHandle.classList.toggle('hidden',!canResize);resizeHandle.tabIndex=canResize?0:-1;
+    resizeHandle.setAttribute('aria-disabled',String(!canResize));
+    updateCounts();
+  }
+  function finishPreview() {
+    previewAnimation?.cancel();previewAnimation=null;
+    dock.classList.remove('preview-animating','preview-measuring');
+  }
+  function setCompact(value,{animate=true}={}) {
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;
+    if(value===compact) {if(!animate) {finishPreview();applyHeight();}return;}
+    rememberScroll();
+    const before=dock.getBoundingClientRect(),beforeMax=getComputedStyle(dock).maxHeight;
+    finishPreview();sectionMotion?.finish();
+    dock.classList.add('preview-measuring');
+    compact=value;renderPreview();
+    if(!compact)panelSizing?.fit({notify:false});
+    applyHeight({restoreScroll:false});applyPosition();
+    const after=dock.getBoundingClientRect(),afterMax=getComputedStyle(dock).maxHeight;
+    dock.classList.remove('preview-measuring');
+    if(!animate || collapsed || reducedMotion.matches || !before.width || !dock.animate) {
+      if(!compact)restoreHistoryScroll();return;
+    }
+    const from={width:before.width+'px',height:before.height+'px',maxHeight:beforeMax};
+    const to={width:after.width+'px',height:after.height+'px',maxHeight:afterMax};
+    if(customPosition()) {Object.assign(from,{left:before.left+'px',top:before.top+'px'});Object.assign(to,{left:after.left+'px',top:after.top+'px'});}
+    dock.classList.add('preview-animating');
+    const animation=dock.animate([from,to],{duration:320,easing:'cubic-bezier(.22,.68,.2,1)',fill:'both'});
+    previewAnimation=animation;
+    animation.finished.then(()=>{
+      if(previewAnimation!==animation)return;
+      finishPreview();applyPosition();if(!compact){panelSizing?.fit({notify:false});applyHeight();restoreHistoryScroll();}
+    }).catch(()=>{});
+  }
+  function scheduleCompact() {
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;
+    if(compact || collapsed)return;
+    previewCloseTimer=setTimeout(()=>{
+      previewCloseTimer=null;
+      if(!previewHeld())setCompact(true);
+    },260);
+  }
+  function expandPreview({animate=true}={}) {setCompact(false,{animate});}
   function viewportBounds() {
     const viewport=window.visualViewport;
     const left=viewport?.offsetLeft || 0,top=viewport?.offsetTop || 0;
@@ -77,9 +148,10 @@ export function setupChatDock({getState}) {
       dockPositions[layout]={left:Math.round(rect.left),top:Math.round(rect.top)};
     }
     if(moveHandle.hasPointerCapture(pointerId)) moveHandle.releasePointerCapture(pointerId);
-    applyPosition();scheduleHeightUpdate();persist();
+    applyPosition();scheduleHeightUpdate();persist();scheduleCompact();
   }
   function settleForMove() {
+    expandPreview({animate:false});
     sectionMotion?.finish();panelSizing?.finishResize();finishResize();
     if ([dock,launcher].some(element=>visibilityTransitions.get(element)?.animation)) applyLayout();
   }
@@ -107,7 +179,7 @@ export function setupChatDock({getState}) {
       launcher.classList.toggle('has-unread', !!unread);
     }
     if (historyToggle) {
-      const label = historyCollapsed ? '展开记录' : '收起记录';
+      const label = compact ? '记录' : historyCollapsed ? '展开记录' : '收起记录';
       const text = historyToggle.querySelector('[data-chat-history-label]');
       if (text) text.textContent = label;
       historyToggle.setAttribute('aria-label', label + (unread ? '，' + unread + ' 条新消息' : ''));
@@ -176,11 +248,11 @@ export function setupChatDock({getState}) {
   }
 
   function applyHeight({restoreScroll=true}={}) {
-    if (!dock || sectionMotion?.active) return;
+    if (!dock || sectionMotion?.active || previewAnimation) return;
     applyPosition();
     dock.classList.toggle('is-resized', dockHeight !== null);
     if (dockHeight === null) dock.style.removeProperty('--chat-height');
-    if (collapsed) return;
+    if (collapsed || compact) return;
     const bounds = heightBounds();
     if (dockHeight !== null) {
       // Viewport limits are temporary. Keep the user's preferred height so it
@@ -197,9 +269,9 @@ export function setupChatDock({getState}) {
     if (resizeFrame) return;
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = 0;
-      if(sectionMotion?.active) return;
+      if(sectionMotion?.active || previewAnimation) return;
       applyPosition();
-      panelSizing?.fit({notify:false});
+      if(!compact)panelSizing?.fit({notify:false});
       applyHeight();
     });
   }
@@ -220,7 +292,7 @@ export function setupChatDock({getState}) {
     resizeDrag = null;
     dock?.classList.remove('resizing');
     if (resizeHandle?.hasPointerCapture(pointerId)) resizeHandle.releasePointerCapture(pointerId);
-    persist();
+    persist();scheduleCompact();
   }
 
   function launcherBounds() {
@@ -302,11 +374,12 @@ export function setupChatDock({getState}) {
   }
 
   function applyLayout({animate=false}={}) {
+    finishPreview();
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
-    if(history){history.inert=historyCollapsed;history.setAttribute('aria-hidden',String(historyCollapsed));}
-    historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed));
+    if(history){history.inert=historyCollapsed || compact;history.setAttribute('aria-hidden',String(historyCollapsed || compact));}
+    historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed && !compact));
     dock?.classList.toggle('history-collapsed', historyCollapsed);
     if (resizeHandle) {
       const enabled = historyVisible();
@@ -317,7 +390,8 @@ export function setupChatDock({getState}) {
     const hidden = dock?.classList.contains('hidden');
     if (!collapsed) dock?.classList.remove('hidden');
     applyPosition();
-    panelSizing?.fit();
+    if(!compact)panelSizing?.fit();
+    renderPreview();
     applyHeight({restoreScroll:false});
     if (hidden) dock?.classList.add('hidden');
     updateCounts();
@@ -334,6 +408,7 @@ export function setupChatDock({getState}) {
   }
 
   function open({focus=false, approval=false}={}) {
+    expandPreview({animate:false});
     if (collapsed) {
       collapsed = false;
       applyLayout({animate:true});
@@ -355,7 +430,9 @@ export function setupChatDock({getState}) {
   function refresh() {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
+      clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
       finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();
+      compact=true;renderPreview();
       sessionId = state.sessionId;
       panelSizing?.refresh();
       collapsed = false;
@@ -419,14 +496,16 @@ export function setupChatDock({getState}) {
       launcher.setAttribute('aria-busy', String(running));
       launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
     }
-    updateCounts();
+    if(waitingForApproval)expandPreview();
+    else if(!previewHeld())scheduleCompact();
+    renderPreview();
   }
 
-  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{applyHeight();restoreHistoryScroll();scheduleHeightUpdate();}});
+  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{renderPreview();applyHeight();restoreHistoryScroll();scheduleHeightUpdate();}});
   panelSizing=setupChatPanelSizing({getState,animateChange:change=>{
-    finishMove();finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
-  },beforeResize:()=>{finishMove();sectionMotion.finish();finishResize();rememberScroll();},
-  beforeViewportResize:()=>{finishMove({cancel:true});sectionMotion.finish();finishResize();rememberScroll();},
+    expandPreview({animate:false});finishMove();finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
+  },beforeResize:()=>{expandPreview({animate:false});finishMove();sectionMotion.finish();finishResize();rememberScroll();},
+  beforeViewportResize:()=>{finishPreview();finishMove({cancel:true});sectionMotion.finish();finishResize();rememberScroll();},
   onResize:scheduleHeightUpdate});
 
   moveHandle?.addEventListener('pointerdown',event=>{
@@ -477,7 +556,7 @@ export function setupChatDock({getState}) {
   resizeHandle?.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.isPrimary === false || resizeDrag || !historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    finishMove();sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
+    expandPreview({animate:false});finishMove();sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
     resizeHandle.focus({preventScroll:true});
     const rect=dock.getBoundingClientRect();
     resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:rect.height,bottom:rect.bottom};
@@ -513,7 +592,7 @@ export function setupChatDock({getState}) {
     if (!historyVisible() || event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
     if (event.key === 'Escape') { finishResize(); return; }
     event.preventDefault(); event.stopPropagation();
-    sectionMotion?.finish();panelSizing?.finishResize();
+    expandPreview({animate:false});sectionMotion?.finish();panelSizing?.finishResize();
     const bounds = heightBounds();
     const step = event.shiftKey ? 64 : 24;
     const next = event.key === 'Home' ? bounds.min : event.key === 'End' ? bounds.max
@@ -526,6 +605,7 @@ export function setupChatDock({getState}) {
     if (reducedMotion.matches) applyLayout();
   });
   function resizeViewport() {
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
     finishMove({cancel:true});
     sectionMotion?.finish();
     // A viewport change invalidates the launcher-to-panel path. Settle at the
@@ -537,6 +617,7 @@ export function setupChatDock({getState}) {
   window.visualViewport?.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
   new MutationObserver(()=>{
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
     finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();applyLayout();
   }).observe(document.documentElement,{attributes:true,attributeFilter:['data-layout']});
   if (typeof ResizeObserver === 'function') {
@@ -560,7 +641,7 @@ export function setupChatDock({getState}) {
     document.dispatchEvent(new CustomEvent('workspace-sidebar-close',{detail:{afterClose:()=>open({approval:true})}}));
   });
   historyToggle?.addEventListener('click', () => {
-    panelSizing?.finishResize();finishResize();
+    expandPreview({animate:false});panelSizing?.finishResize();finishResize();
     rememberScroll();
     sectionMotion.run(()=>{historyCollapsed = !historyCollapsed;applyLayout();});
     persist();
@@ -573,6 +654,37 @@ export function setupChatDock({getState}) {
     if (followingLatest) unread = 0;
     updateCounts();
   });
+  dock.addEventListener('pointerenter',event=>{if(event.pointerType==='mouse'){pointerInside=true;expandPreview();}});
+  dock.addEventListener('pointerleave',event=>{if(event.pointerType==='mouse'){pointerInside=false;scheduleCompact();}});
+  dock.addEventListener('focusin',()=>expandPreview());
+  dock.addEventListener('focusout',scheduleCompact);
+  dock.addEventListener('pointerdown',event=>{
+    previewRevealTarget=null;
+    if(event.pointerType==='mouse')return;
+    if(compact) {
+      if(event.target.closest('#chat-history-toggle') && !historyCollapsed)previewRevealTarget='chat-history-toggle';
+      if(event.target.closest('#feedback-evidence-summary') && panelSizing.opened)previewRevealTarget='feedback-evidence-summary';
+    }
+    expandPreview({animate:false});
+  }, {capture:true});
+  dock.addEventListener('click',event=>{
+    const reveal=previewRevealTarget;previewRevealTarget=null;
+    if(reveal && event.target.closest('#'+reveal)){event.preventDefault();event.stopPropagation();}
+  }, {capture:true});
+  dock.addEventListener('dragenter',()=>{dropDepth+=1;dropActive=true;expandPreview();});
+  dock.addEventListener('dragleave',()=>{dropDepth=Math.max(0,dropDepth-1);if(!dropDepth){dropActive=false;scheduleCompact();}});
+  for(const name of ['drop','dragend'])document.addEventListener(name,()=>{dropDepth=0;dropActive=false;scheduleCompact();});
+  window.addEventListener('blur',()=>{dropDepth=0;dropActive=false;scheduleCompact();});
+  for(const popup of popupNodes()) {
+    popup.addEventListener('pointerenter',()=>{clearTimeout(previewCloseTimer);previewCloseTimer=null;});
+    popup.addEventListener('pointerleave',scheduleCompact);popup.addEventListener('focusout',scheduleCompact);
+    new MutationObserver(()=>{if(!previewHeld())scheduleCompact();}).observe(popup,{attributes:true,attributeFilter:['hidden','class']});
+  }
+  document.addEventListener('focusin',()=>{if(!previewHeld())scheduleCompact();});
+  document.addEventListener('pointerdown',event=>{if(!dock.contains(event.target))scheduleCompact();}, {capture:true});
+  document.addEventListener('selectionchange',()=>{if(!previewHeld())scheduleCompact();});
+  for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('close',scheduleCompact);
+  renderPreview();
   applyLayout();
 
   return {
