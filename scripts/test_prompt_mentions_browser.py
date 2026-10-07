@@ -130,7 +130,7 @@ def main():
                 assert page.locator('.prompt-mention-option[data-mention-kind="object"]').count() == 1
                 field.press("ArrowDown"); field.press("ArrowUp"); field.press("Enter")
                 assert "[[object:standalone_box]]" in canonical(page)
-                assert "【物体1】" in field.input_value() and "[[" not in field.input_value()
+                assert "🧊1" in field.input_value() and "[[" not in field.input_value()
                 assert field.input_value().startswith("把") and field.input_value().endswith("  放在这里")
                 assert not store.state["feedback"], "Enter selection must not send"
                 assert page.evaluate("__mentionCheck.getPromptMentionCandidates().map(c=>c.kind)")==['object']
@@ -157,7 +157,7 @@ def main():
                 select_model(page,'part')
                 query(page,"Door"); choose(page,"node","Door")
                 assert canonical(page).count("[[node:fixture_model:") == 2
-                assert "【部件1】" in field.input_value() and "【部件2】" in field.input_value()
+                assert "🧩1" in field.input_value() and "🧩2" in field.input_value()
                 assert len(page.evaluate("__mentionCheck.state.referencedSceneNodes")) == 2
                 candidates=page.evaluate('__mentionCheck.getPromptMentionCandidates()')
                 assert len(candidates)==1 and candidates[0]['kind']=='node' and candidates[0]['label']=='Door'
@@ -171,10 +171,10 @@ def main():
                 assert f"[[annotation:{mark['id']}]]" in canonical(page)
                 query(page,mark['name']); choose(page,"annotation",mark['name'])
                 assert canonical(page).count(f"[[annotation:{mark['id']}]]") == 2
-                assert "【标记1】" in field.input_value()
+                assert "📍1" in field.input_value()
                 control(page, '#drag-reference-image').click()
                 left = page.evaluate("structuredClone(__mentionCheck.state.imageRefs[0])")
-                assert "【图片1】" in field.input_value()
+                assert "🖼️1" in field.input_value()
                 assert left["reference_id"] == first["frames"][0]["id"]
                 assert left.get("annotated_data_url") != left["original_data_url"]
                 page.locator('#reference-strip button[data-view-id="' + second["clip_id"] + '"]').first.click()
@@ -192,7 +192,7 @@ def main():
                 for number,m in enumerate((side_mark,scene_mark),2):
                     query(page,m['name']); choose(page,'annotation',m['name'])
                     assert f"[[annotation:{m['id']}]]" in canonical(page)
-                    assert f"【标记{number}】" in field.input_value()
+                    assert f"📍{number}" in field.input_value()
                 assert any('侧面' in c['descriptor']['label'] for c in candidates if c['kind']=='annotation' and c['descriptor']['annotationId']==side_mark['id'])
                 print('PASS: all unsent marks across reference views, frames and a frozen scene screenshot remain selectable in this round',flush=True)
 
@@ -223,7 +223,7 @@ def main():
                 query(page,'',note=field.input_value()+' ')
                 assert set(page.evaluate('__mentionCheck.promptMentions.candidates.map(c=>c.kind)'))<= {'node','object','annotation','pose_edit'}
                 query(page,'修正',note=draft+' ');choose(page,'pose_edit')
-                assert '【修正1】' in field.input_value() and '[[pose_edit:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee]]' in canonical(page)
+                assert '✏️1' in field.input_value() and '[[pose_edit:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee]]' in canonical(page)
                 for term in ('左图','右图','人体结果',left['id']):
                     query(page,term,note='')
                     assert page.locator('.prompt-mention-option').count()==0

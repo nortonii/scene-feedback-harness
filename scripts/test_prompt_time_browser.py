@@ -34,7 +34,7 @@ def choose(page,text):
 def candidates(page): return page.evaluate('__mentionCheck.getPromptTimeCandidates()')
 
 
-def time_aliases(page): return re.findall(r'【时间戳[1-9]\d*】',page.locator('#feedback-note').input_value())
+def time_aliases(page): return re.findall(r'🕒[1-9]\d*',page.locator('#feedback-note').input_value())
 
 
 def assert_short_times(page):
@@ -92,21 +92,21 @@ def main():
                 assert '机位「' not in canonical(page) and '第 1 帧' not in canonical(page)
                 assert_short_times(page)
                 first_alias=time_aliases(page)[0]
-                chip=page.locator('.prompt-reference-preview').filter(has_text=first_alias[1:-1]).first
+                chip=page.locator('.prompt-reference-preview').filter(has_text=first_alias).first
                 chip.click()
                 assert '片段参考0.000s' in page.locator('#prompt-reference-detail').inner_text()
                 assert '#1' in page.locator('#prompt-reference-detail').inner_text()
                 page.locator('#prompt-reference-close').click()
                 query(page,'当前参考帧');choose(page,'当前参考帧')
                 assert time_aliases(page)==[first_alias,first_alias],time_aliases(page)
-                assert page.locator('.prompt-reference-preview').filter(has_text=first_alias[1:-1]).count()==1
+                assert page.locator('.prompt-reference-preview').filter(has_text=first_alias).count()==1
                 assert '[[object:' not in canonical(page), 'A source name must not register a prompt object reference'
                 assert not posts
                 print('PASS: slash inserts a short stable timestamp alias; chip details and canonical text retain precise reference time without submitting',flush=True)
 
                 select_model(page,'part');field.press('Space');field.press_sequentially('@Door')
                 page.locator('.prompt-mention-option[data-mention-kind="node"]').click()
-                assert '[[node:fixture_model:' in canonical(page) and '【部件1】' in field.input_value()
+                assert '[[node:fixture_model:' in canonical(page) and '🧩1' in field.input_value()
                 query(page,'整个');field.press('Control+Enter')
                 assert '整个片段' in canonical(page) and '1.500' in canonical(page)
                 assert '0.000–1.500s · 全部机位' in canonical(page)

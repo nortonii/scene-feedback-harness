@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createPromptReferenceText} from '../web/prompt-reference-text.js';
+import {referenceAliasLabel} from '../web/prompt-reference-icons.js';
+import {findPromptQueryRange} from '../web/prompt-mentions.js';
 
 const object='[[object:cabinet]]', point='[[annotation:point_a]]', image='[[image:saved_a]]';
 const sources={
@@ -256,4 +258,74 @@ test('numbered restoration migrates only registered old aliases without stealing
   assert.equal(restored.compact(codec.expand('【物体1】 【图片1】 【标记1】')),'【物体1】 【图片1】 【标记1】');
   assert.equal(restored.remember('another image','[[image:other]]').alias,'【图片2】');
   assert.equal(restored.remember('another mark','[[annotation:other]]').alias,'【标记2】');
+});
+
+test('icon references number every kind independently and keep exact payloads',()=>{
+  const codec=createPromptReferenceText({icons:true,resolve:token=>sources[token]});
+  const a='a'.repeat(32),b='b'.repeat(32);
+  const tokens=[object,'[[object:another]]','[[node:room:0/2]]',point,image,`[[pose:${a}:${b}]]`,`[[pose_edit:${a}]]`];
+  const text=codec.compact(tokens.join(' '));
+  assert.equal(text,'🧊1 🧊2 🧩1 📍1 🖼️1 🧍1 ✏️1');
+  const time=codec.rememberTime('片段0.100000001s · 正面 #9','clock');
+  assert.equal(time.alias,'🕒1');
+  const visible=text+' '+time.alias,wire=codec.expand(visible);
+  tokens.forEach(token=>assert(wire.includes(token)));
+  assert(wire.includes(time.timeText));assert(!wire.includes('[[time:'));
+  assert.equal(codec.compact(wire),visible);
+  assert.equal(codec.expand(wire),wire);
+  assert.equal(codec.remember('renamed',object).alias,'🧊1');
+  assert.equal(referenceAliasLabel('🖼️1'),'图片1');
+  const restored=createPromptReferenceText({icons:true});restored.reset(codec.exportRecords());
+  assert.equal(restored.compact(wire),visible);
+  assert.equal(restored.expand(visible),wire);
+});
+
+test('icon drafts migrate numbered and named brackets without changing targets or ordinal gaps',()=>{
+  const codec=createPromptReferenceText({icons:true});
+  const precise='片段0.000000001s · 原始机位 #8';
+  codec.reset([{token:object,alias:'【物体8】',label:'柜子'},
+    {token:'[[object:other]]',alias:'【图片1】',label:'另一个柜子'},
+    {token:image,alias:'【图片1】',label:'original.png'},
+    {token:point,alias:'【点1】',label:'原图上的点'},
+    {token:'[[time:t1]]',alias:'【时间戳3】',timeText:precise,timeKey:'old-source'}]);
+  const visible=codec.compact(`改【物体8】 ${object} 与【图片1】 [[object:other]]，参考【图片1】 ${image} 和【点1】 ${point}，在【时间戳3】 ${precise}；用户自写【其他】。`);
+  assert.equal(visible,'改🧊8 与🧊9，参考🖼️1 和📍1，在🕒3；用户自写【其他】。');
+  assert.equal(codec.rememberTime(precise,'old-source').alias,'🕒3');
+  assert.equal(codec.remember('', '[[object:next]]').alias,'🧊10');
+  assert.equal(codec.remember('', '[[image:next]]').alias,'🖼️2');
+  const restored=createPromptReferenceText({icons:true});restored.reset(codec.exportRecords());
+  assert.equal(restored.compact(codec.expand(visible)),visible);
+  assert.equal(restored.expand(visible),codec.expand(visible));
+});
+
+test('icon scanning and native edit ranges never mistake ordinal prefixes or nested literals for references',()=>{
+  const codec=createPromptReferenceText({icons:true});
+  codec.remember('',object);
+  const literal='🧊10 🧊100 🧊12345678 🧊0 🧊01 🧊 【🧊1】 [[🧊1]] [[unknown:🧊1]]';
+  assert.equal(codec.expand(literal),literal);
+  assert.deepEqual(codec.ranges(literal),[]);
+  const visible='🙂改🧊1，再看🧊10和🧊1。';
+  assert.deepEqual(codec.ranges(visible).map(({start,end})=>[start,end]),[[3,6],[14,17]]);
+  assert.equal(codec.remove(visible,object),'🙂改，再看🧊10和。');
+  const tenth='[[object:tenth]]';codec.reset([{token:object,alias:'🧊1'},{token:tenth,alias:'🧊10'}]);
+  assert.equal(codec.expand('🧊1 🧊10'),`🧊1 ${object} 🧊10 ${tenth}`);
+  assert.deepEqual(codec.ranges('🧊1 🧊10').map(item=>item.entry.token),[object,tenth]);
+});
+
+test('registered old literal aliases migrate once and cannot hijack later icon references',()=>{
+  const codec=createPromptReferenceText({icons:true});
+  codec.reset([{token:object,alias:'【🖼️1】',name:'🖼️1'},{token:image,alias:'🖼️1'}]);
+  assert.equal(codec.compact('改【🖼️1】参考🖼️1'),'改🧊1参考🖼️1');
+  assert.equal(codec.expand('🖼️1'),`🖼️1 ${image}`);
+  assert.equal(codec.compact('未注册【🖼️1】'),'未注册【🖼️1】');
+});
+
+test('menus can follow a registered icon without treating email, ratios or unknown icons as references',()=>{
+  const codec=createPromptReferenceText({icons:true});codec.remember('',object);
+  for(const trigger of ['@','/']) {
+    const value='🧊1'+trigger+'柜子';
+    assert.equal(findPromptQueryRange(value,value.length,value.length,codec.ranges(value))?.trigger,trigger);
+    for(const literal of ['🧊10'+trigger+'test','test'+trigger+'example.com','1'+trigger+'2'])
+      assert.equal(findPromptQueryRange(literal,literal.length,literal.length,codec.ranges(literal)),null);
+  }
 });

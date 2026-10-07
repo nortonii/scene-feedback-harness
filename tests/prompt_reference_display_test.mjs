@@ -30,4 +30,11 @@ check(compact('[[pose:abc:def]] [[pose_edit:abc]]'),'【人体1】 【手部修�
 check(compact('a '.repeat(300)+'[[image:abc]]'),'a '.repeat(300)+'【图片1】');
 check(compact(null),'');
 assert.deepEqual(feedback.inline_references[0],{token:'[[annotation:a]]',annotation:{name:'点1',pane:'scene',snapshot_id:'s'}});checked++;
+const icon=(text,refs=[])=>compact(text,refs,{icons:true});
+check(icon('改🧊1 [[object:a]]，看🖼️1 [[image:a]]与🧩1 [[node:o:0/2]]。'),'改🧊1，看🖼️1与🧩1。');
+check(icon('改【物体8】 [[object:a]]与【柜子】 [[object:b]]；【图片2】 [[image:a]]'),'改🧊8与🧊1；🖼️2');
+check(icon('old [[image:a]] and 🖼️1 [[image:b]] then [[image:a]]'),'old 🖼️2 and 🖼️1 then 🖼️2');
+check(icon('柜子 [[object:a]] 柜子 [[object:b]]',objects),'🧊1 🧊2');
+check(icon('普通说明【其他】保持；🕒1 片段0.100000001s'),'普通说明【其他】保持；🕒1 片段0.100000001s');
+check(icon('【时间戳3】 片段0.100000001s'),'🕒3 片段0.100000001s');
 console.log(`${checked} reference display checks passed`);

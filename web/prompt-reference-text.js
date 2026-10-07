@@ -1,7 +1,8 @@
 // Keep editable prose in a native textarea while preserving exact source tokens
 // outside it. Only registered, complete aliases are expanded for submission.
+import {REFERENCE_ICONS,ALIAS_PATTERN,ALIAS_AT_END,iconAliasParts} from './prompt-reference-icons.js';
 const TOKEN_SCAN = /\[\[(?:object|node|annotation|image|pose|pose_edit|time):[^\[\]\r\n]{1,512}\]\]/g;
-const ALIAS_SCAN = /【[^【】\r\n]{1,128}】/gu;
+const ALIAS_SCAN = new RegExp(ALIAS_PATTERN,'gu');
 const DEFAULT_NAMES = {object:'物体',node:'部件',annotation:'标记',image:'图片',pose:'人体',pose_edit:'修正',time:'时间戳'};
 const NUMBERED_NAMES = {...DEFAULT_NAMES};
 const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined,{granularity:'grapheme'}) : null;
@@ -31,6 +32,7 @@ function readableName(value,kind) {
   return !name || opaque ? DEFAULT_NAMES[kind] : name;
 }
 function validAlias(alias) {
+  if(iconAliasParts(alias))return true;
   if (typeof alias !== 'string' || alias.length > 130 || !/^【[^【】\[\]\x00-\x1f\x7f]+】$/u.test(alias)) return false;
   const body=alias.slice(1,-1);
   return body === body.trim() && characters(body).length <= 12;
@@ -54,14 +56,24 @@ function outsideToken(text,index) {
   return text.lastIndexOf('[[',index) <= text.lastIndexOf(']]',index);
 }
 
-export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) {
+export function createPromptReferenceText({resolve=()=>null,numbered=false,icons=false}={}) {
+  numbered ||= icons;
   const byToken=new Map(), byAlias=new Map(), byTimeKey=new Map();
   const nextNumbers=new Map();
   let legacyAliases=new Map();
   let nextImage=1,nextTime=1,nextTimeToken=1,reserved=new Set();
   function numberedAlias(kind,alias) {
+    if(icons) {
+      const parts=iconAliasParts(alias);
+      return parts?.kind===kind ? parts.number : 0;
+    }
     const match=new RegExp('^【'+NUMBERED_NAMES[kind]+'([1-9]\\d{0,6})】$').exec(alias || '');
     return match && Number(match[1])<=1000000 ? Number(match[1]) : 0;
+  }
+  function preferredAlias(kind,alias) {
+    if(!icons)return alias;
+    const number=new RegExp('^【'+NUMBERED_NAMES[kind]+'([1-9]\\d{0,6})】$').exec(alias || '');
+    return number && Number(number[1])<=1000000 ? REFERENCE_ICONS[kind]+number[1] : alias;
   }
   function acceptsAlias(kind,alias) {
     return numbered ? !!numberedAlias(kind,alias) :
@@ -77,7 +89,7 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) 
     }
     if(numbered) {
       let number=nextNumbers.get(kind) || 1,alias;
-      do {alias=`【${NUMBERED_NAMES[kind]}${number++}】`;} while(byAlias.has(alias) || reserved.has(alias));
+      do {alias=icons ? REFERENCE_ICONS[kind]+number++ : `【${NUMBERED_NAMES[kind]}${number++}】`;} while(byAlias.has(alias) || reserved.has(alias));
       nextNumbers.set(kind,number);return alias;
     }
     if (kind === 'image') {
@@ -160,10 +172,10 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) 
       let prefix=text.slice(cursor,match.index);
       // Inspect original text, not already compacted output: two adjacent raw
       // tokens must never mistake the first generated alias for the second's.
-      const beforeAlias=/(【[^【】\r\n]{1,128}】)[ \t]+$/u.exec(prefix);
+      const beforeAlias=ALIAS_AT_END.exec(prefix);
       const preferred=beforeAlias && validAlias(beforeAlias[1]) &&
         standalone(prefix,beforeAlias.index,beforeAlias[1].length) ? beforeAlias[1] : null;
-      const entry=register('',token,{preferred});
+      const entry=register('',token,{preferred:preferredAlias(tokenKind(token),preferred)});
       if(!entry)continue;
       if (preferred) prefix=prefix.slice(0,beforeAlias.index);
       else {
@@ -193,6 +205,10 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) 
   function aliasMatches(text) {
     return [...text.matchAll(ALIAS_SCAN)].filter(match=>byAlias.has(match[0]) &&
       standalone(text,match.index,match[0].length) && outsideToken(text,match.index));
+  }
+  function ranges(value) {
+    const text=String(value ?? '');
+    return aliasMatches(text).map(match=>({start:match.index,end:match.index+match[0].length,entry:byAlias.get(match[0])}));
   }
   function expand(value) {
     const text=String(value ?? '');
@@ -235,15 +251,17 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) 
       typeof record === 'object' && tokenKind(record.token) && (tokenKind(record.token)!=='time' || timeText(record.timeText)));
     const owners=new Map();
     for (const record of usable) {
-      if (validAlias(record.alias) && acceptsAlias(tokenKind(record.token),record.alias) && !owners.has(record.alias)) {
-        owners.set(record.alias,record.token);
+      const alias=preferredAlias(tokenKind(record.token),record.alias);
+      if (validAlias(alias) && acceptsAlias(tokenKind(record.token),alias) && !owners.has(alias)) {
+        owners.set(alias,record.token);
       }
     }
     reserved=new Set(owners.keys());
     const oldOwners=new Set();
     for (const record of usable) {
       if (byToken.has(record.token)) continue;
-      const preferred=owners.get(record.alias) === record.token ? record.alias : null;
+      const alias=preferredAlias(tokenKind(record.token),record.alias);
+      const preferred=owners.get(alias) === record.token ? alias : null;
       const entry=register(record.label,record.token,{metadata:record,preferred,useResolver:false});
       if(numbered && validAlias(record.alias) && !oldOwners.has(record.alias)) {
         oldOwners.add(record.alias);
@@ -252,5 +270,5 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) 
     }
     reserved.clear();
   }
-  return {compact,expand,entries,remember,rememberTime,reset,exportRecords,remove};
+  return {compact,expand,entries,ranges,remember,rememberTime,reset,exportRecords,remove};
 }

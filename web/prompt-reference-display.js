@@ -1,4 +1,5 @@
 // Presentation only. The saved note and its model-facing tokens stay intact.
+import {REFERENCE_ICONS,REFERENCE_NAMES,ALIAS_PATTERN,iconAliasParts} from './prompt-reference-icons.js';
 const TOKEN = /\[\[(object|annotation|node|image|pose|pose_edit):([^\]\r\n]{0,256})(?:\]\]|$)/g;
 const ALIAS = /【([^【】\r\n]{1,64})】[ \t]*$/;
 
@@ -38,7 +39,8 @@ function aliasBase(kind,reference) {
   return {base:kind==='pose_edit'?'手部修正':'人体',numbered:true};
 }
 
-export function compactReferenceMessage(text,inlineReferences=[]) {
+export function compactReferenceMessage(text,inlineReferences=[],{icons=false}={}) {
+  if(icons)return compactIconMessage(text,inlineReferences);
   const source=String(text ?? ''), matches=[...source.matchAll(TOKEN)];
   if (!matches.length) return source;
   const metadata=new Map();
@@ -68,6 +70,43 @@ export function compactReferenceMessage(text,inlineReferences=[]) {
       }
       result+=removeKnownLabel(chunk,reference)+'【'+alias+'】';
     }
+    position=match.index+token.length;
+  }
+  return result+source.slice(position);
+}
+
+function compactIconMessage(text,inlineReferences) {
+  // Old timestamps are presentation labels, not new source registrations.
+  const source=String(text ?? '').replace(/【时间戳([1-9]\d{0,6})】/gu,(_,n)=>REFERENCE_ICONS.time+n);
+  const matches=[...source.matchAll(TOKEN)],metadata=new Map();
+  for(const reference of Array.isArray(inlineReferences)?inlineReferences:[]) {
+    if(reference && typeof reference.token==='string')metadata.set(reference.token,reference);
+  }
+  const explicitPattern=new RegExp('('+ALIAS_PATTERN+')[ \\t]*$','u');
+  const aliases=new Map(),used=new Set(),numbers=new Map();
+  function preferred(kind,alias) {
+    const parts=iconAliasParts(alias);
+    if(parts?.kind===kind)return alias;
+    const match=new RegExp('^【'+REFERENCE_NAMES[kind]+'([1-9]\\d{0,6})】$').exec(alias || '');
+    return match && Number(match[1])<=1000000 ? REFERENCE_ICONS[kind]+match[1] : null;
+  }
+  // Reserve explicit numbers throughout the note before numbering old named
+  // labels, so different archived sources cannot acquire the same icon.
+  for(const match of matches) {
+    const alias=preferred(match[1],explicitPattern.exec(source.slice(0,match.index))?.[1]);
+    if(alias && !aliases.has(match[0]) && !used.has(alias)) {aliases.set(match[0],alias);used.add(alias);}
+  }
+  let result='',position=0;
+  for(const match of matches) {
+    const token=match[0],kind=match[1],chunk=source.slice(position,match.index);
+    const explicit=explicitPattern.exec(chunk);
+    let alias=aliases.get(token);
+    if(!alias) {
+      let number=numbers.get(kind) || 1;
+      do {alias=REFERENCE_ICONS[kind]+number++;}while(used.has(alias));
+      aliases.set(token,alias);used.add(alias);numbers.set(kind,number);
+    }
+    result+=(explicit ? chunk.slice(0,explicit.index) : removeKnownLabel(chunk,metadata.get(token)))+alias;
     position=match.index+token.length;
   }
   return result+source.slice(position);

@@ -23,6 +23,7 @@ import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel
 import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
 import { createPromptMentions } from './prompt-mentions.js';
 import { createPromptReferenceText } from './prompt-reference-text.js';
+import {referenceAliasLabel} from './prompt-reference-icons.js';
 import { compactReferenceMessage } from './prompt-reference-display.js';
 
 const id = (name) => document.getElementById(name);
@@ -151,7 +152,7 @@ const frameImages = {
 let minimalLayout = null;
 let promptMentions = null;
 let promptAttachments = null;
-const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference,numbered:true});
+const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference,numbered:true,icons:true});
 let workspaceControls = null;
 let immersiveWorkspace = null;
 let workspaceChrome = null;
@@ -1857,7 +1858,7 @@ function addConversation(type, message, time, {historical=false,feedbackId=null}
   const label = document.createElement('small');
   label.textContent = (type === 'user' ? '你' : type === 'assistant' ? 'Codex' : '执行状态') + (time ? ' · ' + new Date(time).toLocaleTimeString('zh-CN',{hour12:false}) : '');
   const content = document.createElement('div');
-  content.textContent = compactReferenceMessage(String(message)).slice(0, 4000);
+  content.textContent = compactReferenceMessage(String(message),[],{icons:true}).slice(0, 4000);
   card.append(label, content);
   if (feedbackId) feedbackEvidence?.attachReceipt(card,feedbackId);
   ui.conversation.append(card);
@@ -4982,7 +4983,7 @@ function replacePromptText(text) {
 }
 function previewPromptReference(entry) {
   const meta=resolvePromptReference(entry.token,entry.label);
-  id('prompt-reference-title').textContent=entry.alias.slice(1,-1);
+  id('prompt-reference-title').textContent=entry.alias+' · '+referenceAliasLabel(entry.alias);
   id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
   id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
   const locate=id('prompt-reference-locate');
@@ -5000,17 +5001,16 @@ function renderPromptImageReferences() {
     const chip=document.createElement('div');chip.className=image?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
     const preview=document.createElement('button');preview.type='button';preview.className=image?'prompt-image-preview':'prompt-reference-preview';
     preview.title=resolvePromptReference(entry.token,entry.label)?.title || entry.title || entry.label;
+    preview.setAttribute('aria-label',referenceAliasLabel(entry.alias)+' · '+preview.title);
     if(image) {
       chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;
       const thumbnail=document.createElement('img');thumbnail.src=image.annotated_data_url || image.original_data_url;thumbnail.alt='';preview.append(thumbnail);
-    } else {
-      const kind=document.createElement('span');kind.className='prompt-reference-kind';kind.textContent=({object:'物体',node:'部件',annotation:'标记',pose:'人体',pose_edit:'修正',image:'图片',time:'时间'})[entry.kind];preview.append(kind);
     }
-    const label=document.createElement('span');label.textContent=entry.alias.slice(1,-1)+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
+    const label=document.createElement('span');label.className='prompt-reference-alias';label.textContent=entry.alias+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
     preview.addEventListener('click',()=>image?previewPromptImage(image):previewPromptReference(entry));
     const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
     if(image) remove.dataset.imageRefId=image.id;
-    remove.textContent='×';remove.title='移除引用';remove.setAttribute('aria-label','移除 '+entry.alias.slice(1,-1));remove.disabled=!editable();
+    remove.textContent='×';remove.title='移除 '+referenceAliasLabel(entry.alias);remove.setAttribute('aria-label',remove.title);remove.disabled=!editable();
     remove.addEventListener('click',()=>removePromptReference(entry.token));chip.append(preview,remove);ui.imageRefs.append(chip);
   }
 }
@@ -5377,14 +5377,9 @@ function bindPromptReferenceEvents() {
 }
 function promptInsertionRange(from,to) {
   let start=from,end=to;
-  for(const entry of promptReferenceText.entries(ui.note.value)) {
-    let at=ui.note.value.indexOf(entry.alias);
-    while(at>=0) {
-      const after=at+entry.alias.length;
-      if(start===end && start>at && start<after) start=end=after;
-      else if(start<after && end>at) {start=Math.min(start,at);end=Math.max(end,after);}
-      at=ui.note.value.indexOf(entry.alias,after);
-    }
+  for(const {start:at,end:after} of promptReferenceText.ranges(ui.note.value)) {
+    if(start===end && start>at && start<after) start=end=after;
+    else if(start<after && end>at) {start=Math.min(start,at);end=Math.max(end,after);}
   }
   return [start,end];
 }
@@ -5399,15 +5394,10 @@ function bindCompactReferenceEditing() {
     if(event.isComposing || !editable() || !/^(delete|insert)/.test(event.inputType)) return;
     const text=ui.note.value,start=ui.note.selectionStart,end=ui.note.selectionEnd;
     let from=start,to=end;
-    for(const entry of promptReferenceText.entries(text)) {
-      let at=text.indexOf(entry.alias);
-      while(at>=0) {
-        const after=at+entry.alias.length;
-        const touched=start===end ? (event.inputType.endsWith('Backward')?start>at && (start<=after || event.inputType==='deleteWordBackward' && /^[ \t]*$/.test(text.slice(after,start))):
-          event.inputType.endsWith('Forward')?start<after && (start>=at || event.inputType==='deleteWordForward' && /^[ \t]*$/.test(text.slice(start,at))):start>at && start<after) : start<after && end>at;
-        if(touched) {from=Math.min(from,at);to=Math.max(to,after);}
-        at=text.indexOf(entry.alias,after);
-      }
+    for(const {start:at,end:after} of promptReferenceText.ranges(text)) {
+      const touched=start===end ? (event.inputType.endsWith('Backward')?start>at && (start<=after || event.inputType==='deleteWordBackward' && /^[ \t]*$/.test(text.slice(after,start))):
+        event.inputType.endsWith('Forward')?start<after && (start>=at || event.inputType==='deleteWordForward' && /^[ \t]*$/.test(text.slice(start,at))):start>at && start<after) : start<after && end>at;
+      if(touched) {from=Math.min(from,at);to=Math.max(to,after);}
     }
     if(from===start && to===end) return;
     if(event.inputType.startsWith('delete')) {
@@ -5906,6 +5896,7 @@ function bindEvents() {
   bindPromptReferenceEvents();
   bindPoseEditEvents();
   promptMentions=createPromptMentions({input:ui.note,menu:ui.mentionMenu,list:ui.mentionList,status:ui.mentionStatus,
+    getReferenceRanges:value=>promptReferenceText.ranges(value),
     getCandidates:range => range.trigger === '/' ? getPromptTimeCandidates() : getPromptMentionCandidates(),
     onSelect:candidate => candidate.kind === 'time' ? insertPromptTimeCandidate(candidate) : insertPromptMention(candidate),isEnabled:editable,
     getEmptyMessage:range => range.trigger === '/' ? promptTimeEmptyMessage() : '先选中物体、添加标记或修改关键点',

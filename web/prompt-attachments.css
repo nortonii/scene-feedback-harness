@@ -10,10 +10,10 @@
 .prompt-attach-button svg { transition: transform 200ms cubic-bezier(.22,1,.36,1); }
 .prompt-attach-button[aria-expanded=true] svg { transform: rotate(45deg); }
 .prompt-input .prompt-image-refs { padding: 10px 12px 0; max-height: 118px; }
-.prompt-input .prompt-image-chip { max-width: min(230px,100%); border-radius: 10px; background: var(--surface-glass); }
+.prompt-input .prompt-image-chip { max-width: min(230px,100%); border-radius: 18px; background: var(--surface-glass); }
 .prompt-input .prompt-image-preview { padding: 5px; gap: 8px; }
 .prompt-input .prompt-image-preview img { width: 42px; height: 32px; border-radius: 6px; }
-.prompt-input .prompt-image-remove { min-width: 28px; align-self: stretch; border-radius: 0 10px 10px 0; }
+.prompt-input .prompt-image-remove { min-width: 28px; align-self: stretch; border-radius: 0 18px 18px 0; }
 .prompt-attach-menu { position: fixed; z-index: 100; width: 304px; padding: 7px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; border: 1px solid var(--surface-border); border-radius: 16px; background: color-mix(in srgb,var(--paper) 94%,transparent); color: var(--ink); backdrop-filter: blur(24px) saturate(1.1); box-shadow: var(--surface-shadow); }
 .prompt-attach-menu[hidden],.prompt-attach-menu [hidden] { display: none !important; }
 /* Override former on-canvas styles while retaining stable reference action IDs. */
@@ -37,11 +37,11 @@
 @media (prefers-reduced-motion: reduce) { .prompt-attach-button svg,.prompt-input { transition: none; } }
 
 /* Short source cards accompany the same compact names used in the sentence. */
-.prompt-reference-chip { display: inline-flex; align-items: center; min-width: 0; max-width: min(230px,100%); border: 1px solid var(--line); border-radius: 10px; background: var(--surface-glass); }
-.prompt-reference-preview { display: inline-flex; align-items: center; gap: 7px; min-width: 0; padding: 8px; font-size: 12px; }
+.prompt-reference-chip { display: inline-flex; align-items: center; min-width: 0; max-width: min(230px,100%); border: 1px solid var(--line); border-radius: 999px; background: var(--surface-glass); }
+.prompt-reference-preview { display: inline-flex; align-items: center; gap: 7px; min-width: 0; padding: 7px 9px; border-radius: 999px; font-size: 12px; }
 .prompt-reference-preview > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.prompt-reference-kind { flex: none; font-size: 10px; padding: 2px 5px; border-radius: 5px; background: var(--surface-hover); color: var(--muted); }
-.prompt-reference-remove { min-width: 28px; align-self: stretch; border-radius: 0 10px 10px 0; color: var(--muted); padding: 0 6px; }
+.prompt-reference-alias { font-size: 13px; line-height: 1.4; }
+.prompt-reference-remove { min-width: 26px; align-self: stretch; border-radius: 0 999px 999px 0; color: var(--muted); padding: 0 6px; }
 .prompt-reference-preview:hover,.prompt-reference-remove:hover { background: var(--surface-hover); }
 .prompt-reference-dialog { width: min(420px,calc(100vw - 32px)); }
 .prompt-reference-dialog p { line-height: 1.75; overflow-wrap: anywhere; font-size: 13px; }
