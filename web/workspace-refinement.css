@@ -9,9 +9,7 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 #workspace-menu #revision-label, #compare-summary { font-size: 12px; }
 #annotation-context-label { font-size: 12px; font-weight: 500; }
 #annotation-tool-panel .eraser-tool > span { font-size: 12px; letter-spacing: 0; }
-#annotation-tool-panel { --annotation-dock-width: 84px; }
 #annotation-tool-panel .annotation-history-tools .compact-button { font-size: 12px; }
-#annotation-tool-panel.is-compact { --annotation-dock-width: 60px; }
 #annotation-tool-panel.is-compact .tool-list > .tool-button { min-height: 32px; }
 #annotation-tool-panel #more-tools > summary { font-size: 12px; }
 #annotation-tool-panel #scene-labels-toggle { font-size: 12px; }
@@ -55,6 +53,9 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .reference-timeline #timeline-play { grid-area: 1/2; gap: 4px; padding: 4px; }
 .reference-timeline #timeline-next { grid-area: 1/3; }
 .reference-timeline #timeline-time { grid-area: 1/4; justify-self: end; font-size: 12px; }
+:is(#timeline-time,#reference-frame-label)[role=button] { cursor: pointer; }
+:is(#timeline-time,#reference-frame-label)[aria-disabled=true] { cursor: default; }
+:is(#timeline-time,#reference-frame-label):focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 .reference-timeline #timeline-seek { grid-area: 2/1/3/-1; margin: 4px 0; }
 .reference-timeline #animation-choices { grid-area: 3/1/4/-1; }
 .timeline-controls .action-icon { width: 15px; height: 15px; }
@@ -115,10 +116,35 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .scene-pane .ground-axis-label select { max-width: 104px; padding: 4px 6px; min-height: 30px; color: var(--ink); background: var(--surface); border-color: var(--line); }
 .scene-pane .ground-axis-label:has(select:disabled) { color: var(--muted); }
 .scene-pane .ground-axis-label select:disabled { opacity: 1; color: var(--muted); -webkit-text-fill-color: var(--muted); cursor: not-allowed; }
-.scene-pane .pane-actions > #align-reference-button { opacity: 1; color: var(--ink); background: var(--surface); border-color: var(--line); }
-.scene-pane .pane-actions > #align-reference-button.aligned:not(:disabled) { color: var(--ink); background: var(--surface); border-color: var(--ink); }
-.scene-pane .pane-actions > #align-reference-button:hover:not(:disabled) { background: var(--surface); border-color: var(--ink); }
-.scene-pane .pane-actions > #align-reference-button:disabled { opacity: 1; color: var(--muted); background: var(--surface); border-color: var(--line); cursor: not-allowed; }
+#align-reference-button { opacity: 1; color: var(--ink); background: var(--surface); border-color: var(--line); }
+#align-reference-button.aligned:not(:disabled) { color: var(--ink); background: var(--surface); border-color: var(--ink); }
+#align-reference-button:hover:not(:disabled) { background: var(--surface); border-color: var(--ink); }
+#align-reference-button:disabled { opacity: 1; color: var(--muted); background: var(--surface); border-color: var(--line); cursor: not-allowed; }
+/* The alignment action connects the two comparison images. */
+#alignment-between-views {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  z-index: 24;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  pointer-events: none;
+}
+#alignment-between-views:empty, [data-layout=immersive] #alignment-between-views { display: none; }
+#alignment-between-views > #align-reference-button {
+  flex: none;
+  min-width: 48px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border-radius: 12px;
+  box-shadow: 0 3px 14px #17171512;
+  pointer-events: auto;
+}
+@media (max-width: 640px) {
+  #alignment-between-views { grid-column: 1; grid-row: auto; }
+}
 @media (max-width: 640px) {
   .scene-pane > .pane-head > .pane-actions { min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
   .scene-pane .compare-inline #compare-opacity { width: 68px; }

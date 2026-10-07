@@ -1,4 +1,5 @@
 // Presentation only. The saved note and its model-facing tokens stay intact.
+import {REFERENCE_ICONS,REFERENCE_NAMES,ALIAS_PATTERN,iconAliasParts} from './prompt-reference-icons.js';
 const TOKEN = /\[\[(object|annotation|node|image|pose|pose_edit):([^\]\r\n]{0,256})(?:\]\]|$)/g;
 const ALIAS = /【([^【】\r\n]{1,64})】[ \t]*$/;
 
@@ -38,7 +39,8 @@ function aliasBase(kind,reference) {
   return {base:kind==='pose_edit'?'手部修正':'人体',numbered:true};
 }
 
-export function compactReferenceMessage(text,inlineReferences=[]) {
+export function compactReferenceMessage(text,inlineReferences=[],{icons=false}={}) {
+  if(icons)return compactIconMessage(text,inlineReferences);
   const source=String(text ?? ''), matches=[...source.matchAll(TOKEN)];
   if (!matches.length) return source;
   const metadata=new Map();
@@ -68,6 +70,56 @@ export function compactReferenceMessage(text,inlineReferences=[]) {
       }
       result+=removeKnownLabel(chunk,reference)+'【'+alias+'】';
     }
+    position=match.index+token.length;
+  }
+  return result+source.slice(position);
+}
+
+function compactIconMessage(text,inlineReferences) {
+  // Old timestamps are presentation labels, not new source registrations.
+  const source=String(text ?? '').replace(/【时间戳([1-9]\d{0,6})】/gu,(_,n)=>REFERENCE_ICONS.time+n);
+  const matches=[...source.matchAll(TOKEN)],metadata=new Map();
+  for(const reference of Array.isArray(inlineReferences)?inlineReferences:[]) {
+    if(reference && typeof reference.token==='string')metadata.set(reference.token,reference);
+  }
+  const explicitPattern=new RegExp('('+ALIAS_PATTERN+')[ \\t]*$','u');
+  const aliases=new Map(),used=new Set(),numbers=new Map();
+  function displayKind(kind,alias,reference) {
+    if(kind!=='node')return kind;
+    const explicit=iconAliasParts(alias)?.kind || /^【(物体|部件)[1-9]\d{0,6}】$/u.exec(alias || '')?.[1];
+    if(explicit==='object' || explicit==='物体')return 'object';
+    if(explicit==='node' || explicit==='部件')return 'node';
+    const saved=reference?.displayKind ?? reference?.display_kind ?? reference?.scene_node?.display_kind;
+    return saved==='object' ? 'object' : 'node';
+  }
+  const bindings=matches.map(match=> {
+    const token=match[0],explicit=explicitPattern.exec(source.slice(0,match.index));
+    const kind=displayKind(match[1],explicit?.[1],metadata.get(token));
+    return {match,kind,key:token+'\u0000'+kind,explicit};
+  });
+  function preferred(kind,alias) {
+    const parts=iconAliasParts(alias);
+    if(parts?.kind===kind)return alias;
+    const match=new RegExp('^【'+REFERENCE_NAMES[kind]+'([1-9]\\d{0,6})】$').exec(alias || '');
+    return match && Number(match[1])<=1000000 ? REFERENCE_ICONS[kind]+match[1] : null;
+  }
+  // Reserve explicit numbers throughout the note before numbering old named
+  // labels, so different archived sources cannot acquire the same icon.
+  for(const {kind,key,explicit} of bindings) {
+    const alias=preferred(kind,explicit?.[1]);
+    if(alias && !aliases.has(key) && !used.has(alias)) {aliases.set(key,alias);used.add(alias);}
+  }
+  let result='',position=0;
+  for(const {match,kind,key} of bindings) {
+    const token=match[0],chunk=source.slice(position,match.index);
+    const explicit=explicitPattern.exec(chunk);
+    let alias=aliases.get(key);
+    if(!alias) {
+      let number=numbers.get(kind) || 1;
+      do {alias=REFERENCE_ICONS[kind]+number++;}while(used.has(alias));
+      aliases.set(key,alias);used.add(alias);numbers.set(kind,number);
+    }
+    result+=(explicit ? chunk.slice(0,explicit.index) : removeKnownLabel(chunk,metadata.get(token)))+alias;
     position=match.index+token.length;
   }
   return result+source.slice(position);

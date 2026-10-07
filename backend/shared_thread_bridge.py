@@ -1,16 +1,18 @@
-"""Connect a visual-feedback gateway to a task already loaded by Codex Desktop.
+"""Connect a visual-feedback gateway to a task on the shared Codex daemon.
 
 This module speaks App Server JSON-RPC over the desktop daemon's private Unix
-WebSocket.  Existing Desktop tasks are only used while loaded; workbench-owned
-tasks may be resumed on the same daemon after they unload.  A caller must keep
-the returned bridge connected while its turn runs and handle server requests
-(approvals, elicitation, user input) rather than approving them automatically.
+WebSocket. Workbench-owned tasks can resume after unloading. An explicitly
+bound external task can resume on a unique verified daemon only after its
+native saved settings have been checked against the effective resume settings.
+The caller keeps the bridge connected through each turn and handles server
+requests (approvals, elicitation, user input) without approving them itself.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import mmap
 import os
 import re
 import socket
@@ -93,6 +95,175 @@ class OwnedEmptyThreadMissing(SharedThreadBridgeError):
     """A workbench-created zero-turn task has no persisted rollout to resume."""
 
 
+class ExternalSettingsUnavailable(SharedThreadBridgeError):
+    """The native rollout is absent or has no turn context yet."""
+
+
+def _verify_external_user_thread(thread: dict[str, Any]) -> None:
+    source = thread.get("source")
+    if (thread.get("parentThreadId") is not None or thread.get("ephemeral") is True
+            or isinstance(source, dict) and "subAgent" in source):
+        raise SharedThreadBridgeError("bound Codex task is not a persisted user task")
+
+
+def _verify_loaded_empty_bound_thread(bridge: "SharedThreadBridge", thread: dict[str, Any], thread_id: str) -> dict[str, Any]:
+    """Allow an already loaded first-turn task only with native empty history."""
+    _verify_external_user_thread(thread)
+    current = bridge.read_thread(include_turns=True)
+    _verify_external_user_thread(current)
+    if (current.get("id") != thread_id or current.get("status", {}).get("type") not in {"idle", "active"}
+            or current.get("turns") != []
+            or (thread.get("sessionId") is not None and current.get("sessionId") != thread["sessionId"])
+            or (thread.get("path") is not None and current.get("path") != thread["path"])):
+        raise SharedThreadBridgeError("bound Codex task is not an empty loaded user task")
+    return current
+
+
+def _saved_external_settings(thread: dict[str, Any], thread_id: str) -> dict[str, Any]:
+    """Read only the last turn's settings from this exact user's native rollout.
+
+    ``thread/read`` supplies the path. Never search the session directory or
+    log rollout content: most JSONL records contain private conversation text.
+    """
+    _verify_external_user_thread(thread)
+    raw_path = thread.get("path")
+    if raw_path is None:
+        raise ExternalSettingsUnavailable("bound Codex task has no native rollout path yet")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise SharedThreadBridgeError("bound Codex task has an invalid native rollout path")
+    path = Path(raw_path)
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    if not path.is_absolute() or not home.is_absolute() or ".." in path.parts or ".." in home.parts:
+        raise SharedThreadBridgeError("bound Codex rollout path is invalid")
+    try:
+        relative = path.relative_to(home / "sessions")
+    except ValueError as exc:
+        raise SharedThreadBridgeError("bound Codex rollout is outside this user's sessions") from exc
+    if (len(relative.parts) != 4 or not re.fullmatch(r"\d{4}", relative.parts[0])
+            or not re.fullmatch(r"\d{2}", relative.parts[1])
+            or not re.fullmatch(r"\d{2}", relative.parts[2])
+            or not relative.name.startswith("rollout-")
+            or not relative.name.endswith(f"-{thread_id}.jsonl")):
+        raise SharedThreadBridgeError("bound Codex rollout path does not match this task")
+
+    uid = os.getuid()
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+    directory_fd = None
+    rollout_fd = None
+    try:
+        directory_fd = os.open("/", directory_flags)
+        components = [*home.parts[1:], "sessions", *relative.parts[:-1]]
+        private_start = len(home.parts) - 2
+        for index, component in enumerate(components):
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+            if index >= private_start and os.fstat(directory_fd).st_uid != uid:
+                raise SharedThreadBridgeError("bound Codex rollout directory has another owner")
+        try:
+            rollout_fd = os.open(relative.name, file_flags, dir_fd=directory_fd)
+        except FileNotFoundError as exc:
+            raise ExternalSettingsUnavailable("bound Codex rollout has not been saved yet") from exc
+        info = os.fstat(rollout_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid:
+            raise SharedThreadBridgeError("bound Codex rollout is not a user-owned regular file")
+        if info.st_size <= 0:
+            raise SharedThreadBridgeError("bound Codex rollout is empty")
+        with mmap.mmap(rollout_fd, 0, access=mmap.ACCESS_READ) as content:
+            first_end = content.find(b"\n", 0, min(info.st_size, 1024 * 1024))
+            if first_end < 0:
+                raise SharedThreadBridgeError("bound Codex rollout has no valid session header")
+            try:
+                header = json.loads(content[:first_end])
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise SharedThreadBridgeError("bound Codex rollout has no valid session header") from exc
+            if (not isinstance(header, dict) or header.get("type") != "session_meta"
+                    or not isinstance(header.get("payload"), dict)
+                    or header["payload"].get("id") != thread_id):
+                raise SharedThreadBridgeError("bound Codex rollout belongs to a different task")
+            # mmap does not copy the rollout; searching the whole mapping
+            # distinguishes a genuine zero-turn task from an old turn whose
+            # subsequent output happens to exceed a fixed tail window.
+            floor = 0
+            cursor = info.st_size
+            while cursor > floor:
+                match = content.rfind(b"turn_context", floor, cursor)
+                if match < 0:
+                    break
+                line_start = content.rfind(b"\n", floor, match) + 1
+                line_end = content.find(b"\n", match, min(info.st_size, match + 2 * 1024 * 1024))
+                if line_end < 0:
+                    line_end = info.st_size
+                cursor = match
+                prefix = content[line_start:min(line_start + 1024, line_end)]
+                record_type = re.search(rb'"type"\s*:\s*"([^"\\]+)"', prefix)
+                if record_type is not None and record_type.group(1) != b"turn_context":
+                    continue
+                if line_end - line_start > 2 * 1024 * 1024:
+                    raise SharedThreadBridgeError("bound Codex rollout has an oversized settings record")
+                try:
+                    record = json.loads(content[line_start:line_end])
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise SharedThreadBridgeError("bound Codex rollout has a malformed settings record") from exc
+                if isinstance(record, dict) and record.get("type") == "turn_context":
+                    payload = record.get("payload")
+                    if isinstance(payload, dict):
+                        return _normalize_saved_external_settings(payload)
+                    raise SharedThreadBridgeError("bound Codex rollout has a malformed settings record")
+    except OSError as exc:
+        raise SharedThreadBridgeError("cannot safely read the bound Codex rollout") from exc
+    finally:
+        if rollout_fd is not None:
+            os.close(rollout_fd)
+        if directory_fd is not None:
+            os.close(directory_fd)
+    raise ExternalSettingsUnavailable("bound Codex rollout has no recent turn settings")
+
+
+def _camel_key(name: str) -> str:
+    parts = name.split("_")
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+def _normalize_sandbox(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {_camel_key(key): _normalize_sandbox(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_sandbox(item) for item in value]
+    if isinstance(value, str):
+        return {"danger-full-access": "dangerFullAccess", "workspace-write": "workspaceWrite",
+                "read-only": "readOnly"}.get(value, value)
+    return value
+
+
+def _normalize_saved_external_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    sandbox = payload.get("sandbox_policy")
+    profile = payload.get("active_permission_profile")
+    if (not isinstance(payload.get("model"), str) or not payload["model"]
+            or "effort" not in payload
+            or not isinstance(payload.get("approval_policy"), str)
+            or not isinstance(payload.get("approvals_reviewer"), str)
+            or not isinstance(sandbox, dict) or not isinstance(sandbox.get("type"), str)
+            or profile is not None and (not isinstance(profile, dict) or not isinstance(profile.get("id"), str))):
+        raise SharedThreadBridgeError("bound Codex rollout lacks a complete settings baseline")
+    return {"model": payload["model"], "reasoningEffort": payload["effort"],
+            "approvalPolicy": payload["approval_policy"], "approvalsReviewer": payload["approvals_reviewer"],
+            "sandbox": _normalize_sandbox(sandbox),
+            "activePermissionProfile": profile.get("id") if profile is not None else None}
+
+
+def _verify_external_settings(result: dict[str, Any], baseline: dict[str, Any]) -> None:
+    for field, expected in baseline.items():
+        actual = result.get(field)
+        if field == "sandbox":
+            actual = _normalize_sandbox(actual)
+        elif field == "activePermissionProfile":
+            actual = actual.get("id") if isinstance(actual, dict) else actual
+        if actual != expected:
+            raise SharedThreadBridgeError(f"bound Codex task {field} changed during resume; feedback remains queued")
+
+
 def _private_socket_candidates(socket_dir: Path | None = None) -> list[Path]:
     """Find sockets in the current user's private Codex daemon directory."""
     if not hasattr(os, "getuid"):
@@ -153,6 +324,8 @@ class SharedThreadBridge:
     Use :meth:`connect_for_thread` for an existing task and
     :meth:`connect_to_desktop` when creating a new one. Keep this connection
     open until a started turn finishes, and process server-initiated requests.
+    External cold resume requires an explicit bound-task opt-in and a saved
+    settings baseline; task discovery alone never authorizes recovery.
     """
 
     def __init__(self, websocket_connection: Any, thread_id: str, *, timeout: float = 10.0, socket_path: Path | None = None) -> None:
@@ -295,6 +468,7 @@ class SharedThreadBridge:
         require_idle: bool = True,
         subscribe: bool = False,
         allow_owned_resume: bool = False,
+        allow_bound_resume: bool = False,
         thread_config: dict[str, Any] | None = None,
         permission_mode: str | None = None,
         sync_owned_permissions: bool = False,
@@ -302,18 +476,21 @@ class SharedThreadBridge:
     ) -> "SharedThreadBridge":
         """Select the single daemon where ``thread_id`` is already loaded.
 
-        A fresh daemon can read the rollout but reports ``notLoaded``; it is
-        never selected.  A busy loaded task is rejected by default; set
+        A fresh daemon can read the rollout but reports ``notLoaded``. Only
+        explicitly bound or workbench-owned tasks may be resumed there. A busy
+        loaded task is rejected by default; set
         ``require_idle=False`` only to observe or bind it without starting a
         turn.  :meth:`start_turn` always verifies idle status again.
         """
         if not isinstance(thread_id, str) or not _THREAD_ID.fullmatch(thread_id):
             raise ValueError("thread_id must be a Codex task UUID")
+        if allow_owned_resume and allow_bound_resume:
+            raise ValueError("owned and external resume are separate modes")
         permission_overrides = _permission_overrides(permission_mode)
         if permission_overrides and not allow_owned_resume:
             raise ValueError("permission overrides require a workbench-owned task")
         loaded: list[tuple[SharedThreadBridge, dict[str, Any]]] = []
-        unloaded: list[SharedThreadBridge] = []
+        unloaded: list[tuple[SharedThreadBridge, dict[str, Any]]] = []
         errors: list[str] = []
         missing_empty_rollout = False
         already_subscribed = False
@@ -333,7 +510,7 @@ class SharedThreadBridge:
                 if thread.get("status", {}).get("type") != "notLoaded":
                     loaded.append((bridge, thread))
                 else:
-                    unloaded.append(bridge)
+                    unloaded.append((bridge, thread))
             except Exception as exc:
                 if bridge is not None:
                     bridge.close()
@@ -341,7 +518,7 @@ class SharedThreadBridge:
                 if isinstance(exc, SharedThreadRPCRejected) and "no rollout found" in str(exc).lower():
                     missing_empty_rollout = True
         if not loaded and allow_owned_resume and len(unloaded) == 1 and len(candidates) == 1:
-            bridge = unloaded.pop()
+            bridge, _unloaded_thread = unloaded.pop()
             try:
                 params = {"threadId": thread_id, **bridge._saved_permission_overrides(permission_mode)}
                 if thread_config is not None:
@@ -364,7 +541,32 @@ class SharedThreadBridge:
             except Exception:
                 bridge.close()
                 raise
-        for bridge in unloaded:
+        bound_baseline = None
+        loaded_without_turns = False
+        if not loaded and allow_bound_resume and len(unloaded) == 1 and len(candidates) == 1:
+            bridge, unloaded_thread = unloaded.pop()
+            try:
+                bound_baseline = _saved_external_settings(unloaded_thread, thread_id)
+                # The cold load gets only the exact task ID. In particular it
+                # must not adopt this gateway's permission or model defaults.
+                result = bridge._rpc("thread/resume", {"threadId": thread_id})
+                resumed = result.get("thread")
+                if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
+                    raise SharedThreadBridgeError("thread/resume returned the wrong bound task")
+                _verify_external_settings(result, bound_baseline)
+                thread = bridge.read_thread()
+                if (thread.get("id") != thread_id or thread.get("path") != unloaded_thread.get("path")
+                        or thread.get("status", {}).get("type") not in {"idle", "active"}):
+                    raise SharedThreadBridgeError("bound Codex task did not safely load after resume")
+                loaded.append((bridge, thread))
+                # Resume already subscribed this connection. A second resume
+                # is needed only when the caller requested project MCP config.
+                already_subscribed = True
+                subscribe = bool(subscribe and thread_config is not None)
+            except Exception:
+                bridge.close()
+                raise
+        for bridge, _thread in unloaded:
             bridge.close()
         if len(loaded) != 1:
             for bridge, _thread in loaded:
@@ -376,6 +578,37 @@ class SharedThreadBridge:
                 detail += f" ({'; '.join(errors)})"
             raise SharedThreadBridgeError(detail)
         bridge, thread = loaded[0]
+        if allow_bound_resume and bound_baseline is None:
+            # A failed cold verification leaves the task loaded. Every later
+            # probe must run the same gate or a queued packet could escape on
+            # the supervisor's next retry.
+            try:
+                try:
+                    bound_baseline = _saved_external_settings(thread, thread_id)
+                except ExternalSettingsUnavailable:
+                    # A selected task can be loaded before its first rollout
+                    # record exists. Prove native history is empty; never use
+                    # this path after a cold resume or for a corrupted file.
+                    thread = _verify_loaded_empty_bound_thread(bridge, thread, thread_id)
+                    loaded_without_turns = True
+                if loaded_without_turns:
+                    pass
+                else:
+                    result = bridge._rpc("thread/resume", {"threadId": thread_id})
+                    resumed = result.get("thread")
+                    if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
+                        raise SharedThreadBridgeError("thread/resume returned the wrong bound task")
+                    _verify_external_settings(result, bound_baseline)
+                    latest = bridge.read_thread()
+                    if (latest.get("id") != thread_id or latest.get("path") != thread.get("path")
+                            or latest.get("status", {}).get("type") not in {"idle", "active"}):
+                        raise SharedThreadBridgeError("bound Codex task changed during settings verification")
+                    thread = latest
+                    already_subscribed = True
+                    subscribe = bool(subscribe and thread_config is not None)
+            except Exception:
+                bridge.close()
+                raise
         if require_idle and thread.get("status", {}).get("type") != "idle":
             bridge.close()
             raise SharedThreadNotIdle(f"Codex task status is {thread.get('status')!r}")
@@ -384,6 +617,9 @@ class SharedThreadBridge:
             subscribe = True
         if subscribe:
             try:
+                if allow_bound_resume and not allow_owned_resume and not loaded_without_turns:
+                    if bound_baseline is None:
+                        bound_baseline = _saved_external_settings(thread, thread_id)
                 resume_mode = permission_mode if thread.get("status", {}).get("type") == "idle" else None
                 params = {"threadId": thread_id, **bridge._saved_permission_overrides(resume_mode)}
                 if thread_config is not None:
@@ -396,6 +632,13 @@ class SharedThreadBridge:
                 resumed = result.get("thread")
                 if not isinstance(resumed, dict) or resumed.get("id") != thread_id:
                     raise SharedThreadBridgeError("thread/resume returned the wrong task")
+                if bound_baseline is not None:
+                    _verify_external_settings(result, bound_baseline)
+                    latest = bridge.read_thread()
+                    if (latest.get("id") != thread_id or latest.get("path") != thread.get("path")
+                            or latest.get("status", {}).get("type") not in {"idle", "active"}):
+                        raise SharedThreadBridgeError("bound Codex task changed after project MCP subscription")
+                    thread = latest
             except Exception:
                 bridge.close()
                 raise

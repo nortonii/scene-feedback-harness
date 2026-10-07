@@ -132,9 +132,9 @@ class PluginRPCTests(unittest.TestCase):
         signature = "v1," + base64.b64encode(hmac.new(SECRET_BYTES, signed, hashlib.sha256).digest()).decode()
         self.assertEqual(headers["webhook-signature"], signature)
         self.assertNotIn("scene_original_url", event["data"])
-        result = self.rpc("tools/call", {"name": "workspace_get_feedback", "arguments": {"feedback_id": packet["feedback_id"]}})["result"]
+        result = self.rpc("tools/call", {"name": "workspace_get_feedback", "arguments": {"feedback_id": packet["feedback_id"], "include_details": True}})["result"]
         images = [block for block in result["content"] if block["type"] == "image"]
-        self.assertEqual(len(images), 4)
+        self.assertEqual(len(images), 1)  # Identical fixture bytes are sent once with source aliases.
         for block in images:
             with Image.open(io.BytesIO(base64.b64decode(block["data"]))) as opened:
                 self.assertEqual(opened.size, (12, 8))

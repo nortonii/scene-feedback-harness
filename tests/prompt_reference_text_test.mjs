@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createPromptReferenceText} from '../web/prompt-reference-text.js';
+import {referenceAliasLabel} from '../web/prompt-reference-icons.js';
+import {findPromptQueryRange} from '../web/prompt-mentions.js';
 
 const object='[[object:cabinet]]', point='[[annotation:point_a]]', image='[[image:saved_a]]';
 const sources={
@@ -172,4 +174,253 @@ test('opaque identifiers stay in metadata and use meaningful source-kind aliases
   }
   const codec=createPromptReferenceText({resolve:()=>({name:'KitchenCabinetDoorPanel'})});
   assert.equal(codec.remember('语义名称',object).alias,'【KitchenCabi…】');
+});
+
+test('numbered time aliases freeze precise prose and reuse only the same source and time',()=>{
+  const codec=createPromptReferenceText({resolve:()=>({name:'Changed live frame'})});
+  const text='片段1.500s · 参考1.000s · 侧面 #3';
+  const first=codec.rememberTime(text,'view:side;clock:1.5');
+  assert.equal(first.alias,'【时间戳1】');
+  assert.equal(codec.rememberTime(text,'view:side;clock:1.5'),first);
+  assert.equal(codec.rememberTime(text,'view:another;clock:1.5').alias,'【时间戳2】');
+  const next=codec.rememberTime('片段2.125000001s · 参考2.000s · 侧面 #5','view:side;clock:1.5');
+  assert.equal(next.alias,'【时间戳3】');
+  const visible='按【时间戳1】修改，再看【时间戳3】。';
+  const expanded=codec.expand(visible);
+  assert.equal(expanded,`按【时间戳1】 ${text}修改，再看【时间戳3】 ${next.timeText}。`);
+  assert(!expanded.includes('[[time:'));
+  assert.equal(codec.expand(expanded),expanded);
+  assert.equal(codec.compact(expanded),visible);
+  assert.equal(codec.compact('用户自写时间 1.500s · 侧面 #3'),'用户自写时间 1.500s · 侧面 #3');
+  assert.equal(codec.remember('',first.token).timeText,text);
+});
+
+test('time records survive reload, removal and undo without losing precision or stealing numbers',()=>{
+  const codec=createPromptReferenceText({resolve:token=>token==='[[object:time_named_object]]'?{name:'时间戳1'}:sources[token]});
+  codec.remember('时间戳1','[[object:time_named_object]]');
+  const text='片段0.100000001s · 原机位 #123';
+  const first=codec.rememberTime(text,'source-a');
+  assert.equal(first.alias,'【时间戳2】');
+  const visible='在【时间戳2】改【柜子】';codec.remember('柜子',object);
+  const canonical=codec.expand(visible),records=JSON.parse(JSON.stringify(codec.exportRecords()));
+  const restored=create();restored.reset(records);
+  assert.equal(restored.compact(canonical),visible);
+  assert.equal(restored.expand(visible),canonical);
+  assert.equal(restored.rememberTime(text,'source-a').alias,'【时间戳2】');
+  assert.equal(restored.entries(visible)[0].title,text);
+  assert.equal(restored.remove(visible,first.token),'在改【柜子】');
+  assert.equal(restored.expand(visible),canonical,'undo can restore the original alias');
+  assert.equal(restored.rememberTime('片段0.200s','source-b').alias,'【时间戳3】');
+  restored.reset();
+  assert.equal(restored.expand('【时间戳2】'),'【时间戳2】');
+  assert.equal(restored.rememberTime('片段3.000s','source-c').alias,'【时间戳1】');
+});
+
+test('incomplete time records stay literal and long precise descriptions round trip without truncation',()=>{
+  const codec=createPromptReferenceText();
+  codec.reset([{token:'[[time:t1]]',alias:'【时间戳1】'},{token:'[[time:t2]]',alias:'【时间戳2】',timeText:'\u0000'}]);
+  assert.deepEqual(codec.exportRecords(),[]);
+  assert.equal(codec.compact('[[time:t1]] 【时间戳1】'),'[[time:t1]] 【时间戳1】');
+  assert.equal(codec.rememberTime('', 'empty'),null);
+  const description='片段0.000–10.125s · '+('原机位及标记说明'.repeat(240));
+  const entry=codec.rememberTime(description,'range-a');
+  assert.equal(entry.alias,'【时间戳1】');
+  const wire=codec.expand(entry.alias);
+  const restored=createPromptReferenceText();restored.reset(JSON.parse(JSON.stringify(codec.exportRecords())));
+  assert.equal(restored.expand(entry.alias),wire);
+  assert.equal(restored.compact(wire),entry.alias);
+  assert.equal(restored.entries(entry.alias)[0].timeText,description);
+});
+
+test('numbered composer references keep independent counters and exact identities for every source kind',()=>{
+  const codec=createPromptReferenceText({numbered:true,resolve:token=>sources[token] || null});
+  const a='a'.repeat(32),b='b'.repeat(32);
+  const tokens=[object,'[[object:another]]','[[node:room:0/1]]',point,'[[annotation:line_a]]',image,`[[pose:${a}:${b}]]`,`[[pose_edit:${a}]]`];
+  const visible=codec.compact(tokens.join(' '));
+  assert.equal(visible,'【物体1】 【物体2】 【部件1】 【标记1】 【标记2】 【图片1】 【人体1】 【修正1】');
+  tokens.forEach(token=>assert(codec.expand(visible).includes(token)));
+  assert.equal(codec.remember('renamed',object).alias,'【物体1】');
+  const time=codec.rememberTime('片段0.125s','current-frame');
+  assert.equal(time.alias,'【时间戳1】');
+  assert.equal(codec.compact(codec.expand(visible+' '+time.alias)),visible+' '+time.alias);
+});
+
+test('numbered restoration migrates only registered old aliases without stealing new image symbols',()=>{
+  const codec=createPromptReferenceText({numbered:true});
+  codec.reset([{token:object,alias:'【图片1】',name:'图片1',label:'柜子'},
+    {token:image,alias:'【图1】',name:'参考图',label:'original.png'},
+    {token:point,alias:'【点1】',name:'点1',label:'原图上的点1'}]);
+  assert.equal(codec.compact('改【图片1】参考【图1】和【点1】；用户自己的【其他】'),
+    '改【物体1】参考【图片1】和【标记1】；用户自己的【其他】');
+  assert.equal(codec.expand('新【图片1】'),`新【图片1】 ${image}`);
+  assert.equal(codec.compact(`【图片1】 ${object} 与【图1】 ${image}`),'【物体1】 与【图片1】');
+  const records=codec.exportRecords(),restored=createPromptReferenceText({numbered:true});restored.reset(records);
+  assert.equal(restored.compact(codec.expand('【物体1】 【图片1】 【标记1】')),'【物体1】 【图片1】 【标记1】');
+  assert.equal(restored.remember('another image','[[image:other]]').alias,'【图片2】');
+  assert.equal(restored.remember('another mark','[[annotation:other]]').alias,'【标记2】');
+});
+
+test('icon references number every kind independently and keep exact payloads',()=>{
+  const codec=createPromptReferenceText({icons:true,resolve:token=>sources[token]});
+  const a='a'.repeat(32),b='b'.repeat(32);
+  const tokens=[object,'[[object:another]]','[[node:room:0/2]]',point,image,`[[pose:${a}:${b}]]`,`[[pose_edit:${a}]]`];
+  const text=codec.compact(tokens.join(' '));
+  assert.equal(text,'🧊1 🧊2 🧩1 📍1 🖼️1 🧍1 ✏️1');
+  const time=codec.rememberTime('片段0.100000001s · 正面 #9','clock');
+  assert.equal(time.alias,'🕒1');
+  const visible=text+' '+time.alias,wire=codec.expand(visible);
+  tokens.forEach(token=>assert(wire.includes(token)));
+  assert(wire.includes(time.timeText));assert(!wire.includes('[[time:'));
+  assert.equal(codec.compact(wire),visible);
+  assert.equal(codec.expand(wire),wire);
+  assert.equal(codec.remember('renamed',object).alias,'🧊1');
+  assert.equal(referenceAliasLabel('🖼️1'),'图片1');
+  const restored=createPromptReferenceText({icons:true});restored.reset(codec.exportRecords());
+  assert.equal(restored.compact(wire),visible);
+  assert.equal(restored.expand(visible),wire);
+});
+
+test('one exact node keeps distinct stable item and part bindings',()=>{
+  const token='[[node:room:0]]';
+  let selectedKind='object';
+  const codec=createPromptReferenceText({icons:true,resolve:()=>({kind:selectedKind,name:'柜子',label:'柜子'})});
+  const item=codec.remember('柜子',token,{kind:'object'});
+  const part=codec.remember('柜子',token,{kind:'node'});
+  assert.equal(item.alias,'🧊1');
+  assert.equal(part.alias,'🧩1');
+  assert.equal(item.token,part.token);
+  assert.equal(item.kind,'object');
+  assert.equal(part.kind,'node');
+  selectedKind='node';
+  assert.equal(codec.remember('重选物品',token,{kind:'object'}).alias,item.alias);
+  selectedKind='object';
+  assert.equal(codec.remember('普通节点引用',token).alias,part.alias);
+  const visible='改🧊1，再看🧩1与🧊1。',wire=`改🧊1 ${token}，再看🧩1 ${token}与🧊1 ${token}。`;
+  assert.equal(codec.expand(visible),wire);
+  assert.equal(codec.compact(wire),visible);
+  assert.equal(codec.expand(wire),wire);
+  assert.deepEqual(codec.entries(visible).map(({token,displayKind})=>({token,displayKind})),
+    [{token,displayKind:'object'},{token,displayKind:'node'}]);
+  assert.deepEqual(codec.ranges(visible).map(({entry})=>entry.alias),['🧊1','🧩1','🧊1']);
+  assert.equal(codec.remember('另一个物体',object).alias,'🧊2');
+});
+
+test('existing named node bindings also round trip through the ordinary codec API',()=>{
+  const token='[[node:room:0]]';
+  const codec=createPromptReferenceText({resolve:()=>({name:'柜子'})});
+  const item=codec.remember('柜子',token,{kind:'object'}),part=codec.remember('柜子',token);
+  assert.equal(item.alias,'【柜子】');
+  assert.equal(part.alias,'【柜子2】');
+  const visible=`${item.alias} ${part.alias}`;
+  assert.equal(codec.compact(codec.expand(visible)),visible);
+  const restored=createPromptReferenceText();restored.reset(codec.exportRecords());
+  assert.equal(restored.compact(codec.expand(visible)),visible);
+  assert.equal(restored.remove(visible,token,item.alias),` ${part.alias}`);
+});
+
+test('removing one node display binding leaves its other level and undo bindings intact',()=>{
+  const token='[[node:room:0]]',codec=createPromptReferenceText({icons:true});
+  const item=codec.remember('柜子',token,{kind:'object'}),part=codec.remember('柜子',token,{kind:'node'});
+  const unrelated=codec.remember('其他',object),visible=`${item.alias} ${part.alias} ${item.alias} ${unrelated.alias}`;
+  const before=codec.exportRecords();
+  assert.equal(codec.remove(visible,token,item.alias),` ${part.alias}  ${unrelated.alias}`);
+  assert.equal(codec.remove(visible,token,part.alias),`${item.alias}  ${item.alias} ${unrelated.alias}`);
+  assert.equal(codec.remove(visible,token,unrelated.alias),visible);
+  assert.equal(codec.remove(visible,token),`   ${unrelated.alias}`);
+  // A native undo restores visible text without re-registering anything.
+  assert.equal(codec.expand(visible),`${item.alias} ${token} ${part.alias} ${token} ${item.alias} ${token} ${unrelated.alias} ${object}`);
+  assert.deepEqual(codec.exportRecords(),before);
+  assert.deepEqual(codec.ranges(visible).map(({entry})=>entry.displayKind),['object','node','object','object']);
+});
+
+test('node item and part bindings survive reload with frozen display kinds',()=>{
+  const token='[[node:room:0]]',codec=createPromptReferenceText({icons:true});
+  const item=codec.remember('整件',token,{kind:'object'}),part=codec.remember('细节',token,{kind:'node'});
+  const visible=`${item.alias} ${part.alias}`,wire=codec.expand(visible),records=JSON.parse(JSON.stringify(codec.exportRecords()));
+  assert.deepEqual(records.map(record=>record.displayKind),['object','node']);
+  const restored=createPromptReferenceText({icons:true,resolve:()=>({kind:'object',displayKind:'object',name:'当前选择'})});
+  restored.reset(records);
+  assert.equal(restored.compact(wire),visible);
+  assert.equal(restored.expand(visible),wire);
+  assert.equal(restored.entries(visible).length,2);
+  assert.equal(restored.remember('普通节点',token).alias,part.alias);
+  assert.equal(restored.remember('物品',token,{kind:'object'}).alias,item.alias);
+  assert.equal(restored.remove(visible,token,item.alias),` ${part.alias}`);
+  assert.equal(restored.expand(visible),wire);
+});
+
+test('canonical node prefixes restore both display levels and ordinal gaps',()=>{
+  const token='[[node:room:0]]',codec=createPromptReferenceText({icons:true});
+  const wire=`🧊8 ${token} 与🧩7 ${token}，原始 ${token}`;
+  assert.equal(codec.compact(wire),'🧊8 与🧩7，原始 🧩7');
+  assert.equal(codec.remember('其他物体',object).alias,'🧊9');
+  assert.equal(codec.remember('其他部件','[[node:room:1]]').alias,'🧩8');
+  const numbered=createPromptReferenceText({icons:true});
+  assert.equal(numbered.compact(`【物体8】 ${token} 与【部件7】 ${token}`),'🧊8 与🧩7');
+  const raw=createPromptReferenceText({icons:true,resolve:()=>({kind:'object',displayKind:'object'})});
+  assert.equal(raw.compact(token),'🧩1');
+});
+
+test('legacy node drafts keep their saved class without consulting the current selection',()=>{
+  const token='[[node:room:0]]';
+  const codec=createPromptReferenceText({icons:true,resolve:()=>({kind:'object',displayKind:'object'})});
+  codec.reset([{token,alias:'【部件4】',kind:'node',label:'旧部件'}]);
+  assert.equal(codec.compact(`【部件4】 ${token}`),'🧩4');
+  assert.equal(codec.expand('🧩4'),`🧩4 ${token}`);
+  codec.reset([{token,alias:'【物体8】',displayKind:'object',label:'保存的物品'},
+    {token,alias:'【部件4】',displayKind:'node',label:'保存的部件'}]);
+  assert.equal(codec.compact(`【物体8】 ${token} 【部件4】 ${token}`),'🧊8 🧩4');
+  assert.deepEqual(codec.entries('🧊8 🧩4').map(entry=>entry.displayKind),['object','node']);
+  codec.reset([{token,alias:'【旧节点】',label:'未保存级别'}]);
+  assert.equal(codec.compact(`【旧节点】 ${token}`),'🧩1');
+});
+
+test('icon drafts migrate numbered and named brackets without changing targets or ordinal gaps',()=>{
+  const codec=createPromptReferenceText({icons:true});
+  const precise='片段0.000000001s · 原始机位 #8';
+  codec.reset([{token:object,alias:'【物体8】',label:'柜子'},
+    {token:'[[object:other]]',alias:'【图片1】',label:'另一个柜子'},
+    {token:image,alias:'【图片1】',label:'original.png'},
+    {token:point,alias:'【点1】',label:'原图上的点'},
+    {token:'[[time:t1]]',alias:'【时间戳3】',timeText:precise,timeKey:'old-source'}]);
+  const visible=codec.compact(`改【物体8】 ${object} 与【图片1】 [[object:other]]，参考【图片1】 ${image} 和【点1】 ${point}，在【时间戳3】 ${precise}；用户自写【其他】。`);
+  assert.equal(visible,'改🧊8 与🧊9，参考🖼️1 和📍1，在🕒3；用户自写【其他】。');
+  assert.equal(codec.rememberTime(precise,'old-source').alias,'🕒3');
+  assert.equal(codec.remember('', '[[object:next]]').alias,'🧊10');
+  assert.equal(codec.remember('', '[[image:next]]').alias,'🖼️2');
+  const restored=createPromptReferenceText({icons:true});restored.reset(codec.exportRecords());
+  assert.equal(restored.compact(codec.expand(visible)),visible);
+  assert.equal(restored.expand(visible),codec.expand(visible));
+});
+
+test('icon scanning and native edit ranges never mistake ordinal prefixes or nested literals for references',()=>{
+  const codec=createPromptReferenceText({icons:true});
+  codec.remember('',object);
+  const literal='🧊10 🧊100 🧊12345678 🧊0 🧊01 🧊 【🧊1】 [[🧊1]] [[unknown:🧊1]]';
+  assert.equal(codec.expand(literal),literal);
+  assert.deepEqual(codec.ranges(literal),[]);
+  const visible='🙂改🧊1，再看🧊10和🧊1。';
+  assert.deepEqual(codec.ranges(visible).map(({start,end})=>[start,end]),[[3,6],[14,17]]);
+  assert.equal(codec.remove(visible,object),'🙂改，再看🧊10和。');
+  const tenth='[[object:tenth]]';codec.reset([{token:object,alias:'🧊1'},{token:tenth,alias:'🧊10'}]);
+  assert.equal(codec.expand('🧊1 🧊10'),`🧊1 ${object} 🧊10 ${tenth}`);
+  assert.deepEqual(codec.ranges('🧊1 🧊10').map(item=>item.entry.token),[object,tenth]);
+});
+
+test('registered old literal aliases migrate once and cannot hijack later icon references',()=>{
+  const codec=createPromptReferenceText({icons:true});
+  codec.reset([{token:object,alias:'【🖼️1】',name:'🖼️1'},{token:image,alias:'🖼️1'}]);
+  assert.equal(codec.compact('改【🖼️1】参考🖼️1'),'改🧊1参考🖼️1');
+  assert.equal(codec.expand('🖼️1'),`🖼️1 ${image}`);
+  assert.equal(codec.compact('未注册【🖼️1】'),'未注册【🖼️1】');
+});
+
+test('menus can follow a registered icon without treating email, ratios or unknown icons as references',()=>{
+  const codec=createPromptReferenceText({icons:true});codec.remember('',object);
+  for(const trigger of ['@','/']) {
+    const value='🧊1'+trigger+'柜子';
+    assert.equal(findPromptQueryRange(value,value.length,value.length,codec.ranges(value))?.trigger,trigger);
+    for(const literal of ['🧊10'+trigger+'test','test'+trigger+'example.com','1'+trigger+'2'])
+      assert.equal(findPromptQueryRange(literal,literal.length,literal.length,codec.ranges(literal)),null);
+  }
 });

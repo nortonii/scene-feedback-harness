@@ -14,7 +14,7 @@ from typing import Any
 
 from appserver_adapter import TurnBusyError
 from core import APIError, MAX_REFERENCE_BYTES, MAX_REFERENCES, SceneStore, _now
-from feedback_summary import caption, feedback_manifest
+from feedback_summary import model_input_plan, image_caption
 from shared_thread_adapter import DeliveryNotReadyError, DeliveryRejectedError
 from shared_thread_adapter import SharedDesktopAdapter
 from shared_thread_bridge import OwnedEmptyThreadMissing, SharedThreadBridge, SharedThreadNotIdle
@@ -788,7 +788,7 @@ class WorkspaceGateway:
         with self.store.lock:
             owned = thread_id in self.store.state["workspace"].get("created_thread_ids", [])
         replacement_token = object()
-        kwargs = {"allow_owned_resume": True} if owned else {}
+        kwargs = {"allow_owned_resume": True} if owned else {"allow_bound_resume": True}
         kwargs.update(self._owned_adapter_config(thread_id))
         replacement = SharedDesktopAdapter(thread_id, on_event=self.scoped_adapter_callback(replacement_token), **kwargs)
         try:
@@ -859,7 +859,8 @@ class WorkspaceGateway:
                 with self.store.lock:
                     workspace = self.store.state["workspace"]
                     active_id = workspace.get("active_feedback_id")
-                    if not active_id and workspace["agent"].get("status") != "disconnected":
+                    if not active_id and (workspace["agent"].get("status") != "disconnected"
+                                          or workspace["agent"].get("error") != error):
                         workspace["agent"] = {"status": "disconnected", "turn_id": None, "error": error}
                         self.store._save()
                         self.store.workspace_event("disconnected", {"message": error})
@@ -1526,7 +1527,8 @@ class WorkspaceGateway:
                     current["turn_id"] = response.get("turn_id")
                     current["error"] = None
                     current.pop("uncertain_since", None)
-                    workspace["agent"] = {"status": "running", "turn_id": response.get("turn_id"), "error": None}
+                    workspace["agent"] = {"status": "awaiting_approval" if workspace["approvals"] else "running",
+                                          "turn_id": response.get("turn_id"), "error": None}
                     self.store._save()
                     self.store.workspace_event("turn_started", {"feedback_id": feedback["feedback_id"], "turn_id": response.get("turn_id")})
         except Exception as exc:
@@ -1560,114 +1562,22 @@ class WorkspaceGateway:
                 self.wake()
 
     def _turn_input(self, feedback: dict[str, Any]) -> tuple[str, list[str]]:
-        manifest = feedback_manifest(feedback, self.store.data_dir)
-        if feedback.get("object_prompts"):
-            fallback = "（逐物体提示见下方。）"
-        elif feedback.get("reference_images") and not feedback.get("annotations"):
-            fallback = "（仅提供参考图，请据图开始或继续重建。）"
-        else:
-            fallback = "（仅有视觉标记）"
-        lines = ["用户通过 Visual Reconstruction Workspace 发送视觉反馈。", "项目根目录：" + str(self.project_dir),
-                 "用户原话：", feedback.get("note", "") or fallback, "",
-                 f"场景版本：{feedback['scene_revision']}；反馈 ID：{feedback['feedback_id']}",
-                 "完整证据：" + json.dumps(manifest["details"], ensure_ascii=False),
-                 "按 feedback_id 读取 state.json 的 feedback 条目；原图、相机矩阵、全部关键点与修正前后数据均保留。以下 source key 对应附件；提示中的 #帧号从 1 起，JSON frame_index 从 0 起，时间为片段相对秒。"]
-        if feedback.get("submitted_from_stale_snapshot"):
-            current_revision = feedback.get("delivery_scene_revision", self.store.scene()["revision"])
-            lines.append(f"反馈采集于场景版本 {feedback['scene_revision']}，发送时当前版本为 {current_revision}；截图和标记属于采集时版本。")
-        for field, label in (("selected_object_ids", "选中对象 ID"), ("selected_scene_nodes", "选中 GLB 节点")):
-            if manifest.get(field):
-                lines.append(label + "：" + json.dumps(manifest[field], ensure_ascii=False))
-        if manifest.get("inline_references"):
-            lines.append("原话引用：")
-            for item in manifest["inline_references"]:
-                target_key = {"object": "object", "annotation": "annotation", "node": "scene_node", "image": "image"}.get(item.get("kind"), "")
-                lines.append(f"{item['token']} → " + json.dumps(item.get(target_key), ensure_ascii=False)
-                             + ("（旧场景引用）" if item.get("from_stale_snapshot") else ""))
-            if any(item.get("kind") == "node" for item in manifest["inline_references"]):
-                lines.append("节点路径是用户查看器中的子节点索引，仅用于指明视觉部位。")
-        if manifest.get("object_prompts"):
-            lines.append("逐物体提示：" + json.dumps(manifest["object_prompts"], ensure_ascii=False))
-        if manifest.get("timeline"):
-            if "scope" in manifest["timeline"]:
-                lines.append("动态反馈时间轴与适用范围：" + json.dumps(manifest["timeline"], ensure_ascii=False))
-                lines.append("区间范围表示用户提示的适用时间；各帧仍保留自己的采集时间。")
-            else:
-                lines.append("动态截图采集时间，修改时段以用户提示为准：" + json.dumps(manifest["timeline"], ensure_ascii=False))
-        active_id, aligned_id = feedback.get("active_reference_id"), feedback.get("aligned_reference_id")
-        if active_id:
-            lines.append(f"当前参考图 ID：{active_id}")
-        if aligned_id:
-            lines.append(f"场景按参考图 {aligned_id} 的标定相机对齐，可按同一视角比较；仍可能有畸变或标定误差。")
-        for field, label in (("camera", "scene 相机"), ("comparison", "scene 叠图参数"),
-                             ("reference_images", "参考来源"), ("crops", "局部来源"), ("annotations", "标记"),
-                             ("image_refs", "独立图像来源"), ("human_pose", "人体来源"),
-                             ("human_pose_edits", "人工修正"), ("scene_snapshots", "静态截图来源"),
-                             ("dynamic_frames", "动态帧来源"), ("cameras", "相机")):
-            if manifest.get(field):
-                lines.append(label + "：" + json.dumps(manifest[field], ensure_ascii=False))
-        if feedback.get('comparison') or any(frame.get('comparison') for frame in [*feedback.get('scene_snapshots', []), *feedback.get('dynamic_frames', [])]):
-            lines.append("叠图是按 opacity、normalized_scene_image 位置合成的辅助图；请结合独立原图、相机和标记判断偏差，透明重影不是新增物体。")
-        if feedback.get("human_pose"):
-            lines.append("人体 evidence_kind 区分二维观测和三维投影，keypoint_profile 声明关节定义；投影不可作实测，跨机位身份须有证据。")
-        if feedback.get("human_pose_edits"):
-            lines.append("使用 $capsule-human-tracking apply-corrections 合并 corrections_path 后重建。原 model score 不变；manual_visibility=visible 才是可见人工观测，occluded/missing 不可作可见测量；未改点保留 parent_evidence_kind。")
-        for image in feedback.get("image_refs", []):
-            if image.get("from_stale_snapshot"):
-                lines.append(f"[[image:{image['id']}]] 固定于版本 {image['scene_revision']}，独立于本轮反馈版本 {feedback['scene_revision']}；按自己的相机解读。")
-        lines += ["", "附件顺序："]
-        image_paths: list[str] = []
-
-        def add(source_key: str, role: str, url: str) -> None:
-            name = url.rsplit("/", 1)[-1]
-            if not url.startswith("/media/") or not name or "/" in name:
-                raise APIError(500, "stored image URL is invalid")
-            path = (self.store.media_dir / name).resolve()
-            if path.parent != self.store.media_dir or not path.is_file():
-                raise APIError(500, "stored image is missing")
-            image_paths.append(str(path))
-            lines.append(f"{len(image_paths)}. " + caption(source_key, role))
-
-        annotated = {entry["reference_id"]: entry["url"] for entry in feedback.get("reference_annotated_images", [])}
-        for index, reference in enumerate(feedback.get("reference_images", []), 1):
-            key = f"R{index}"
-            add(key, "参考原图", reference["url"])
-            if reference["id"] == aligned_id and reference.get("alignment_image_url"):
-                add(key, "去畸变对齐图", reference["alignment_image_url"])
-            if reference["id"] in annotated:
-                add(key, "带用户标记的参考图", annotated[reference["id"]])
-        for field, role in (("scene_original", "干净场景截图"), ("scene_annotated", "带用户标记和高亮的场景截图"),
-                            ("comparison_reference_original", "叠图参考原图"), ("comparison_reference", "实际叠加参考图"),
-                            ("scene_comparison", "带标记的叠图对比（辅助图）")):
-            if feedback.get(field + "_url"):
-                add("scene", role, feedback[field + "_url"])
-        for index, crop in enumerate(feedback.get("crops", []), 1):
-            add(f"crop{index}", crop['source'] + " 局部放大图", crop["url"])
-        for index, image in enumerate(feedback.get("image_refs", []), 1):
-            for field, role in (("original", "引用原图"), ("display_original", "拖入时的干净显示图"), ("annotated", "用户标记图")):
-                if image.get(field + "_url"):
-                    add(f"I{index}", role, image[field + "_url"])
-        for index, pose in enumerate(feedback.get("human_pose", []), 1):
-            add(f"P{index}", "人体来源原帧", pose["reference_original_url"])
-            add(f"P{index}", "三维投影（青色）" if pose.get("evidence_kind") == "projected_3d" else "二维关节（青色）", pose["pose_overlay_url"])
-        for index, pose in enumerate(feedback.get("human_pose_edits", []), 1):
-            add(f"E{index}", "人工修正来源原帧", pose["reference_original_url"])
-            add(f"E{index}", "人工修正（橙色）", pose["pose_overlay_url"])
-        for field, prefix, roles in (
-            ("scene_snapshots", "S", (("scene_original", "原始截图"), ("scene_annotated", "用户标记图"),
-                                      ("comparison_reference_original", "叠图参考原图"), ("comparison_reference", "实际叠加参考图"),
-                                      ("scene_comparison", "带标记的叠图对比（辅助图）"))),
-            ("dynamic_frames", "F", (("reference_original", "参考原帧"), ("reference_annotated", "参考标记图"),
-                                    ("scene_original", "干净场景帧"), ("scene_annotated", "带标记和高亮的场景帧"),
-                                    ("comparison_reference_original", "叠图参考原图"), ("comparison_reference", "实际叠加参考图"),
-                                    ("scene_comparison", "带标记的叠图对比（辅助图）"))),
-        ):
-            for index, frame in enumerate(feedback.get(field, []), 1):
-                for image_field, role in roles:
-                    if frame.get(image_field + "_url"):
-                        add(f"{prefix}{index}", role, frame[image_field + "_url"])
-        lines += ["", "红线、箭头、编号、框和画笔是用户后画的提示，不是图中的真实几何。结合图像和原话继续重建；完成后调用 workspace_publish_scene 发布新的 GLB。"]
-        return "\n".join(lines), image_paths
+        plan = model_input_plan(feedback, self.store.data_dir)
+        manifest = copy.deepcopy(plan["manifest"])
+        note = manifest.pop("note", "") or "请结合图像和标记继续重建。"
+        lines = ["视觉反馈；项目：" + str(self.project_dir), "用户提示：" + note,
+                 "证据：" + json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+                 "附件："]
+        paths = []
+        for index, image in enumerate(plan["images"], 1):
+            paths.append(image["path"])
+            lines.append(f"{index}. " + image_caption(image))
+        lines.append("标记是用户指示，叠图重影不是新增物体。帧号引用从1起，frame_index从0起；时间是片段相对秒，修改时段以提示为准。完整证据按details读取；完成后用workspace_publish_scene发布GLB。")
+        if manifest.get("human_pose"):
+            lines.append("人体按evidence_kind/keypoint_profile解读；projected_3d不是二维实测，跨机位身份须有证据。")
+        if manifest.get("human_pose_edits"):
+            lines.append("用$capsule-human-tracking apply-corrections读取corrections_path；仅visible人工点可作可见观测，未改点保留原证据类型。")
+        return "\n".join(lines), paths
 
     @staticmethod
     def _update_agent_after_approval(workspace: dict[str, Any]) -> None:

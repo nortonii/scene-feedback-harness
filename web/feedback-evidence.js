@@ -88,7 +88,7 @@ export function setupFeedbackEvidence({getDraft,api,resourceURL}) {
       if(generation!==request || !dialog.open) return;
       rememberSaved(feedback);const evidence=savedEvidence(feedback);
       status.textContent=`已保存 · ${evidence.summary} · v${feedback.scene_revision}`;
-      byId('feedback-preview-note').textContent=compactReferenceMessage(feedback.note,savedReferenceDisplayMetadata(feedback)) || '本轮未填写文字说明';
+      byId('feedback-preview-note').textContent=compactReferenceMessage(feedback.note,savedReferenceDisplayMetadata(feedback),{icons:true}) || '本轮未填写文字说明';
       renderRows(media,evidence.rows);
     } catch(error) {
       if(generation!==request || !dialog.open) return;

@@ -1,10 +1,10 @@
 // Keep native textarea selection and IME behavior for the visible short names.
 // One menu replaces either an @ reference or a / time query. The caller owns
 // source validation and inserts through the textarea's usual editing path.
-export function findPromptMentionRange(text, start, end=start) {
+export function findPromptMentionRange(text, start, end=start,referenceRanges=[]) {
   if (start !== end || !Number.isInteger(start)) return null;
   const at=text.lastIndexOf('@',start-1);
-  if (at < 0 || at >= start || /[A-Za-z0-9._%+\-]/.test(text[at-1] || '')) return null;
+  if (at < 0 || at >= start || /[A-Za-z0-9._%+\-]/.test(text[at-1] || '') && !referenceRanges.some(range=>range.end===at)) return null;
   const query=text.slice(at+1,start);
   if (/[\s@\[\]【】]/.test(query)) return null;
   const open=text.lastIndexOf('[[',at), close=text.lastIndexOf(']]',at);
@@ -12,11 +12,11 @@ export function findPromptMentionRange(text, start, end=start) {
   return {start:at,end:start,query,text:text.slice(at,start)};
 }
 
-export function findPromptTimeRange(text, start, end=start) {
+export function findPromptTimeRange(text, start, end=start,referenceRanges=[]) {
   if (start !== end || !Number.isInteger(start)) return null;
   const slash=text.lastIndexOf('/',start-1);
   // Avoid opening for URLs, paths, ratios or a slash inside a short reference.
-  if (slash < 0 || slash >= start || /[A-Za-z0-9._%+/:\\\-]/.test(text[slash-1] || '')) return null;
+  if (slash < 0 || slash >= start || /[A-Za-z0-9._%+/:\\\-]/.test(text[slash-1] || '') && !referenceRanges.some(range=>range.end===slash)) return null;
   const query=text.slice(slash+1,start);
   if (/[\s/@\[\]【】]/.test(query)) return null;
   const open=text.lastIndexOf('[[',slash), close=text.lastIndexOf(']]',slash);
@@ -25,8 +25,8 @@ export function findPromptTimeRange(text, start, end=start) {
   return {start:slash,end:start,query,text:text.slice(slash,start),trigger:'/'};
 }
 
-export function findPromptQueryRange(text, start, end=start) {
-  const mention=findPromptMentionRange(text,start,end), time=findPromptTimeRange(text,start,end);
+export function findPromptQueryRange(text, start, end=start,referenceRanges=[]) {
+  const mention=findPromptMentionRange(text,start,end,referenceRanges), time=findPromptTimeRange(text,start,end,referenceRanges);
   if (time && (!mention || time.start > mention.start)) return time;
   return mention ? {...mention,trigger:'@'} : null;
 }
@@ -37,12 +37,12 @@ export function filterPromptMentions(candidates, query) {
   return candidates.filter((item) => !search || normalize([item.label,item.detail,item.kind,item.search].join(' ')).includes(search));
 }
 
-export function createPromptMentions({input,menu,list,status,getCandidates,onSelect,isEnabled,onError,getEmptyMessage}) {
+export function createPromptMentions({input,menu,list,status,getCandidates,onSelect,isEnabled,onError,getEmptyMessage,getReferenceRanges=()=>[]}) {
   // The chat dock is transformed and scrollable. Mount the fixed popup outside
   // it so viewport coordinates and mobile keyboard bounds stay correct.
   document.body.append(menu);
   let range=null, candidates=[], activeKey=null, composing=false, dismissed=null;
-  let selecting=false;
+  let selecting=false,previewDismissed=null;
   const identity=(value) => value ? (value.value ?? input.value)+'\u0000'+value.start+':'+value.end : null;
   const isComposing=(event) => composing || event?.isComposing || event?.keyCode === 229;
   input.setAttribute('aria-autocomplete','list');
@@ -51,7 +51,7 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
   input.setAttribute('aria-expanded','false');
 
   function close({dismiss=false}={}) {
-    if (dismiss) dismissed=identity(range);
+    if (dismiss) {dismissed=identity(range);previewDismissed=null;}
     range=null; candidates=[]; activeKey=null;
     menu.classList.add('hidden');
     input.setAttribute('aria-expanded','false');
@@ -87,7 +87,7 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
   }
   function refresh() {
     if (selecting) return;
-    const next=findPromptQueryRange(input.value,input.selectionStart,input.selectionEnd);
+    const next=findPromptQueryRange(input.value,input.selectionStart,input.selectionEnd,getReferenceRanges(input.value));
     if (composing || document.activeElement !== input || !isEnabled() || !next || identity(next) === dismissed) { close(); return; }
     range={...next,value:input.value};
     const available=getCandidates(range);
@@ -119,7 +119,7 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
   }
   function choose(item) {
     if (!range || selecting || isComposing() || item.disabled) return false;
-    const current=findPromptQueryRange(input.value,input.selectionStart,input.selectionEnd);
+    const current=findPromptQueryRange(input.value,input.selectionStart,input.selectionEnd,getReferenceRanges(input.value));
     if (!current || identity(current) !== identity(range) || !isEnabled()) { close(); return false; }
     const note=input.value, start=input.selectionStart, end=input.selectionEnd;
     selecting=true;
@@ -158,13 +158,19 @@ export function createPromptMentions({input,menu,list,status,getCandidates,onSel
     }
     return true;
   }
-  input.addEventListener('input',() => { dismissed=null; refresh(); });
+  function resumePreviewQuery() {
+    if(previewDismissed && dismissed===previewDismissed) {dismissed=null;previewDismissed=null;}
+  }
+  input.addEventListener('input',() => { dismissed=null;previewDismissed=null;refresh(); });
+  for(const event of ['click','focus'])input.addEventListener(event,resumePreviewQuery);
+  input.addEventListener('keydown',event=>{if(['ArrowUp','ArrowDown','Enter'].includes(event.key) && !isComposing(event))resumePreviewQuery();});
   for (const event of ['click','keyup','select','focus']) input.addEventListener(event,refresh);
   input.addEventListener('blur',() => { if (!menu.contains(document.activeElement)) close(); });
   input.addEventListener('compositionstart',() => { composing=true; close(); });
   input.addEventListener('compositionend',() => { composing=false; dismissed=null; setTimeout(refresh,0); });
   input.addEventListener('scroll',position);
   document.addEventListener('pointerdown',(event) => { if (event.target !== input && !menu.contains(event.target)) close({dismiss:true}); });
+  document.addEventListener('chat-preview-compact',()=>{close({dismiss:true});previewDismissed=dismissed;});
   window.addEventListener('resize',position);
   window.visualViewport?.addEventListener('resize',position);
   window.visualViewport?.addEventListener('scroll',position);

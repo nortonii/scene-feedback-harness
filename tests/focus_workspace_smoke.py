@@ -531,8 +531,12 @@ def verify_eraser(page, screenshots):
             page.locator(scene).dispatch_event("pointercancel", {"pointerId": 1})
         page.mouse.up()
         assert draft(page)["annotations"] == original["annotations"]
-    control(page, "#reference-zoom-in").click()
-    control(page, "#reference-zoom-in").click()
+    zoom_stage = page.locator("#reference-stage").bounding_box()
+    page.mouse.move(zoom_stage["x"] + zoom_stage["width"] / 2,
+                    zoom_stage["y"] + zoom_stage["height"] / 2)
+    page.mouse.wheel(0, -120)
+    page.mouse.wheel(0, -120)
+    page.wait_for_function("window.__referenceCheck.state.referenceZoom > 1.3")
     choose_tool(page, "erase", "reference")
     page.mouse.click(*position("#reference-annotations", .5, .5))
     expect(page.locator("#annotation-count")).to_have_text("3")
@@ -551,7 +555,14 @@ def verify_eraser(page, screenshots):
     expect(page.locator("#annotation-count")).to_have_text("3")
     expect(page.locator(".snapshot-card:not([data-kind=live]) .snapshot-open")).to_have_count(2)
     assert draft(page)["snapshot"] == first
-    control(page, "#reference-zoom-reset").click()
+    zoom_stage = page.locator("#reference-stage").bounding_box()
+    page.mouse.move(zoom_stage["x"] + zoom_stage["width"] / 2,
+                    zoom_stage["y"] + zoom_stage["height"] / 2)
+    for _ in range(3):
+        if page.evaluate("window.__referenceCheck.state.referenceZoom") <= 1 + 1e-8:
+            break
+        page.mouse.wheel(0, 120)
+    page.wait_for_function("window.__referenceCheck.state.referenceZoom === 1")
     control(page, "#clear-round").click()
     control(page, "#confirm-clear-annotations").click()
     control(page, "#scene-live-card").click()

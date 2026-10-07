@@ -1,7 +1,7 @@
 import {actionIcon} from './action-icons.js';
 
 // The live scene leads the collection; saved evidence keeps its creation order.
-export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabled:false}), getTimeline, onLive=()=>{}, onOpen, onRemove, resourceURL}) {
+export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabled:false}), getTimeline, onLive=()=>{}, onOpen, onTime=()=>{}, onRemove, resourceURL}) {
   const strip=document.getElementById('scene-snapshot-strip');
   const gallery=document.getElementById('scene-snapshots'),footer=document.querySelector('.scene-pane-footer');
   function placeGallery() {
@@ -87,7 +87,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
     const next=JSON.stringify(cards.map(({id,title,name,detail,count,active,disabled,cover,live})=>[id,title,name,detail,count,active,disabled,live ? null : cover?.slice(0,80),live ? null : cover?.length]));
     if(next!==signature) {
       signature=next;hide();
-      const focused=document.activeElement?.closest('.snapshot-card');const focusedId=focused?.dataset.galleryKey, wasRemove=document.activeElement?.classList.contains('snapshot-remove');
+      const focused=document.activeElement?.closest('.snapshot-card');const focusedId=focused?.dataset.galleryKey, wasRemove=document.activeElement?.classList.contains('snapshot-remove'), wasTime=document.activeElement?.classList.contains('snapshot-time-reference');
       const focusedIndex=[...strip.children].indexOf(focused);
       const scroll=strip.scrollLeft;cardSizes.disconnect();strip.replaceChildren();
       for(const item of cards) {
@@ -105,9 +105,19 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
         if(item.dynamic) {const badge=el('span',null,'snapshot-video-icon');badge.append(actionIcon('play'));thumb.append(badge);}
         if(item.count) thumb.append(el('span',String(item.count),'snapshot-mark-count'));
         const meta=el('span',null,'snapshot-card-meta');
-        meta.append(el('strong',item.name,'snapshot-name'),el('small',item.detail || (item.dynamic?'视频保留时刻':'固定视角'),'snapshot-source'));
+        meta.append(el('strong',item.name,'snapshot-name'),el('small',item.dynamic ? '\u00a0' : item.detail || '固定视角',item.dynamic ? 'snapshot-time-space' : 'snapshot-source'));
         open.append(thumb,meta);
         open.addEventListener('click',()=>{hide();if(item.live) onLive();else onOpen(item.id);});card.append(open);
+        if(item.dynamic) {
+          // A separate button survives both clicks of a double click. Quoting
+          // its stored time never opens the snapshot or seeks another view.
+          const time=el('button',item.detail,'snapshot-source snapshot-time-reference');time.type='button';
+          time.dataset.snapshotId=item.id;time.disabled=item.disabled;
+          time.title='双击或按 Enter / 空格引用'+item.name+'的时间';time.setAttribute('aria-label',time.title+' · '+item.detail);
+          time.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(event.detail===0){hide();onTime(item.id);}});
+          time.addEventListener('dblclick',event=>{event.preventDefault();event.stopPropagation();hide();onTime(item.id);});
+          card.append(time);
+        }
         if(!item.live) {
           const remove=el('button','×','snapshot-remove');remove.type='button';remove.disabled=item.disabled;remove.title='删除'+item.name+'及其标记，可撤销';remove.setAttribute('aria-label',remove.title);
           remove.addEventListener('click',()=>{hide();onRemove(item.id);});card.append(remove);
@@ -117,7 +127,7 @@ export function setupSnapshotGallery({getItems, getLive=()=>({active:true,disabl
       strip.scrollLeft=scroll;
       if(focusedId) {
         const card=[...strip.children].find(card=>card.dataset.galleryKey===focusedId) || strip.children[Math.max(0,Math.min(focusedIndex,strip.children.length-1))];
-        (wasRemove && card?.querySelector('.snapshot-remove') || card?.querySelector('.snapshot-open'))?.focus({preventScroll:true});
+        (wasRemove && card?.querySelector('.snapshot-remove') || wasTime && card?.querySelector('.snapshot-time-reference') || card?.querySelector('.snapshot-open'))?.focus({preventScroll:true});
       }
     }
     if(activeChanged && nextActive) requestAnimationFrame(()=>{

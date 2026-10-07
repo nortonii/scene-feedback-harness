@@ -123,7 +123,7 @@ export function setupChatPanelSizing({getState,animateChange,beforeResize,before
   window.addEventListener('resize',()=>{beforeViewportResize?.();apply();});
   window.visualViewport?.addEventListener('resize',()=>{beforeViewportResize?.();apply();});
   setOpen(false);apply();
-  return {finishResize,fit:apply,refresh(){
+  return {finishResize,fit:apply,get opened(){return opened;},refresh(){
     const current=getState()?.sessionId;if(!current || current===sessionId)return;
     finishResize();sessionId=current;noteHeight=44;evidenceHeight=180;opened=false;
     try {

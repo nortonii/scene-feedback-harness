@@ -361,7 +361,7 @@ class MCPEvents:
     def list_events(self) -> dict[str, Any]:
         return {"events": [{
             "name": EVENT_NAME,
-            "description": "A user submitted annotated visual feedback for this reconstruction session. The full immutable packet, including images, is available through workspace_get_feedback.",
+            "description": "A user submitted visual feedback. Read relevant images with workspace_get_feedback; set include_details=true for full archived fields.",
             "delivery": ["webhook"],
             "inputSchema": {"type": "object", "properties": {"session_id": {"type": "string", "pattern": "^[0-9a-f]{32}$", "description": "Current visual workbench session ID."}}, "required": ["session_id"], "additionalProperties": False},
             "payloadSchema": {"type": "object", "properties": {

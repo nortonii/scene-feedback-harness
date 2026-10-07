@@ -130,21 +130,21 @@ class DynamicSceneTests(unittest.TestCase):
         self.assertEqual(feedback["annotations"][0]["frame_index"], 0)
         self.assertFalse(any(key.endswith("_data_url") for key in evidence))
         message, paths = self.gateway._turn_input(feedback)
-        self.assertEqual(len(paths), 4)
-        self.assertIn('"time_sec": 0.0', message)
-        self.assertIn('"frame_index": 0', message)
+        direct_source = json.loads(message.splitlines()[2].removeprefix("证据："))["dynamic_frames"][0]
+        self.assertEqual((direct_source["time_sec"], direct_source["frame_index"]), (0.0, 0))
         self.assertIn("start_sec", message)
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
-            tool_result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
-        self.assertEqual(sum(item.type == "image" for item in tool_result.content), 4)
+            tool_result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]}, include_details=True)
+        self.assertEqual(sum(item.type == "image" for item in tool_result.content), len(paths))
         self.assertIn("camera", tool_result.structured_content["items"][0]["dynamic_frames"][0])
         summarized = json.loads(tool_result.content[0].text)["items"][0]
         source = summarized["dynamic_frames"][0]
         self.assertEqual((source["frame_index"], source["time_sec"], source["reference_frame_id"]),
                          (0, 0.0, evidence["reference_frame_id"]))
-        self.assertEqual(summarized["cameras"][source["reference_camera"]]["intrinsics"],
+        self.assertEqual(source["reference_camera"]["archive"], "dynamic_frames[0].reference_camera")
+        self.assertEqual(tool_result.structured_content["items"][0]["dynamic_frames"][0]["reference_camera"]["intrinsics"],
                          evidence["reference_camera"]["intrinsics"])
-        self.assertTrue(any(item.type == "text" and item.text == "F1 · reference original" for item in tool_result.content))
+        self.assertTrue(any(item.type == "text" and "F1 · 参考原帧" in item.text for item in tool_result.content))
         # Replays are resolved before clip validation and remain exactly-once after replacement.
         self.store.set_reference_clip(self.session, {"clear": True})
         replay = self.store.submit_feedback(self.session, payload)
@@ -167,20 +167,19 @@ class DynamicSceneTests(unittest.TestCase):
                 self.assertEqual(feedback["timeline"]["time_sec"], 0)
                 self.assertEqual(feedback["dynamic_frames"][0]["time_sec"], 0)
                 message, paths = self.gateway._turn_input(feedback)
-                self.assertIn("动态截图采集时间，修改时段以用户提示为准", message)
+                direct_timeline = json.loads(message.splitlines()[2].removeprefix("证据："))["timeline"]
+                self.assertNotIn("scope", direct_timeline)
                 self.assertIn(payload["note"], message)
-                self.assertNotIn("动态反馈时间轴与适用范围", message)
-                self.assertNotIn("区间范围表示", message)
-                self.assertEqual(len(paths), 4 if clip else 2)
+                self.assertIn("修改时段以提示为准", message)
                 with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
-                    result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
+                    result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]}, include_details=True)
                 delivered = result.structured_content["items"][0]
                 self.assertEqual(delivered["timeline"], feedback["timeline"])
                 self.assertEqual(delivered["note"], feedback["note"])
                 self.assertEqual(delivered["dynamic_frames"][0]["camera"], feedback["dynamic_frames"][0]["camera"])
                 self.assertEqual(sum(item.type == "image" for item in result.content), len(paths))
                 texts = [item.text for item in result.content if item.type == "text"]
-                self.assertTrue(any("modification times from the user's prompt text" in text for text in texts))
+                self.assertTrue(any("modification times follow the prompt" in text for text in texts))
                 self.assertNotIn("scope", json.loads(texts[0])["items"][0]["timeline"])
                 persisted = SceneStore(self.store.data_dir).feedback_by_id(feedback["feedback_id"])
                 self.assertEqual(persisted, feedback)
@@ -195,13 +194,10 @@ class DynamicSceneTests(unittest.TestCase):
                 feedback = self.store.submit_feedback(self.session, payload)
                 self.assertEqual(feedback["timeline"]["scope"], scope)
                 message, _ = self.gateway._turn_input(feedback)
-                self.assertIn("动态反馈时间轴与适用范围", message)
-                self.assertIn("区间范围表示用户提示的适用时间", message)
-                self.assertNotIn("动态截图采集时间，修改时段以用户提示为准", message)
+                self.assertEqual(json.loads(message.splitlines()[2].removeprefix("证据："))["timeline"]["scope"], scope)
                 with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
                     result = mcp_server._visual_tool_result({"items": [copy.deepcopy(feedback)]})
                 self.assertEqual(result.structured_content["items"][0]["timeline"]["scope"], scope)
-                self.assertFalse(any("modification times from the user's prompt text" in item.text for item in result.content if item.type == "text"))
                 saved.append(feedback)
         state_bytes = self.store.state_path.read_bytes()
         reloaded = SceneStore(self.store.data_dir)
@@ -245,8 +241,8 @@ class DynamicSceneTests(unittest.TestCase):
         self.assertEqual(saved["inline_references"][0]["annotation"]["frame_index"], 2)
         self.assertEqual(payload, original_payload)
         message, _ = self.gateway._turn_input(saved)
-        self.assertIn('"frame_index": 2', message)
-        self.assertIn('"time_sec": 4.8', message)
+        source_in_prompt = json.loads(message.splitlines()[2].removeprefix("证据："))["dynamic_frames"][0]
+        self.assertEqual((source_in_prompt["frame_index"], source_in_prompt["time_sec"]), (2, 4.8))
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
             result = mcp_server._visual_tool_result({"items": [copy.deepcopy(saved)]})
         source = json.loads(result.content[0].text)["items"][0]["dynamic_frames"][0]

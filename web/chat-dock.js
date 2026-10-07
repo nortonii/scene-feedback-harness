@@ -11,7 +11,7 @@ export function setupChatDock({getState}) {
   const resizeHandle = byId('chat-resize-handle');
   let sessionId = null;
   let collapsed = false;
-  let historyCollapsed = false;
+  let historyCollapsed = true;
   let followingLatest = true;
   let savedScrollTop = 0;
   let unread = 0;
@@ -23,10 +23,12 @@ export function setupChatDock({getState}) {
   let lastHeightBounds = {min:1, max:window.innerHeight};
   let launcherStatus = '';
   let sectionMotion=null,panelSizing=null;
+  let compact=true,previewAnimation=null,previewCloseTimer=null,dropActive=false,dropDepth=0,previewRevealTarget=null;
+  let mousePoint=null,inputMode='mouse',pointerPress=false,composing=false,editUntil=0,editTimer=null;
   const visibilityTransitions = new Map();
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
 
-  const historyVisible = () => !!dock && !collapsed && !historyCollapsed;
+  const historyVisible = () => !!dock && !collapsed && !compact && !historyCollapsed;
   const atLatest = () => !conversation ||
     conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 32;
   const storageKey = () => 'astra-visual-layout:' + sessionId;
@@ -40,6 +42,91 @@ export function setupChatDock({getState}) {
 
   const positionLayout = () => document.documentElement.dataset.layout === 'immersive' ? 'immersive' : 'compare';
   const customPosition = () => dockPositions[positionLayout()];
+  const popupNodes = () => [byId('prompt-attach-menu'),byId('prompt-mentions')].filter(Boolean);
+  const editable = element => !!element?.matches('input,textarea,select,[contenteditable=true]');
+  const popupVisible = element => !element.hidden && !element.inert && !element.classList.contains('hidden');
+  const mouseWithin = element => !!mousePoint && element.contains(document.elementFromPoint(mousePoint.x,mousePoint.y));
+  function previewHeld() {
+    const active=document.activeElement;
+    const state=getState() || {};
+    const pending=(state.approvals || []).length || (state.queue || []).some(item =>
+      ['blocked_stale','delivery_uncertain'].includes(item.status) || item.status==='failed' && !item.turn_id);
+    const surfaces=[dock,...popupNodes().filter(popupVisible)];
+    const focusWithin=surfaces.some(element=>element.contains(active));
+    const focusHeld=document.hasFocus() && focusWithin && (inputMode==='keyboard' || inputMode==='touch' && editable(active));
+    const editing=focusWithin && editable(active) && (composing || performance.now()<editUntil);
+    return surfaces.some(mouseWithin) || focusHeld || editing || pointerPress ||
+      popupNodes().some(element=>popupVisible(element) && element.getAttribute('aria-busy')==='true') ||
+      !!document.querySelector('dialog[open], .prompt-reference-popover:not([hidden])') || pending || state.agent?.status==='awaiting_approval' ||
+      moveDrag || resizeDrag || dock.classList.contains('panel-resizing') || dropActive;
+  }
+  function renderPreview() {
+    dock.classList.toggle('is-compact',compact);dock.classList.toggle('is-expanded',!compact);
+    const historyHidden=historyCollapsed || compact;
+    history.inert=historyHidden;history.setAttribute('aria-hidden',String(historyHidden));
+    historyToggle.setAttribute('aria-expanded',String(!historyHidden));
+    const evidence=byId('feedback-evidence'),toggle=byId('feedback-evidence-summary');
+    const evidenceHidden=compact || !(panelSizing?.opened ?? !evidence.classList.contains('hidden'));
+    evidence.inert=evidenceHidden;evidence.setAttribute('aria-hidden',String(evidenceHidden));
+    const wasOpen=toggle.getAttribute('aria-expanded')==='true';
+    toggle.setAttribute('aria-expanded',String(!evidenceHidden));
+    toggle.title=evidenceHidden?'展开本次反馈':'收起本次反馈';
+    if(!evidenceHidden && !wasOpen)evidence.dispatchEvent(new CustomEvent('evidence-visibility',{detail:{open:true}}));
+    const canResize=!compact && !collapsed && !historyCollapsed;
+    resizeHandle.classList.toggle('hidden',!canResize);resizeHandle.tabIndex=canResize?0:-1;
+    resizeHandle.setAttribute('aria-disabled',String(!canResize));
+    updateCounts();
+  }
+  function finishPreview() {
+    previewAnimation?.cancel();previewAnimation=null;
+    dock.classList.remove('preview-animating','preview-measuring');
+  }
+  function foldHistory() {
+    // Each new preview shows the composer. History is opened explicitly.
+    historyCollapsed=true;
+    history.classList.add('hidden');dock.classList.add('history-collapsed');
+  }
+  function setCompact(value,{animate=true}={}) {
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;
+    if(value===compact) {if(!animate) {finishPreview();applyHeight();}return;}
+    rememberScroll();
+    const before=dock.getBoundingClientRect(),beforeMax=getComputedStyle(dock).maxHeight;
+    finishPreview();sectionMotion?.finish();
+    dock.classList.add('preview-measuring');
+    if(value)foldHistory();
+    compact=value;renderPreview();
+    if(compact)document.dispatchEvent(new CustomEvent('chat-preview-compact'));
+    if(!compact)panelSizing?.fit({notify:false});
+    applyHeight({restoreScroll:false});applyPosition();
+    const after=dock.getBoundingClientRect(),afterMax=getComputedStyle(dock).maxHeight;
+    dock.classList.remove('preview-measuring');
+    if(!animate || collapsed || reducedMotion.matches || !before.width || !dock.animate) {
+      if(!compact)restoreHistoryScroll();return;
+    }
+    const from={width:before.width+'px',height:before.height+'px',maxHeight:beforeMax};
+    const to={width:after.width+'px',height:after.height+'px',maxHeight:afterMax};
+    if(customPosition()) {Object.assign(from,{left:before.left+'px',top:before.top+'px'});Object.assign(to,{left:after.left+'px',top:after.top+'px'});}
+    dock.classList.add('preview-animating');
+    const animation=dock.animate([from,to],{duration:320,easing:'cubic-bezier(.22,.68,.2,1)',fill:'both'});
+    previewAnimation=animation;
+    animation.finished.then(()=>{
+      if(previewAnimation!==animation)return;
+      finishPreview();applyPosition();if(!compact){panelSizing?.fit({notify:false});applyHeight();restoreHistoryScroll();}
+    }).catch(()=>{});
+  }
+  function scheduleCompact() {
+    if(compact || collapsed || previewCloseTimer!==null)return;
+    previewCloseTimer=setTimeout(()=>{
+      previewCloseTimer=null;
+      if(!previewHeld())setCompact(true);
+    },260);
+  }
+  function expandPreview({animate=true}={}) {setCompact(false,{animate});}
+  function editingActivity() {
+    editUntil=performance.now()+900;
+    clearTimeout(editTimer);editTimer=setTimeout(()=>{editTimer=null;scheduleCompact();},900);
+    expandPreview();scheduleCompact();
+  }
   function viewportBounds() {
     const viewport=window.visualViewport;
     const left=viewport?.offsetLeft || 0,top=viewport?.offsetTop || 0;
@@ -77,9 +164,10 @@ export function setupChatDock({getState}) {
       dockPositions[layout]={left:Math.round(rect.left),top:Math.round(rect.top)};
     }
     if(moveHandle.hasPointerCapture(pointerId)) moveHandle.releasePointerCapture(pointerId);
-    applyPosition();scheduleHeightUpdate();persist();
+    applyPosition();scheduleHeightUpdate();persist();scheduleCompact();
   }
   function settleForMove() {
+    expandPreview({animate:false});
     sectionMotion?.finish();panelSizing?.finishResize();finishResize();
     if ([dock,launcher].some(element=>visibilityTransitions.get(element)?.animation)) applyLayout();
   }
@@ -107,7 +195,7 @@ export function setupChatDock({getState}) {
       launcher.classList.toggle('has-unread', !!unread);
     }
     if (historyToggle) {
-      const label = historyCollapsed ? '展开记录' : '收起记录';
+      const label = compact ? '记录' : historyCollapsed ? '展开记录' : '收起记录';
       const text = historyToggle.querySelector('[data-chat-history-label]');
       if (text) text.textContent = label;
       historyToggle.setAttribute('aria-label', label + (unread ? '，' + unread + ' 条新消息' : ''));
@@ -176,11 +264,11 @@ export function setupChatDock({getState}) {
   }
 
   function applyHeight({restoreScroll=true}={}) {
-    if (!dock || sectionMotion?.active) return;
+    if (!dock || sectionMotion?.active || previewAnimation) return;
     applyPosition();
     dock.classList.toggle('is-resized', dockHeight !== null);
     if (dockHeight === null) dock.style.removeProperty('--chat-height');
-    if (collapsed) return;
+    if (collapsed || compact) return;
     const bounds = heightBounds();
     if (dockHeight !== null) {
       // Viewport limits are temporary. Keep the user's preferred height so it
@@ -197,9 +285,9 @@ export function setupChatDock({getState}) {
     if (resizeFrame) return;
     resizeFrame = requestAnimationFrame(() => {
       resizeFrame = 0;
-      if(sectionMotion?.active) return;
+      if(sectionMotion?.active || previewAnimation) return;
       applyPosition();
-      panelSizing?.fit({notify:false});
+      if(!compact)panelSizing?.fit({notify:false});
       applyHeight();
     });
   }
@@ -220,7 +308,7 @@ export function setupChatDock({getState}) {
     resizeDrag = null;
     dock?.classList.remove('resizing');
     if (resizeHandle?.hasPointerCapture(pointerId)) resizeHandle.releasePointerCapture(pointerId);
-    persist();
+    persist();scheduleCompact();
   }
 
   function launcherBounds() {
@@ -302,11 +390,12 @@ export function setupChatDock({getState}) {
   }
 
   function applyLayout({animate=false}={}) {
+    finishPreview();
     launcher?.setAttribute('aria-expanded', String(!collapsed));
     byId('chat-collapse')?.setAttribute('aria-expanded', String(!collapsed));
     history?.classList.toggle('hidden', historyCollapsed);
-    if(history){history.inert=historyCollapsed;history.setAttribute('aria-hidden',String(historyCollapsed));}
-    historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed));
+    if(history){history.inert=historyCollapsed || compact;history.setAttribute('aria-hidden',String(historyCollapsed || compact));}
+    historyToggle?.setAttribute('aria-expanded', String(!historyCollapsed && !compact));
     dock?.classList.toggle('history-collapsed', historyCollapsed);
     if (resizeHandle) {
       const enabled = historyVisible();
@@ -317,7 +406,8 @@ export function setupChatDock({getState}) {
     const hidden = dock?.classList.contains('hidden');
     if (!collapsed) dock?.classList.remove('hidden');
     applyPosition();
-    panelSizing?.fit();
+    if(!compact)panelSizing?.fit();
+    renderPreview();
     applyHeight({restoreScroll:false});
     if (hidden) dock?.classList.add('hidden');
     updateCounts();
@@ -334,6 +424,8 @@ export function setupChatDock({getState}) {
   }
 
   function open({focus=false, approval=false}={}) {
+    if(collapsed)foldHistory();
+    expandPreview({animate:false});
     if (collapsed) {
       collapsed = false;
       applyLayout({animate:true});
@@ -355,11 +447,14 @@ export function setupChatDock({getState}) {
   function refresh() {
     const state = getState() || {};
     if (state.sessionId && state.sessionId !== sessionId) {
+      clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
+      clearTimeout(editTimer);editTimer=null;editUntil=0;composing=false;pointerPress=false;
       finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();
+      foldHistory();compact=true;renderPreview();
       sessionId = state.sessionId;
       panelSizing?.refresh();
       collapsed = false;
-      historyCollapsed = false;
+      historyCollapsed = true;
       followingLatest = true;
       savedScrollTop = 0;
       unread = 0;
@@ -369,7 +464,6 @@ export function setupChatDock({getState}) {
       try {
         const stored = JSON.parse(localStorage.getItem(storageKey()) || 'null');
         collapsed = stored?.collapsed === true;
-        historyCollapsed = stored?.historyCollapsed === true;
         if (Number.isFinite(stored?.dockHeight) && stored.dockHeight > 0) dockHeight = stored.dockHeight;
         for(const layout of ['compare','immersive']) {
           const position=stored?.dockPositions?.[layout];
@@ -419,14 +513,16 @@ export function setupChatDock({getState}) {
       launcher.setAttribute('aria-busy', String(running));
       launcher.title = label + (unread ? ' · ' + unread + ' 条新消息' : '');
     }
-    updateCounts();
+    if(waitingForApproval)expandPreview();
+    else if(!previewHeld())scheduleCompact();
+    renderPreview();
   }
 
-  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{applyHeight();restoreHistoryScroll();scheduleHeightUpdate();}});
+  sectionMotion=createChatSectionMotion({dock,panels:[history,byId('feedback-evidence')],onFinish:()=>{renderPreview();applyHeight();restoreHistoryScroll();scheduleHeightUpdate();}});
   panelSizing=setupChatPanelSizing({getState,animateChange:change=>{
-    finishMove();finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
-  },beforeResize:()=>{finishMove();sectionMotion.finish();finishResize();rememberScroll();},
-  beforeViewportResize:()=>{finishMove({cancel:true});sectionMotion.finish();finishResize();rememberScroll();},
+    expandPreview({animate:false});finishMove();finishResize();rememberScroll();sectionMotion.run(()=>{change();applyHeight({restoreScroll:false});});
+  },beforeResize:()=>{expandPreview({animate:false});finishMove();sectionMotion.finish();finishResize();rememberScroll();},
+  beforeViewportResize:()=>{finishPreview();finishMove({cancel:true});sectionMotion.finish();finishResize();rememberScroll();},
   onResize:scheduleHeightUpdate});
 
   moveHandle?.addEventListener('pointerdown',event=>{
@@ -477,7 +573,7 @@ export function setupChatDock({getState}) {
   resizeHandle?.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.isPrimary === false || resizeDrag || !historyVisible()) return;
     event.preventDefault(); event.stopPropagation();
-    finishMove();sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
+    expandPreview({animate:false});finishMove();sectionMotion?.finish();panelSizing?.finishResize();rememberScroll();
     resizeHandle.focus({preventScroll:true});
     const rect=dock.getBoundingClientRect();
     resizeDrag = {pointerId:event.pointerId, y:event.clientY, height:rect.height,bottom:rect.bottom};
@@ -513,7 +609,7 @@ export function setupChatDock({getState}) {
     if (!historyVisible() || event.isComposing || !['ArrowUp', 'ArrowDown', 'Home', 'End', 'Escape'].includes(event.key)) return;
     if (event.key === 'Escape') { finishResize(); return; }
     event.preventDefault(); event.stopPropagation();
-    sectionMotion?.finish();panelSizing?.finishResize();
+    expandPreview({animate:false});sectionMotion?.finish();panelSizing?.finishResize();
     const bounds = heightBounds();
     const step = event.shiftKey ? 64 : 24;
     const next = event.key === 'Home' ? bounds.min : event.key === 'End' ? bounds.max
@@ -526,18 +622,20 @@ export function setupChatDock({getState}) {
     if (reducedMotion.matches) applyLayout();
   });
   function resizeViewport() {
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
     finishMove({cancel:true});
     sectionMotion?.finish();
     // A viewport change invalidates the launcher-to-panel path. Settle at the
     // requested state before fitting the new screen instead of drifting outside it.
     if ([dock, launcher].some(element => visibilityTransitions.get(element)?.animation)) applyLayout();
-    scheduleHeightUpdate();
+    scheduleHeightUpdate();scheduleCompact();
   }
   window.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('resize', resizeViewport);
   window.visualViewport?.addEventListener('scroll', scheduleHeightUpdate);
   new MutationObserver(()=>{
-    finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();applyLayout();
+    clearTimeout(previewCloseTimer);previewCloseTimer=null;finishPreview();
+    finishMove({cancel:true});sectionMotion?.finish();panelSizing?.finishResize();finishResize();applyLayout();scheduleCompact();
   }).observe(document.documentElement,{attributes:true,attributeFilter:['data-layout']});
   if (typeof ResizeObserver === 'function') {
     const observer = new ResizeObserver(scheduleHeightUpdate);
@@ -560,7 +658,7 @@ export function setupChatDock({getState}) {
     document.dispatchEvent(new CustomEvent('workspace-sidebar-close',{detail:{afterClose:()=>open({approval:true})}}));
   });
   historyToggle?.addEventListener('click', () => {
-    panelSizing?.finishResize();finishResize();
+    expandPreview({animate:false});panelSizing?.finishResize();finishResize();
     rememberScroll();
     sectionMotion.run(()=>{historyCollapsed = !historyCollapsed;applyLayout();});
     persist();
@@ -573,6 +671,60 @@ export function setupChatDock({getState}) {
     if (followingLatest) unread = 0;
     updateCounts();
   });
+  dock.addEventListener('pointerenter',event=>{if(event.pointerType==='mouse'){mousePoint={x:event.clientX,y:event.clientY};expandPreview();}});
+  dock.addEventListener('pointerleave',event=>{if(event.pointerType==='mouse'){mousePoint={x:event.clientX,y:event.clientY};scheduleCompact();}});
+  dock.addEventListener('focusin',()=>{expandPreview();scheduleCompact();});
+  dock.addEventListener('focusout',scheduleCompact);
+  for(const name of ['beforeinput','input'])dock.addEventListener(name,event=>{if(editable(event.target))editingActivity();});
+  dock.addEventListener('compositionstart',()=>{composing=true;expandPreview();});
+  dock.addEventListener('compositionend',()=>{composing=false;editingActivity();});
+  dock.addEventListener('pointerdown',event=>{
+    previewRevealTarget=null;
+    if(event.pointerType==='mouse')return;
+    if(compact) {
+      if(event.target.closest('#feedback-evidence-summary') && panelSizing.opened)previewRevealTarget='feedback-evidence-summary';
+    }
+    expandPreview({animate:false});
+  }, {capture:true});
+  dock.addEventListener('click',event=>{
+    const reveal=previewRevealTarget;previewRevealTarget=null;
+    if(reveal && event.target.closest('#'+reveal)){event.preventDefault();event.stopPropagation();}
+  }, {capture:true});
+  dock.addEventListener('dragenter',()=>{dropDepth+=1;dropActive=true;expandPreview();});
+  dock.addEventListener('dragleave',()=>{dropDepth=Math.max(0,dropDepth-1);if(!dropDepth){dropActive=false;scheduleCompact();}});
+  for(const name of ['drop','dragend'])document.addEventListener(name,()=>{dropDepth=0;dropActive=false;scheduleCompact();});
+  window.addEventListener('blur',()=>{mousePoint=null;pointerPress=false;composing=false;editUntil=0;dropDepth=0;dropActive=false;scheduleCompact();});
+  for(const popup of popupNodes()) {
+    popup.addEventListener('pointerenter',event=>{if(event.pointerType==='mouse')mousePoint={x:event.clientX,y:event.clientY};expandPreview();});
+    popup.addEventListener('pointerleave',scheduleCompact);popup.addEventListener('focusout',scheduleCompact);
+    new MutationObserver(()=>{if(!previewHeld())scheduleCompact();}).observe(popup,{attributes:true,attributeFilter:['hidden','inert','class','aria-busy']});
+  }
+  document.addEventListener('focusin',()=>{if(!previewHeld())scheduleCompact();});
+  document.addEventListener('pointermove',event=>{
+    if(event.pointerType!=='mouse')return;
+    if(!event.buttons)pointerPress=false;
+    mousePoint={x:event.clientX,y:event.clientY};inputMode='mouse';
+    if(mouseWithin(dock) || popupNodes().some(element=>popupVisible(element) && mouseWithin(element)))expandPreview();
+    else scheduleCompact();
+  }, {capture:true});
+  document.addEventListener('pointerdown',event=>{
+    inputMode=event.pointerType==='mouse'?'mouse':'touch';
+    mousePoint=inputMode==='mouse'?{x:event.clientX,y:event.clientY}:null;
+    pointerPress=dock.contains(event.target) || popupNodes().some(element=>element.contains(event.target));
+    if(!pointerPress)scheduleCompact();
+  }, {capture:true});
+  for(const name of ['pointerup','pointercancel'])document.addEventListener(name,()=>{pointerPress=false;scheduleCompact();}, {capture:true});
+  document.documentElement.addEventListener('pointerleave',event=>{if(event.pointerType==='mouse'){mousePoint=null;scheduleCompact();}});
+  document.addEventListener('keydown',event=>{
+    if(event.key==='Tab')inputMode='keyboard';
+    if(['ArrowUp','ArrowDown','Home','End','Enter',' '].includes(event.key) && popupNodes().some(element=>popupVisible(element) && element.contains(event.target))) {
+      inputMode='keyboard';expandPreview();
+    }
+    if(dock.contains(event.target) && editable(event.target) && !['Tab','Escape','Shift','Control','Alt','Meta'].includes(event.key))editingActivity();
+  }, {capture:true});
+  document.addEventListener('selectionchange',()=>{if(!previewHeld())scheduleCompact();});
+  for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('close',scheduleCompact);
+  renderPreview();
   applyLayout();
 
   return {

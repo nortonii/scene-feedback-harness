@@ -23,11 +23,12 @@ NEW = "01a0de73-9763-7432-8ca4-5892c0904234"
 
 
 class TargetAdapter:
-    def __init__(self, thread_id: str, on_event=None, *, thread_config=None, allow_owned_resume=False, permission_mode=None):
+    def __init__(self, thread_id: str, on_event=None, *, thread_config=None, allow_owned_resume=False, allow_bound_resume=False, permission_mode=None):
         self.thread_id = thread_id
         self.on_event = on_event
         self.thread_config = thread_config
         self.allow_owned_resume = allow_owned_resume
+        self.allow_bound_resume = allow_bound_resume
         self.permission_mode = permission_mode
         self.connected = False
         self.sent: list[str] = []
@@ -105,10 +106,12 @@ class TargetSwitchTests(unittest.TestCase):
                         workspace["created_thread_specs"] = {NEW: {"permission_mode": mode}, OLD: {"permission_mode": "full_access"}}
                     self.gateway.switch_target(NEW)
                     self.assertTrue(self.gateway.adapter.allow_owned_resume)
+                    self.assertFalse(self.gateway.adapter.allow_bound_resume)
                     self.assertEqual(self.gateway.adapter.permission_mode, mode)
                     self.assertEqual(self.gateway.adapter.thread_config, config)
                     self.gateway.switch_target(OLD)
                     self.assertFalse(self.gateway.adapter.allow_owned_resume)
+                    self.assertTrue(self.gateway.adapter.allow_bound_resume)
                     self.assertIsNone(self.gateway.adapter.permission_mode)
                     self.assertEqual(self.gateway.adapter.thread_config, config)
 
@@ -254,6 +257,8 @@ class TargetSwitchTests(unittest.TestCase):
             server = make_server(port=0, data_dir=self.root / "data", project_dir=self.project, external_review=True, shared_thread_id=OLD)
         try:
             self.assertEqual(server.workspace_gateway.adapter.thread_id, NEW)
+            self.assertTrue(server.workspace_gateway.adapter.allow_bound_resume)
+            self.assertFalse(server.workspace_gateway.adapter.allow_owned_resume)
             self.assertEqual(server.workspace_gateway.state()["thread_id"], NEW)
         finally:
             server.server_close()

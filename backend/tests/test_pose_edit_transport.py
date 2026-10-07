@@ -84,16 +84,19 @@ class PoseEditTransportTests(unittest.TestCase):
         text, paths = self.gateway._turn_input(feedback)
         item = feedback["human_pose_edits"][0]
         self.assertIn(item["corrections_path"], text)
-        self.assertIn("manual_visibility=visible", text)
+        self.assertIn('"visibility":"visible"', text)
         self.assertIn("parent_evidence_kind", text)
-        self.assertEqual(len(paths), 3)  # general reference plus correction original/overlay
+        self.assertEqual(len(paths), 2)  # The relevant correction original and overlay.
         self.assertNotEqual(Path(paths[-1]).read_bytes(), Path(paths[-2]).read_bytes())
 
     def test_mcp_returns_actual_images_and_source_bound_json(self):
         feedback = self.store.submit_feedback(self.session, self.payload)
-        result = _visual_tool_result({"items": [feedback]}, self.store.data_dir)
+        compact = _visual_tool_result({"items": [feedback]}, self.store.data_dir)
+        self.assertNotIn("document", compact.structured_content["items"][0]["human_pose_edits"][0])
+        result = _visual_tool_result({"items": [feedback]}, self.store.data_dir, include_details=True)
         images = [item for item in result.content if item.type == "image"]
-        self.assertEqual(len(images), 3)
+        self.assertEqual(len(images), 2)
+        self.assertEqual(len(images), sum(item.type == "image" for item in compact.content))
         item = result.structured_content["items"][0]["human_pose_edits"][0]
         self.assertEqual(item["document"]["source_snapshot_id"], self.job["source_snapshot_id"])
         self.assertTrue(Path(item["corrections_path"]).is_file())
@@ -106,7 +109,7 @@ class PoseEditTransportTests(unittest.TestCase):
         correction = feedback["human_pose_edits"][0]
         correction_bytes = Path(correction["corrections_path"]).read_bytes()
         text, paths = self.gateway._turn_input(feedback)
-        result = _visual_tool_result({"items": [feedback]}, self.store.data_dir)
+        result = _visual_tool_result({"items": [feedback]}, self.store.data_dir, include_details=True)
         summary = json.loads(result.content[0].text)
         edit = summary["items"][0]["human_pose_edits"][0]
         original_point = original["human_pose_edits"][0]["document"]["frames"][0]["original_keypoints"][92]
@@ -117,7 +120,8 @@ class PoseEditTransportTests(unittest.TestCase):
         for field in ("corrections_path", "parent_result_path", "source_manifest_path", "parent_job_id"):
             self.assertEqual(edit[field], correction[field])
         self.assertEqual(edit["source_snapshot_id"], correction["document"]["source_snapshot_id"])
-        self.assertEqual(edit["frame"]["image_sha256"], self.edit["image_sha256"])
+        self.assertEqual(result.structured_content["items"][0]["human_pose_edits"][0]["frame"]["image_sha256"],
+                         self.edit["image_sha256"])
         self.assertEqual(summary["items"][0]["details"]["state_path"], str(self.store.state_path))
         full_size = len(json.dumps(original, ensure_ascii=False))
         self.assertLess(len(text), full_size * .2)
@@ -149,12 +153,17 @@ class PoseEditTransportTests(unittest.TestCase):
         self.assertFalse(effective["face-0"]["in_frame"])
         text, paths = self.gateway._turn_input(feedback)
         self.assertIn(item["corrections_path"], text)
-        self.assertEqual(len(paths), 3)
+        self.assertEqual(len(paths), 2)
         self.assertTrue(Path(paths[-1]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
         result = _visual_tool_result({"items": [feedback]}, self.store.data_dir)
-        self.assertEqual(len([part for part in result.content if part.type == "image"]), 3)
-        self.assertEqual(result.structured_content["items"][0]["human_pose_edits"][0]["edits"],
-                         payload["pose_edits"][0]["edits"])
+        self.assertEqual(len([part for part in result.content if part.type == "image"]), len(paths))
+        edits = result.structured_content["items"][0]["human_pose_edits"][0]["edits"]
+        self.assertEqual([entry["name"] for entry in edits],
+                         ["left_shoulder", "left_big_toe", "face-0"])
+        self.assertEqual([entry["after"] for entry in edits],
+                         [{"x": .68, "y": .26, "visibility": "visible"},
+                          {"x": .73, "y": .71, "visibility": "visible"},
+                          {"visibility": "missing"}])
 
     def test_bad_source_or_missing_token_cannot_write_partial_feedback(self):
         for change in (lambda p: p["pose_edits"][0].__setitem__("image_sha256", "0" * 64),

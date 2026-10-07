@@ -94,16 +94,17 @@ class MultiViewDynamicTests(unittest.TestCase):
         self.assertNotIn("frames", packet["reference_clip"])
         self.assertNotIn("frames", packet["reference_clip"]["views"][0])
         message, paths = self.gateway._turn_input(packet)
-        self.assertEqual(len(paths), 8)
-        self.assertIn('"view_name": "camera_B"', message)
-        self.assertIn('"reference_time_sec": 0.34', message)
+        evidence = json.loads(message.split('证据：', 1)[1].split('\n附件：', 1)[0])
+        self.assertEqual([source['view_name'] for source in evidence['dynamic_frames']], ['camera_A', 'camera_B'])
+        self.assertEqual([source['reference_time_sec'] for source in evidence['dynamic_frames']], [.5, .34])
+        self.assertEqual(len(paths), 1)  # The fixture intentionally uses identical image bytes.
         with patch.object(mcp_server, "DATA_DIR", self.store.data_dir):
             result = mcp_server._visual_tool_result({"items": [copy.deepcopy(packet)]})
-        self.assertEqual(sum(item.type == "image" for item in result.content), 8)
+        self.assertEqual(sum(item.type == "image" for item in result.content), len(paths))
         sources = json.loads(result.content[0].text)["items"][0]["dynamic_frames"]
         self.assertEqual([source["view_id"] for source in sources], [frame["view_id"] for frame in packet["dynamic_frames"]])
         self.assertEqual([source["reference_time_sec"] for source in sources], [.5, .34])
-        self.assertTrue(any(item.type == "text" and item.text == "F2 · reference original" for item in result.content))
+        self.assertTrue(any(item.type == "text" and 'F2 · 参考原帧' in item.text for item in result.content))
         self.assertEqual(SceneStore(self.store.data_dir).feedback_by_id(packet["feedback_id"]), packet)
 
     def test_cross_view_ids_and_missing_secondary_annotation_identity_are_rejected(self) -> None:

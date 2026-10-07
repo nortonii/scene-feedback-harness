@@ -131,6 +131,17 @@ class GatewayReliabilityTests(unittest.TestCase):
         wait_for(lambda: self.gateway.state()["queue"][0]["status"] == "running")
         self.assertEqual(self.adapter.calls, [packet["feedback_id"]])
 
+    def test_reconnect_updates_changed_error_without_repeating_identical_events(self) -> None:
+        with patch.object(self.adapter, "start", side_effect=ConnectionError("task not loaded")) as start:
+            self.gateway.start()
+            start.side_effect = ConnectionError("restored permissions do not match")
+            self.gateway._supervise_once()
+            self.assertEqual(self.gateway.state()["agent"]["error"], "restored permissions do not match")
+            self.gateway._supervise_once()
+            events = [event for event in self.store.state["workspace"]["events"] if event["type"] == "disconnected"]
+            self.assertEqual(len(events), 2)
+            self.assertEqual(self.adapter.calls, [])
+
     def test_explicit_rejection_requires_manual_retry(self) -> None:
         self.adapter.reject_next = True
         self.gateway.start()
@@ -142,6 +153,28 @@ class GatewayReliabilityTests(unittest.TestCase):
         self.gateway.confirm_queue(packet["feedback_id"], {"retry_failed": True})
         wait_for(lambda: self.gateway.state()["queue"][0]["status"] == "running")
         self.assertEqual(self.adapter.calls, [packet["feedback_id"], packet["feedback_id"]])
+
+    def test_approval_arriving_before_start_response_keeps_waiting_status(self) -> None:
+        start_turn = self.adapter.start_turn
+
+        def immediate_approval(*args, **kwargs):
+            response = start_turn(*args, **kwargs)
+            self.gateway.on_adapter_event({"method": "adapter/request_pending", "params": {
+                "thread_id": THREAD_ID, "request_id": 71,
+                "method": "item/commandExecution/requestApproval",
+                "params": {"threadId": THREAD_ID, "turnId": response["turn_id"], "command": "review"},
+            }})
+            return response
+
+        self.gateway.start()
+        with patch.object(self.adapter, "start_turn", side_effect=immediate_approval):
+            packet = self.submit("approval-before-response")
+            wait_for(lambda: self.gateway.state()["queue"][0]["status"] == "running")
+        workspace = self.gateway.state()
+        self.assertEqual(workspace["agent"]["status"], "awaiting_approval")
+        self.assertEqual(workspace["agent"]["turn_id"], workspace["queue"][0]["turn_id"])
+        self.assertEqual(len(workspace["approvals"]), 1)
+        self.assertEqual(self.adapter.calls, [packet["feedback_id"]])
 
     def test_uncertain_send_recovers_exact_turn_and_never_replays(self) -> None:
         self.adapter.uncertain_next = True

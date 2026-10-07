@@ -74,7 +74,7 @@ export function setupReferenceWindow({onChange=()=>{}}={}) {
   pane.addEventListener('pointerdown', event => {
     if (!immersive() || pane.inert || event.button !== 0 || gesture) return;
     const handle=event.target.closest('[data-reference-resize]');
-    if (!handle && (!header.contains(event.target) || event.target.closest('button,summary,input,select,a,label,.popover-content'))) return;
+    if (!handle && (!header.contains(event.target) || event.target.closest('button,[role=button],summary,input,select,a,label,.popover-content'))) return;
     event.preventDefault();
     const start=rectangle();
     gesture={id:event.pointerId,x:event.clientX,y:event.clientY,start,previous:preferred,direction:handle?.dataset.referenceResize || ''};

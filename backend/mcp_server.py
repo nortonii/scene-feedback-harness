@@ -22,7 +22,7 @@ from mcp.server import MCPServer
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 
 from server import DEFAULT_DATA_DIR
-from feedback_summary import caption, feedback_result_manifest
+from feedback_summary import image_caption, model_input_plan, feedback_result_manifest
 
 
 PORT = int(os.environ.get("SCENE_FEEDBACK_PORT", "18765"))
@@ -130,57 +130,27 @@ def _preview_image(path: Path) -> ImageContent:
     return ImageContent(type="image", data=base64.b64encode(output.getvalue()).decode("ascii"), mime_type="image/jpeg")
 
 
-def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None) -> CallToolResult:
+def _visual_tool_result(result: dict[str, Any], data_dir: Path | None = None,
+                        *, include_details: bool = False) -> CallToolResult:
     directory = data_dir or DATA_DIR
-    enriched = _feedback_with_local_paths(copy.deepcopy(result), directory)
-    summary = feedback_result_manifest(enriched, directory)
-    content: list[TextContent | ImageContent] = [TextContent(type="text", text=json.dumps(summary, ensure_ascii=False, separators=(",", ":")))]
-
-    def add(key: str, role: str, path: str) -> None:
-        content.append(TextContent(type="text", text=caption(key, role)))
-        content.append(_preview_image(Path(path)))
-
-    for item in enriched.get("items", []):
-        content.append(TextContent(type="text", text=f"Feedback {item['feedback_id']}: image source keys below refer to this packet. User marks are instructions, not image geometry."))
-        if item.get("timeline") and "scope" not in item["timeline"]:
-            content.append(TextContent(type="text", text="Timestamps are capture times; determine modification times from the user's prompt text."))
-        if item.get('comparison') or any(frame.get('comparison') for frame in [*item.get('scene_snapshots', []), *item.get('dynamic_frames', [])]):
-            content.append(TextContent(type='text', text='scene_comparison is an auxiliary overlay, not new model geometry. Use opacity, normalized_scene_image rect, camera and separate originals; ghosting is not extra geometry.'))
+    plans = [model_input_plan(item, directory) for item in result.get("items", [])]
+    summary = feedback_result_manifest(result, directory, plans=plans)
+    content: list[TextContent | ImageContent] = [
+        TextContent(type="text", text=json.dumps(summary, ensure_ascii=False, separators=(",", ":"))),
+        TextContent(type="text", text="User marks are instructions; overlay ghosting is not geometry. Times are clip-relative capture times; modification times follow the prompt. Prompt frame numbers start at 1, frame_index at 0. Read details on demand; publish the updated GLB with workspace_publish_scene."),
+    ]
+    for item, plan in zip(result.get("items", []), plans):
+        if len(plans) > 1:
+            content.append(TextContent(type="text", text="Feedback " + item["feedback_id"]))
         if item.get("human_pose"):
-            content.append(TextContent(type="text", text="Interpret evidence_kind and keypoint_profile as declared; projected_3d is not an observed 2D measurement. Cross-view identity requires evidence."))
+            content.append(TextContent(type="text", text="Respect evidence_kind/keypoint_profile; projected_3d is not an observed 2D measurement. Cross-view identity requires evidence."))
         if item.get("human_pose_edits"):
-            content.append(TextContent(type="text", text="Apply corrections_path with $capsule-human-tracking apply-corrections. Model scores are unchanged; manual_visibility=visible alone supplies visible manual measurements, never occluded/missing. Unchanged points retain parent_evidence_kind."))
-        reference_keys = {}
-        for index, reference in enumerate(item.get("reference_images", []), 1):
-            key = reference_keys[reference["id"]] = f"R{index}"
-            add(key, "reference original", reference["path"])
-        for index, reference in enumerate(item.get("reference_annotated_images", []), 1):
-            add(reference_keys.get(reference["reference_id"], f"RA{index}"), "annotated reference", reference["path"])
-        for field in ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison"):
-            path = item.get(f"{field}_path")
-            if path:
-                add("scene", field.replace("_", " "), path)
-        for index, crop in enumerate(item.get("crops", []), 1):
-            add(f"crop{index}", crop['source'] + " detail", crop["path"])
-        for index, image in enumerate(item.get("image_refs", []), 1):
-            for field in ("original", "display_original", "annotated"):
-                if image.get(field + "_path"):
-                    add(f"I{index}", field.replace("_", " "), image[field + "_path"])
-        for index, pose in enumerate(item.get("human_pose", []), 1):
-            add(f"P{index}", "source original", pose["reference_original_path"])
-            add(f"P{index}", "projected 3D (cyan)" if pose.get("evidence_kind") == "projected_3d" else "observed 2D (cyan)", pose["pose_overlay_path"])
-        for index, pose in enumerate(item.get("human_pose_edits", []), 1):
-            add(f"E{index}", "source original", pose["reference_original_path"])
-            add(f"E{index}", "manual corrections (orange)", pose["pose_overlay_path"])
-        for field, prefix, image_fields in (
-            ("scene_snapshots", "S", ("scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison")),
-            ("dynamic_frames", "F", ("reference_original", "reference_annotated", "scene_original", "scene_annotated", "comparison_reference_original", "comparison_reference", "scene_comparison")),
-        ):
-            for index, frame in enumerate(item.get(field, []), 1):
-                for image_field in image_fields:
-                    if frame.get(image_field + "_path"):
-                        add(f"{prefix}{index}", image_field.replace("_", " "), frame[image_field + "_path"])
-    return CallToolResult(content=content, structured_content=enriched)
+            content.append(TextContent(type="text", text="Use $capsule-human-tracking apply-corrections with corrections_path. Only visible manual points are visible measurements; unchanged points retain parent_evidence_kind."))
+        for image in plan["images"]:
+            content.append(TextContent(type="text", text=image_caption(image)))
+            content.append(_preview_image(Path(image["path"])))
+    structured = _feedback_with_local_paths(copy.deepcopy(result), directory) if include_details else summary
+    return CallToolResult(content=content, structured_content=structured)
 
 
 mcp = MCPServer(
@@ -269,11 +239,13 @@ def workspace_get_context() -> CallToolResult:
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False, idempotent_hint=True))
-def workspace_get_feedback(feedback_id: str) -> CallToolResult:
-    """Read one already submitted immutable visual feedback packet with real image blocks."""
+def workspace_get_feedback(feedback_id: str, include_details: bool = False) -> CallToolResult:
+    """Read compact feedback and relevant images. Set include_details for full archived fields."""
+    if type(include_details) is not bool:
+        raise ValueError("include_details must be a boolean")
     ensure_http_server()
     packet = _http("GET", f"/api/workspace/feedback/{feedback_id}")
-    return _visual_tool_result({"items": [packet], "next_cursor": 1, "session_id": packet["session_id"]})
+    return _visual_tool_result({"items": [packet], "next_cursor": 1, "session_id": packet["session_id"]}, include_details=include_details)
 
 
 @mcp.tool()

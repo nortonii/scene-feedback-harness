@@ -43,6 +43,10 @@ html:not([data-layout=immersive]) .app-shell .feedback-panel { max-height: calc(
 .snapshot-name, .snapshot-source { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .snapshot-name { font-size: 12px; line-height: 16px; font-weight: 500; }
 .snapshot-source { font-size: 11px; line-height: 14px; color: var(--muted); }
+.snapshot-time-space { display: block; font-size: 11px; line-height: 14px; }
+.snapshot-time-reference { position: absolute; z-index: 2; left: 7px; right: 7px; bottom: 7px; min-height: 0; height: 14px; padding: 0; background: transparent; border: 0; text-align: left; cursor: pointer; }
+.snapshot-time-reference:hover:not(:disabled) { color: var(--ink); text-decoration: underline; }
+.snapshot-time-reference:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 3px; }
 .snapshot-remove { position: absolute; z-index: 3; top: 9px; right: 9px; display: grid; place-items: center; width: 22px; height: 22px; min-height: 0; padding: 0; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--surface-menu); font-size: 16px; }
 .snapshot-remove:hover:not(:disabled) { background: var(--surface-hover); }
 .snapshot-card:has(:focus-visible) { --snapshot-card-width: 172px; --snapshot-thumb-width: 160px; --snapshot-thumb-height: 90px; }
