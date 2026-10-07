@@ -264,10 +264,10 @@ function ensureAnnotationNames() {
     catch { /* Naming still works for this page when storage is unavailable. */ }
   }
 }
-function saveDraft() {
+function saveDraft({allowPlaying=false}={}) {
   feedbackEvidence?.refresh();
   clearTimeout(state.timelineSaveTimer); state.timelineSaveTimer = null;
-  if (!state.sessionId || state.sceneRevision === null || state.playing) return;
+  if (!state.sessionId || state.sceneRevision === null || state.playing && !allowPlaying) return;
   try {
     localStorage.setItem(storageKey(), JSON.stringify({
       annotations:state.annotations, annotationNameCounters:state.annotationNameCounters, annotationMode:state.mode, paneModes:state.paneModes, toolPane:state.toolPane, selectedId:state.selectedId,
@@ -3787,7 +3787,11 @@ function renderTimeline({moments=true}={}) {
   const displayedTime = state.timelineTarget ?? state.time;
   ui.seek.max = String(duration || 1); ui.seek.value = String(displayedTime);
   ui.time.textContent = shortTime(displayedTime) + ' / ' + shortTime(duration) + (state.timelineTarget !== null ? ' · 更新中' : '');
-  ui.time.title = `${displayedTime.toFixed(3)} / ${duration.toFixed(3)} 秒`;
+  const updating=state.seeking || state.pendingViewId || state.timelineTarget !== null || !!clipReference() && !referencePixelsReady();
+  ui.time.title = `${displayedTime.toFixed(3)} / ${duration.toFixed(3)} 秒 · 双击或按 Enter / 空格引用当前时间`;
+  ui.time.setAttribute('aria-label',`当前时间 ${displayedTime.toFixed(3)} 秒，总时长 ${duration.toFixed(3)} 秒；双击或按 Enter / 空格引用`);
+  ui.time.setAttribute('aria-disabled',String(!editable() || duration <= 0 || !!updating));
+  ui.time.tabIndex=enabled && duration > 0 ? 0 : -1;
   renderReferenceHeading();
   setActionIcon(ui.play,state.playing ? 'pause' : 'play',state.playing ? '暂停' : '播放');
   for (const element of [ui.play, ui.seek, id('timeline-prev'), id('timeline-next'), ui.clipInput]) {
@@ -3927,6 +3931,21 @@ async function uploadClip(files) {
 }
 
 function bindTimelineEvents() {
+  const quoteCurrentTime = () => {
+    if (!editable()) return;
+    const candidate=getPromptTimeCandidates().find(item=>item.descriptor.sourceType==='timeline');
+    if (!candidate) {
+      announce(promptTimeEmptyMessage(),true);
+      return;
+    }
+    try { insertPromptTimeCandidate(candidate); }
+    catch (error) { announce(error.message || '此时间暂时无法引用。',true); }
+  };
+  ui.time.addEventListener('dblclick',event=>{event.preventDefault();quoteCurrentTime();});
+  ui.time.addEventListener('keydown',event=>{
+    if (!['Enter',' '].includes(event.key) || event.repeat || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();event.stopPropagation();quoteCurrentTime();
+  });
   ui.clipInput.addEventListener('change', () => uploadClip(ui.clipInput.files));
   ui.play.addEventListener('click', async () => {
     if (!editable()) return;
@@ -4887,11 +4906,15 @@ function previewPromptImage(entry) {
 }
 function promptText() { return promptReferenceText.expand(ui.note.value); }
 function resolvePromptReference(token, fallback='') {
-  const match=/^\[\[(object|node|annotation|image|pose|pose_edit):(.+)\]\]$/.exec(token);
+  const match=/^\[\[(object|node|annotation|image|pose|pose_edit|time):(.+)\]\]$/.exec(token);
   if(!match) return null;
   const [,kind,key]=match;
   let name=fallback,label=fallback,title=fallback,missing=false;
-  if(kind==='image') {
+  if(kind==='time') {
+    // Time prose is immutable once inserted; browsing another frame or source
+    // must not retarget a saved timestamp or label it as missing.
+    name='时间戳';label=fallback;title=fallback;
+  } else if(kind==='image') {
     const entry=state.imageRefs.find(item=>item.id===key);
     label=entry?.label || fallback;name='图';title=label;missing=!entry;
   } else if(kind==='annotation') {
@@ -4954,7 +4977,7 @@ function renderPromptImageReferences() {
       chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;
       const thumbnail=document.createElement('img');thumbnail.src=image.annotated_data_url || image.original_data_url;thumbnail.alt='';preview.append(thumbnail);
     } else {
-      const kind=document.createElement('span');kind.className='prompt-reference-kind';kind.textContent=({object:'物体',node:'部件',annotation:'标记',pose:'人体',pose_edit:'修正',image:'图片'})[entry.kind];preview.append(kind);
+      const kind=document.createElement('span');kind.className='prompt-reference-kind';kind.textContent=({object:'物体',node:'部件',annotation:'标记',pose:'人体',pose_edit:'修正',image:'图片',time:'时间'})[entry.kind];preview.append(kind);
     }
     const label=document.createElement('span');label.textContent=entry.alias.slice(1,-1)+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
     preview.addEventListener('click',()=>image?previewPromptImage(image):previewPromptReference(entry));
@@ -5006,8 +5029,8 @@ function getPromptMentionCandidates() {
   return candidates;
 }
 
-// Time references are plain language. These descriptors bind menu options to
-// their actual sources only until insertion; no hidden prompt token is needed.
+// Descriptors validate menu sources before insertion. Registered short aliases
+// keep the exact time prose immutable and expand it for feedback submission.
 function promptTimeSeconds(value) {
   return Number(value).toFixed(9).replace(/(\.\d{3})0+$/, '$1');
 }
@@ -5067,6 +5090,19 @@ function getPromptTimeCandidates() {
     search:['时间 时刻 时段 秒 片段 视频 time frame',label,detail,search].join(' '),
     descriptor:{sourceType,context,...fields},text:promptTimeLiteralText(text)});
   const frame=clipReference(), view=referenceView();
+  if ((state.referenceClip || state.animations.size) && timelineDuration() > 0 && Number.isFinite(state.time) &&
+      (!frame || referencePixelsReady())) {
+    const index=frame ? view.frames.findIndex(item=>item.id===frame.id) : null;
+    const member={timeSec:state.time,frameId:frame?.id || null,referenceTimeSec:frame?.time_sec ?? null,
+      frameIndex:index,viewName:frame ? view.name : '',referenceId:activeReference()?.id || null};
+    const detail=frame ? promptTimeFrameText(member) : state.referenceClip ? '当前参考为静态图' : '场景动画';
+    const text=`片段${promptTimeSeconds(state.time)}s · ${detail}`;
+    add('time:timeline','当前时间戳 · '+promptTimeSeconds(state.time)+'s',detail,'timeline',
+      {clipId:state.referenceClip?.clip_id || null,timeSec:state.time,viewId:frame ? view.clip_id : null,
+        referenceId:member.referenceId,frameId:member.frameId,frameIndex:index,
+        referenceTimeSec:member.referenceTimeSec,referenceUrl:activeReference()?.url || null},
+      text,[frame ? view.name : '',index===null ? '' : index+1,frame?.name || ''].join(' '));
+  }
   if (frame && view && Number.isFinite(frame.time_sec) && referencePixelsReady()) {
     const index=view.frames.findIndex(item => item.id === frame.id);
     const frameText=`片段参考${promptTimeSeconds(frame.time_sec)}s · ${view.name} #${index+1}`;
@@ -5131,16 +5167,34 @@ function getPromptTimeCandidates() {
   }
   return candidates;
 }
+function promptTimeSourceKey(candidate) {
+  const source=candidate.descriptor;
+  // Exclude revision, seek generation and unrelated round contents. The same
+  // immutable source/time keeps its number after browsing or scene updates.
+  return JSON.stringify([source.sourceType,candidate.sessionId,source.clipId ?? source.context.clipId,
+    source.viewId,source.referenceId,source.frameId,source.referenceUrl,source.timeSec,source.sceneTimeSec,
+    source.referenceTimeSec,source.startSec,source.endSec,
+    source.members?.map(member=>[member.id,member.clipId,member.viewId,member.referenceId,member.frameId,
+      member.referenceUrl,member.timeSec,member.referenceTimeSec]),source.marks?.map(mark=>mark.id),
+    source.views?.map(view=>[view.clipId,view.durationSec]),
+    !source.context.clipId ? source.context.animationSources.map(entry=>[entry.objectId,entry.modelUrl,entry.index,entry.name,entry.duration]) : null]);
+}
 function insertPromptTimeCandidate(candidate) {
   if (!editable() || candidate?.kind !== 'time' || candidate.sessionId !== state.sessionId || candidate.disabled) return false;
   const current=getPromptTimeCandidates().find(item => item.key === candidate.key);
   if (!current || JSON.stringify(current.descriptor) !== JSON.stringify(candidate.descriptor)) {
     throw new Error('此时间的来源、时刻或标记已变化，请重新输入 / 选择。');
   }
-  return insertNoteText(current.text);
+  const entry=promptReferenceText.rememberTime(current.text,promptTimeSourceKey(current));
+  if (!entry || !insertNoteText(entry.alias,{preserveTool:true})) return false;
+  // Ordinary playback frames skip draft writes. A deliberate citation must
+  // survive reload without pausing playback or changing its reference pixels.
+  if(state.playing)saveDraft({allowPlaying:true});
+  return true;
 }
 function promptTimeEmptyMessage() {
   if (state.seeking || state.pendingViewId || state.timelineTarget !== null) return '参考帧正在更新，完成后再选择片段时间';
+  if (clipReference() && !referencePixelsReady()) return '参考帧正在加载，请稍后引用时间';
   if (!dynamicEnabled()) return '当前没有视频或场景动画；静态图片和截图没有片段时间';
   return '当前没有可引用的时间，请加载视频、场景动画或保留一个有效时刻';
 }

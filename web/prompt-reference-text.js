@@ -1,8 +1,8 @@
 // Keep editable prose in a native textarea while preserving exact source tokens
 // outside it. Only registered, complete aliases are expanded for submission.
-const TOKEN_SCAN = /\[\[(?:object|node|annotation|image|pose|pose_edit):[^\[\]\r\n]{1,512}\]\]/g;
+const TOKEN_SCAN = /\[\[(?:object|node|annotation|image|pose|pose_edit|time):[^\[\]\r\n]{1,512}\]\]/g;
 const ALIAS_SCAN = /【[^【】\r\n]{1,128}】/gu;
-const DEFAULT_NAMES = {object:'物体',node:'部件',annotation:'标记',image:'图片',pose:'人体',pose_edit:'修正'};
+const DEFAULT_NAMES = {object:'物体',node:'部件',annotation:'标记',image:'图片',pose:'人体',pose_edit:'修正',time:'时间戳'};
 const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined,{granularity:'grapheme'}) : null;
 const characters = (value) => segmenter ? [...segmenter.segment(value)].map(item=>item.segment) : Array.from(value);
 
@@ -12,6 +12,7 @@ function tokenKind(token) {
   if (/^\[\[node:[A-Za-z0-9_-]{1,64}:\d+(?:\/\d+)*\]\]$/.test(token)) return 'node';
   if (/^\[\[pose:[0-9a-f]{32}:[0-9a-f]{32}\]\]$/.test(token)) return 'pose';
   if (/^\[\[pose_edit:[0-9a-f]{32}\]\]$/.test(token)) return 'pose_edit';
+  if (/^\[\[time:t[1-9]\d{0,6}\]\]$/.test(token)) return 'time';
   return null;
 }
 function cleanText(value,limit=1024) {
@@ -37,6 +38,14 @@ function imageNumber(alias) {
   const number=/^【图([1-9]\d{0,6})】$/.exec(alias || '');
   return number && Number(number[1]) <= 1000000 ? Number(number[1]) : 0;
 }
+function timeNumber(alias) {
+  const number=/^【时间戳([1-9]\d{0,6})】$/.exec(alias || '');
+  return number && Number(number[1]) <= 1000000 ? Number(number[1]) : 0;
+}
+function timeText(value) {
+  return typeof value==='string' && value.length<=10000 && value.trim() &&
+    !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value) ? value : '';
+}
 function standalone(text,index,length) {
   return !['[','【'].includes(text[index-1]) && ![']','】'].includes(text[index+length]);
 }
@@ -45,17 +54,23 @@ function outsideToken(text,index) {
 }
 
 export function createPromptReferenceText({resolve=()=>null}={}) {
-  const byToken=new Map(), byAlias=new Map();
-  let nextImage=1, reserved=new Set();
+  const byToken=new Map(), byAlias=new Map(), byTimeKey=new Map();
+  let nextImage=1,nextTime=1,nextTimeToken=1,reserved=new Set();
 
   function allocate(kind,name,preferred) {
-    if (validAlias(preferred) && !byAlias.has(preferred) && (kind !== 'image' || imageNumber(preferred))) {
+    if (validAlias(preferred) && !byAlias.has(preferred) && (kind !== 'image' || imageNumber(preferred)) && (kind !== 'time' || timeNumber(preferred))) {
       if (kind === 'image') nextImage=Math.max(nextImage,imageNumber(preferred)+1);
+      if (kind === 'time') nextTime=Math.max(nextTime,timeNumber(preferred)+1);
       return preferred;
     }
     if (kind === 'image') {
       let alias;
       do { alias=`【图${nextImage++}】`; } while (byAlias.has(alias) || reserved.has(alias));
+      return alias;
+    }
+    if(kind==='time') {
+      let alias;
+      do {alias=`【时间戳${nextTime++}】`;} while(byAlias.has(alias) || reserved.has(alias));
       return alias;
     }
     const base=shortName(name) || DEFAULT_NAMES[kind];
@@ -71,13 +86,15 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
     if (!type) return null;
     const previous=byToken.get(token);
     let descriptor=metadata || null;
-    if (useResolver) {
+    if (useResolver && type!=='time') {
       try { descriptor=resolve(token,cleanText(label) || previous?.label || '') || null; }
       catch { descriptor=null; } // Source disappearance must not erase its token.
     }
     if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) descriptor={};
+    const capturedTime=type==='time' ? previous?.timeText || timeText(descriptor.timeText) : null;
+    if(type==='time' && !capturedTime)return null;
     const name=readableName(cleanText(descriptor.name) || previous?.name,type);
-    const fullLabel=cleanText(descriptor.label) || cleanText(label) || previous?.label || '';
+    const fullLabel=capturedTime || cleanText(descriptor.label) || cleanText(label) || previous?.label || '';
     const labels=[...new Set([...(previous?.labels || []),...(Array.isArray(descriptor.labels) ? descriptor.labels.slice(-16) : []),
       cleanText(label),fullLabel].filter(item=>cleanText(item)))].slice(-16);
     const extra={};
@@ -88,12 +105,26 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
     }
     const entry={...previous,...extra,token,label:fullLabel,
       alias:previous?.alias || allocate(type,name,preferred),
-      kind:cleanText(descriptor.kind,64) || previous?.kind || type,
-      title:cleanText(descriptor.title,2048) || fullLabel || previous?.title || name,name,labels};
+      kind:type==='time'?'time':cleanText(descriptor.kind,64) || previous?.kind || type,
+      title:capturedTime || cleanText(descriptor.title,2048) || fullLabel || previous?.title || name,name,labels};
+    if(type==='time') {
+      entry.timeText=capturedTime;
+      entry.timeKey=previous?.timeKey || cleanText(descriptor.timeKey,32768) || capturedTime;
+      byTimeKey.set(entry.timeKey+'\u0000'+capturedTime,entry);
+      nextTimeToken=Math.max(nextTimeToken,Number(/^\[\[time:t(\d+)\]\]$/.exec(token)[1])+1);
+    }
     byToken.set(token,entry); byAlias.set(entry.alias,entry);
     return entry;
   }
   function remember(label,token) { return register(label,token); }
+  function rememberTime(text,key=text) {
+    const captured=timeText(text),sourceKey=cleanText(key,32768);
+    if(!captured || !sourceKey)return null;
+    const previous=byTimeKey.get(sourceKey+'\u0000'+captured);
+    if(previous)return previous;
+    return register(captured,`[[time:t${nextTimeToken++}]]`,{useResolver:false,
+      metadata:{kind:'time',name:'时间戳',timeText:captured,timeKey:sourceKey}});
+  }
 
   function compact(value) {
     const text=String(value ?? '');
@@ -109,6 +140,7 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
       const preferred=beforeAlias && validAlias(beforeAlias[1]) &&
         standalone(prefix,beforeAlias.index,beforeAlias[1].length) ? beforeAlias[1] : null;
       const entry=register('',token,{preferred});
+      if(!entry)continue;
       if (preferred) prefix=prefix.slice(0,beforeAlias.index);
       else {
         const label=[...entry.labels].sort((a,b)=>b.length-a.length).find(item=>{
@@ -121,7 +153,18 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
       output+=prefix+entry.alias;
       cursor=match.index+token.length;
     }
-    return output+text.slice(cursor);
+    const normalized=output+text.slice(cursor);
+    output='';cursor=0;
+    // Saved drafts contain expanded time prose. Only remove the exact payload
+    // belonging to its registered alias; never scan arbitrary user timestamps.
+    for(const match of aliasMatches(normalized)) {
+      const entry=byAlias.get(match[0]),end=match.index+match[0].length;
+      const space=/^[ \t]+/.exec(normalized.slice(end));
+      if(tokenKind(entry.token)!=='time' || !space || !normalized.slice(end+space[0].length).startsWith(entry.timeText))continue;
+      output+=normalized.slice(cursor,match.index)+entry.alias;
+      cursor=end+space[0].length+entry.timeText.length;
+    }
+    return output+normalized.slice(cursor);
   }
   function aliasMatches(text) {
     return [...text.matchAll(ALIAS_SCAN)].filter(match=>byAlias.has(match[0]) &&
@@ -133,8 +176,9 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
     for (const match of aliasMatches(text)) {
       const entry=byAlias.get(match[0]), end=match.index+match[0].length;
       const alreadyExpanded=text.slice(end).match(/^[ \t]+/);
-      const hasToken=alreadyExpanded && text.slice(end+alreadyExpanded[0].length).startsWith(entry.token);
-      output+=text.slice(cursor,match.index)+entry.alias+(hasToken ? '' : ' '+entry.token);
+      const payload=tokenKind(entry.token)==='time'?entry.timeText:entry.token;
+      const hasPayload=alreadyExpanded && text.slice(end+alreadyExpanded[0].length).startsWith(payload);
+      output+=text.slice(cursor,match.index)+entry.alias+(hasPayload ? '' : ' '+payload);
       cursor=end;
     }
     return output+text.slice(cursor);
@@ -158,15 +202,17 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
     return output+text.slice(cursor);
   }
   function exportRecords() {
-    return [...byToken.values()].map(({token,label,alias,kind,title,name,labels})=>({token,label,alias,kind,title,name,labels:[...labels]}));
+    return [...byToken.values()].map(({token,label,alias,kind,title,name,labels,timeText,timeKey})=>({token,label,alias,kind,title,name,labels:[...labels],
+      ...(kind==='time'?{timeText,timeKey}:{})}));
   }
   function reset(records=[]) {
-    byToken.clear(); byAlias.clear(); nextImage=1;
+    byToken.clear();byAlias.clear();byTimeKey.clear();nextImage=1;nextTime=1;nextTimeToken=1;
     const usable=(Array.isArray(records) ? records : []).slice(0,4096).filter(record=>record &&
-      typeof record === 'object' && tokenKind(record.token));
+      typeof record === 'object' && tokenKind(record.token) && (tokenKind(record.token)!=='time' || timeText(record.timeText)));
     const owners=new Map();
     for (const record of usable) {
-      if (validAlias(record.alias) && (tokenKind(record.token) !== 'image' || imageNumber(record.alias)) && !owners.has(record.alias)) {
+      if (validAlias(record.alias) && (tokenKind(record.token) !== 'image' || imageNumber(record.alias)) &&
+          (tokenKind(record.token)!=='time' || timeNumber(record.alias)) && !owners.has(record.alias)) {
         owners.set(record.alias,record.token);
       }
     }
@@ -178,5 +224,5 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
     }
     reserved.clear();
   }
-  return {compact,expand,entries,remember,reset,exportRecords,remove};
+  return {compact,expand,entries,remember,rememberTime,reset,exportRecords,remove};
 }

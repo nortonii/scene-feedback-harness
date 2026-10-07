@@ -173,3 +173,59 @@ test('opaque identifiers stay in metadata and use meaningful source-kind aliases
   const codec=createPromptReferenceText({resolve:()=>({name:'KitchenCabinetDoorPanel'})});
   assert.equal(codec.remember('语义名称',object).alias,'【KitchenCabi…】');
 });
+
+test('numbered time aliases freeze precise prose and reuse only the same source and time',()=>{
+  const codec=createPromptReferenceText({resolve:()=>({name:'Changed live frame'})});
+  const text='片段1.500s · 参考1.000s · 侧面 #3';
+  const first=codec.rememberTime(text,'view:side;clock:1.5');
+  assert.equal(first.alias,'【时间戳1】');
+  assert.equal(codec.rememberTime(text,'view:side;clock:1.5'),first);
+  assert.equal(codec.rememberTime(text,'view:another;clock:1.5').alias,'【时间戳2】');
+  const next=codec.rememberTime('片段2.125000001s · 参考2.000s · 侧面 #5','view:side;clock:1.5');
+  assert.equal(next.alias,'【时间戳3】');
+  const visible='按【时间戳1】修改，再看【时间戳3】。';
+  const expanded=codec.expand(visible);
+  assert.equal(expanded,`按【时间戳1】 ${text}修改，再看【时间戳3】 ${next.timeText}。`);
+  assert(!expanded.includes('[[time:'));
+  assert.equal(codec.expand(expanded),expanded);
+  assert.equal(codec.compact(expanded),visible);
+  assert.equal(codec.compact('用户自写时间 1.500s · 侧面 #3'),'用户自写时间 1.500s · 侧面 #3');
+  assert.equal(codec.remember('',first.token).timeText,text);
+});
+
+test('time records survive reload, removal and undo without losing precision or stealing numbers',()=>{
+  const codec=createPromptReferenceText({resolve:token=>token==='[[object:time_named_object]]'?{name:'时间戳1'}:sources[token]});
+  codec.remember('时间戳1','[[object:time_named_object]]');
+  const text='片段0.100000001s · 原机位 #123';
+  const first=codec.rememberTime(text,'source-a');
+  assert.equal(first.alias,'【时间戳2】');
+  const visible='在【时间戳2】改【柜子】';codec.remember('柜子',object);
+  const canonical=codec.expand(visible),records=JSON.parse(JSON.stringify(codec.exportRecords()));
+  const restored=create();restored.reset(records);
+  assert.equal(restored.compact(canonical),visible);
+  assert.equal(restored.expand(visible),canonical);
+  assert.equal(restored.rememberTime(text,'source-a').alias,'【时间戳2】');
+  assert.equal(restored.entries(visible)[0].title,text);
+  assert.equal(restored.remove(visible,first.token),'在改【柜子】');
+  assert.equal(restored.expand(visible),canonical,'undo can restore the original alias');
+  assert.equal(restored.rememberTime('片段0.200s','source-b').alias,'【时间戳3】');
+  restored.reset();
+  assert.equal(restored.expand('【时间戳2】'),'【时间戳2】');
+  assert.equal(restored.rememberTime('片段3.000s','source-c').alias,'【时间戳1】');
+});
+
+test('incomplete time records stay literal and long precise descriptions round trip without truncation',()=>{
+  const codec=createPromptReferenceText();
+  codec.reset([{token:'[[time:t1]]',alias:'【时间戳1】'},{token:'[[time:t2]]',alias:'【时间戳2】',timeText:'\u0000'}]);
+  assert.deepEqual(codec.exportRecords(),[]);
+  assert.equal(codec.compact('[[time:t1]] 【时间戳1】'),'[[time:t1]] 【时间戳1】');
+  assert.equal(codec.rememberTime('', 'empty'),null);
+  const description='片段0.000–10.125s · '+('原机位及标记说明'.repeat(240));
+  const entry=codec.rememberTime(description,'range-a');
+  assert.equal(entry.alias,'【时间戳1】');
+  const wire=codec.expand(entry.alias);
+  const restored=createPromptReferenceText();restored.reset(JSON.parse(JSON.stringify(codec.exportRecords())));
+  assert.equal(restored.expand(entry.alias),wire);
+  assert.equal(restored.compact(wire),entry.alias);
+  assert.equal(restored.entries(entry.alias)[0].timeText,description);
+});

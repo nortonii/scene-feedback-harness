@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -31,6 +32,21 @@ def choose(page,text):
 
 
 def candidates(page): return page.evaluate('__mentionCheck.getPromptTimeCandidates()')
+
+
+def time_aliases(page): return re.findall(r'【时间戳[1-9]\d*】',page.locator('#feedback-note').input_value())
+
+
+def assert_short_times(page):
+    visible=page.locator('#feedback-note').input_value()
+    assert time_aliases(page),visible
+    assert not re.search(r'\d+\.\d+\s*s|#\d+|片段参考|整个片段|本轮标记时段',visible),visible
+    assert '正面' not in visible and '侧面' not in visible,visible
+    assert '[[time:' not in canonical(page)
+
+
+def frozen_evidence(page):
+    return page.evaluate('JSON.stringify({snapshot:__mentionCheck.state.snapshot,camera:__mentionCheck.cameraData(),time:__mentionCheck.state.time,view:__mentionCheck.state.activeViewId,marks:__mentionCheck.state.annotations})')
 
 
 def reject_stale(page,candidate):
@@ -61,7 +77,7 @@ def main():
                 context=browser.new_context(viewport={'width':1440,'height':950})
                 legacy={'feedbackScope':'range','rangeStart':'0','rangeEnd':'1','note':''}
                 context.add_init_script('const k='+json.dumps('astra-visual-draft:'+session)+';if(!localStorage.getItem(k))localStorage.setItem(k,'+json.dumps(json.dumps(legacy))+');')
-                hook='\nwindow.__mentionCheck={state,ui,promptText,camera,cameraData,renderSelection,renderAnnotations,selectObject,nodeReference,removeAnnotation,undoAnnotationEdit,getPromptMentionCandidates,getPromptTimeCandidates,insertPromptTimeCandidate,promptMentions};'
+                hook='\nwindow.__mentionCheck={state,ui,promptText,promptReferenceText,camera,cameraData,renderSelection,renderAnnotations,selectObject,nodeReference,removeAnnotation,undoAnnotationEdit,getPromptMentionCandidates,getPromptTimeCandidates,insertPromptTimeCandidate,promptMentions};'
                 context.route('**/app.js',lambda route:route.fulfill(status=200,content_type='application/javascript',body=(ROOT/'web/app.js').read_text()+hook))
                 page=context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
                 page.on('request',lambda r:posts.append(r.post_data_json) if r.method=='POST' and r.url.endswith('/feedback') else None)
@@ -71,29 +87,43 @@ def main():
                 query(page,note='前面 ')
                 assert page.locator('.prompt-mention-option[data-mention-kind="time"]').count()>=2
                 choose(page,'当前参考帧')
-                assert '正面' in field.input_value() and '0.000' in field.input_value()
-                assert '片段参考0.000s' in field.input_value() and '#1' in field.input_value()
-                assert '机位「' not in field.input_value() and '第 1 帧' not in field.input_value()
+                assert '正面' in canonical(page) and '0.000' in canonical(page)
+                assert '片段参考0.000s' in canonical(page) and '#1' in canonical(page)
+                assert '机位「' not in canonical(page) and '第 1 帧' not in canonical(page)
+                assert_short_times(page)
+                first_alias=time_aliases(page)[0]
+                chip=page.locator('.prompt-reference-preview').filter(has_text=first_alias[1:-1]).first
+                chip.click()
+                assert '片段参考0.000s' in page.locator('#prompt-reference-detail').inner_text()
+                assert '#1' in page.locator('#prompt-reference-detail').inner_text()
+                page.locator('#prompt-reference-close').click()
+                query(page,'当前参考帧');choose(page,'当前参考帧')
+                assert time_aliases(page)==[first_alias,first_alias],time_aliases(page)
+                assert page.locator('.prompt-reference-preview').filter(has_text=first_alias[1:-1]).count()==1
                 assert '[[object:' not in canonical(page), 'A source name must not register a prompt object reference'
                 assert not posts
-                print('PASS: legacy range fields disappear; slash inserts a precise current reference time into prose without submitting',flush=True)
+                print('PASS: slash inserts a short stable timestamp alias; chip details and canonical text retain precise reference time without submitting',flush=True)
 
                 select_model(page,'part');field.press('Space');field.press_sequentially('@Door')
                 page.locator('.prompt-mention-option[data-mention-kind="node"]').click()
                 assert '[[node:fixture_model:' in canonical(page) and '【Door】' in field.input_value()
                 query(page,'整个');field.press('Control+Enter')
-                assert '整个片段' in field.input_value() and '1.500' in field.input_value()
-                assert '0.000–1.500s · 全部机位' in field.input_value()
+                assert '整个片段' in canonical(page) and '1.500' in canonical(page)
+                assert '0.000–1.500s · 全部机位' in canonical(page)
+                assert_short_times(page)
+                assert len(set(time_aliases(page)))==2
                 assert not posts
                 first_note=field.input_value()
                 print('PASS: time options and compact @ part references coexist; Ctrl+Enter picks an option instead of sending',flush=True)
 
                 first_mark=draw_mark(page,'reference','rectangle')
                 current=next(c for c in candidates(page) if c['descriptor']['sourceType']=='reference')
+                current_clock=next(c for c in candidates(page) if c['descriptor']['sourceType']=='timeline')
                 page.locator('#reference-strip button[data-view-id="' + side['clip_id'] + '"]').first.click()
                 page.locator('#timeline-seek').focus();page.locator('#timeline-seek').press('End')
                 page.wait_for_function('(id)=>__mentionCheck.state.activeReferenceId===id && !__mentionCheck.state.seeking',arg=side['frames'][-1]['id'])
                 assert reject_stale(page,current)
+                assert reject_stale(page,current_clock)
                 side_mark=draw_mark(page,'reference','line')
                 control(page,'#capture-scene-button').click()
                 page.wait_for_function("__mentionCheck.state.sceneView==='snapshot'")
@@ -127,15 +157,35 @@ def main():
                 current_reference=next(c for c in rows if c['descriptor']['sourceType']=='reference')
                 assert current_reference['text'].startswith('片段参考1.000s') and '（场景1.500s）' in current_reference['text']
                 query(page,'本轮',note=first_note+' ');choose(page,'本轮标记时段')
-                assert '0.000' in field.input_value() and '1.500' in field.input_value()
-                assert '片段0.000–1.500s' in field.input_value() and '正面' in field.input_value() and '侧面' in field.input_value()
-                frozen=page.evaluate('JSON.stringify({snapshot:__mentionCheck.state.snapshot,camera:__mentionCheck.cameraData(),time:__mentionCheck.state.time,marks:__mentionCheck.state.annotations})')
+                assert '0.000' in canonical(page) and '1.500' in canonical(page)
+                assert '片段0.000–1.500s' in canonical(page) and '正面' in canonical(page) and '侧面' in canonical(page)
+                assert_short_times(page)
+                frozen=frozen_evidence(page)
                 query(page,'当前参考帧');choose(page,'当前参考帧')
-                assert '侧面' in field.input_value() and '1.000' in field.input_value()
+                assert '侧面' in canonical(page) and '1.000' in canonical(page)
                 assert canonical(page).count('[[node:fixture_model:')==1 and '[[object:' not in canonical(page), 'Source names must not expand existing compact aliases or protocol tokens'
-                assert page.evaluate('JSON.stringify({snapshot:__mentionCheck.state.snapshot,camera:__mentionCheck.cameraData(),time:__mentionCheck.state.time,marks:__mentionCheck.state.annotations})')==frozen
+                assert frozen_evidence(page)==frozen
+                # The clock cites scene time, even when the nearest reference
+                # sample is earlier. It must not seek, move the camera or mark.
+                clock=page.locator('#timeline-time')
+                clock.dblclick()
+                clock_alias=time_aliases(page)[-1]
+                clock_candidate=next(c for c in candidates(page) if c['descriptor']['sourceType']=='timeline')
+                assert clock_candidate['descriptor']['timeSec']==1.5
+                assert clock_candidate['descriptor']['referenceTimeSec']==1.0
+                assert clock_candidate['descriptor']['viewId']==side['clip_id']
+                assert '1.500' in clock_candidate['text'] and '1.000' in clock_candidate['text']
+                assert clock_candidate['text'] in canonical(page)
+                assert frozen_evidence(page)==frozen
+                assert_short_times(page)
+                for key in ('Enter','Space'):
+                    clock.focus();clock.press(key)
+                    assert time_aliases(page)[-1]==clock_alias
+                    assert frozen_evidence(page)==frozen
+                assert not posts
                 draft=field.input_value()
-                print('PASS: compact cross-view times preserve exact scene/sample distinctions, endpoints and screenshot captions; duplicate source frames appear once without moving the viewport',flush=True)
+                draft_canonical=canonical(page)
+                print('PASS: cross-view aliases and clock mouse/keyboard entry retain exact scene/sample times, source names and immutable evidence',flush=True)
 
                 query(page,first_mark['name'],note='')
                 old=page.evaluate('__mentionCheck.promptMentions.candidates[0]')
@@ -164,22 +214,26 @@ def main():
                     assert box['x']>=-1 and box['x']+box['width']<=width+1 and box['y']>=-1 and box['y']+box['height']<=921
                     field.press('Escape')
                 page.set_viewport_size({'width':1440,'height':950});field.fill(draft);field.focus();field.press('End')
-                page.reload();ready(page);assert field.input_value()==draft
+                page.reload();ready(page);assert field.input_value()==draft and canonical(page)==draft_canonical
                 stored=page.evaluate('(k)=>JSON.parse(localStorage.getItem(k))','astra-visual-draft:'+session)
                 assert not any(k in stored for k in ('feedbackScope','rangeStart','rangeEnd'))
+                assert stored['note']==draft_canonical
+                assert any(item.get('kind')=='time' for item in stored['promptReferenceLabels'])
                 assert len(page.evaluate('__mentionCheck.state.annotations'))==3
-                print('PASS: small-screen menus stay reachable; reload keeps time prose and source evidence while dropping the obsolete range preference',flush=True)
+                assert_short_times(page)
+                print('PASS: small-screen menus stay reachable; reload restores timestamp mappings and exact canonical prose',flush=True)
 
                 health={'service':'scene-feedback-harness','status':'ok','snapshot_comparison_supported':True,'scene_snapshots_supported':True,'prompt_time_supported':False}
                 def old_health(route):route.fulfill(status=200,content_type='application/json',body=json.dumps(health))
                 page.route('**/api/health',old_health);before=len(posts);page.locator('#submit-button').click()
                 page.wait_for_function('!__mentionCheck.state.submitting')
-                assert len(posts)==before and field.input_value()==draft and not store.state['feedback']
+                assert len(posts)==before and field.input_value()==draft and canonical(page)==draft_canonical and not store.state['feedback']
                 page.unroute('**/api/health',old_health)
                 def reject(route):route.fulfill(status=503,content_type='application/json',body='{"error":"temporary isolated rejection"}')
                 page.route('**/api/sessions/*/feedback',reject);page.locator('#submit-button').click()
                 page.wait_for_function('!__mentionCheck.state.submitting')
-                assert 'scope' not in posts[-1]['timeline'] and field.input_value()==draft and not store.state['feedback']
+                assert 'scope' not in posts[-1]['timeline'] and field.input_value()==draft and canonical(page)==draft_canonical and not store.state['feedback']
+                assert posts[-1]['note']==draft_canonical and '[[time:' not in posts[-1]['note']
                 page.route('**/api/health',old_health);before=len(posts);page.locator('#submit-button').click()
                 page.wait_for_function('!__mentionCheck.state.submitting');assert len(posts)==before
                 page.unroute('**/api/health',old_health);page.unroute('**/api/sessions/*/feedback',reject)
@@ -188,12 +242,14 @@ def main():
                 page.locator('#submit-button').click();page.wait_for_function('__mentionCheck.state.feedbackCount===1 && !__mentionCheck.state.submitting')
                 packet=store.state['feedback'][0]
                 assert 'scope' not in packet['timeline'] and packet['note'].strip()==posts[-1]['note'].strip()
+                assert packet['note'].strip()==draft_canonical.strip() and '[[time:' not in packet['note']
                 assert '整个片段' in packet['note'] and '本轮标记时段' in packet['note'] and '[[node:fixture_model:' in packet['note']
                 assert len(packet['annotations'])==3 and len(packet['dynamic_frames'])>=2
                 result=_visual_tool_result({'items':[copy.deepcopy(packet)]},store.data_dir)
                 assert 'scope' not in result.structured_content['items'][0]['timeline']
                 assert sum(item.type=='image' for item in result.content)>=4
                 assert field.input_value()=='' and not page.evaluate('__mentionCheck.state.annotations')
+                assert not page.evaluate("__mentionCheck.promptReferenceText.exportRecords().filter(item=>item.kind==='time').length")
                 assert not any(c['descriptor']['sourceType'] in ('round','range','snapshot') for c in candidates(page))
                 assert not errors,errors
                 print('PASS: real feedback and MCP images retain the chosen time prose and evidence without an implicit scope; success clears the round',flush=True)
