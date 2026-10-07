@@ -40,7 +40,7 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 保留完整 MCP、技能、详细介绍、图标，以及 `.codex-plugin/plugin.json` 和
 `.mcp.json` 兼容文件。仓库及配置出的本地安装目录仍可使用本地市场清单。
 
-请使用 `0.1.46` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
+请使用 `0.1.47` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
 上传请求的响应；本地 `plugin/read` 成功不能代替云端归档导入验证。
 官方 [包结构说明](https://developers.openai.com/plugins/build/plugins) 区分了
 单插件分发包和本地市场目录；[上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)

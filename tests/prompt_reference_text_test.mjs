@@ -280,6 +280,101 @@ test('icon references number every kind independently and keep exact payloads',(
   assert.equal(restored.expand(visible),wire);
 });
 
+test('one exact node keeps distinct stable item and part bindings',()=>{
+  const token='[[node:room:0]]';
+  let selectedKind='object';
+  const codec=createPromptReferenceText({icons:true,resolve:()=>({kind:selectedKind,name:'柜子',label:'柜子'})});
+  const item=codec.remember('柜子',token,{kind:'object'});
+  const part=codec.remember('柜子',token,{kind:'node'});
+  assert.equal(item.alias,'🧊1');
+  assert.equal(part.alias,'🧩1');
+  assert.equal(item.token,part.token);
+  assert.equal(item.kind,'object');
+  assert.equal(part.kind,'node');
+  selectedKind='node';
+  assert.equal(codec.remember('重选物品',token,{kind:'object'}).alias,item.alias);
+  selectedKind='object';
+  assert.equal(codec.remember('普通节点引用',token).alias,part.alias);
+  const visible='改🧊1，再看🧩1与🧊1。',wire=`改🧊1 ${token}，再看🧩1 ${token}与🧊1 ${token}。`;
+  assert.equal(codec.expand(visible),wire);
+  assert.equal(codec.compact(wire),visible);
+  assert.equal(codec.expand(wire),wire);
+  assert.deepEqual(codec.entries(visible).map(({token,displayKind})=>({token,displayKind})),
+    [{token,displayKind:'object'},{token,displayKind:'node'}]);
+  assert.deepEqual(codec.ranges(visible).map(({entry})=>entry.alias),['🧊1','🧩1','🧊1']);
+  assert.equal(codec.remember('另一个物体',object).alias,'🧊2');
+});
+
+test('existing named node bindings also round trip through the ordinary codec API',()=>{
+  const token='[[node:room:0]]';
+  const codec=createPromptReferenceText({resolve:()=>({name:'柜子'})});
+  const item=codec.remember('柜子',token,{kind:'object'}),part=codec.remember('柜子',token);
+  assert.equal(item.alias,'【柜子】');
+  assert.equal(part.alias,'【柜子2】');
+  const visible=`${item.alias} ${part.alias}`;
+  assert.equal(codec.compact(codec.expand(visible)),visible);
+  const restored=createPromptReferenceText();restored.reset(codec.exportRecords());
+  assert.equal(restored.compact(codec.expand(visible)),visible);
+  assert.equal(restored.remove(visible,token,item.alias),` ${part.alias}`);
+});
+
+test('removing one node display binding leaves its other level and undo bindings intact',()=>{
+  const token='[[node:room:0]]',codec=createPromptReferenceText({icons:true});
+  const item=codec.remember('柜子',token,{kind:'object'}),part=codec.remember('柜子',token,{kind:'node'});
+  const unrelated=codec.remember('其他',object),visible=`${item.alias} ${part.alias} ${item.alias} ${unrelated.alias}`;
+  const before=codec.exportRecords();
+  assert.equal(codec.remove(visible,token,item.alias),` ${part.alias}  ${unrelated.alias}`);
+  assert.equal(codec.remove(visible,token,part.alias),`${item.alias}  ${item.alias} ${unrelated.alias}`);
+  assert.equal(codec.remove(visible,token,unrelated.alias),visible);
+  assert.equal(codec.remove(visible,token),`   ${unrelated.alias}`);
+  // A native undo restores visible text without re-registering anything.
+  assert.equal(codec.expand(visible),`${item.alias} ${token} ${part.alias} ${token} ${item.alias} ${token} ${unrelated.alias} ${object}`);
+  assert.deepEqual(codec.exportRecords(),before);
+  assert.deepEqual(codec.ranges(visible).map(({entry})=>entry.displayKind),['object','node','object','object']);
+});
+
+test('node item and part bindings survive reload with frozen display kinds',()=>{
+  const token='[[node:room:0]]',codec=createPromptReferenceText({icons:true});
+  const item=codec.remember('整件',token,{kind:'object'}),part=codec.remember('细节',token,{kind:'node'});
+  const visible=`${item.alias} ${part.alias}`,wire=codec.expand(visible),records=JSON.parse(JSON.stringify(codec.exportRecords()));
+  assert.deepEqual(records.map(record=>record.displayKind),['object','node']);
+  const restored=createPromptReferenceText({icons:true,resolve:()=>({kind:'object',displayKind:'object',name:'当前选择'})});
+  restored.reset(records);
+  assert.equal(restored.compact(wire),visible);
+  assert.equal(restored.expand(visible),wire);
+  assert.equal(restored.entries(visible).length,2);
+  assert.equal(restored.remember('普通节点',token).alias,part.alias);
+  assert.equal(restored.remember('物品',token,{kind:'object'}).alias,item.alias);
+  assert.equal(restored.remove(visible,token,item.alias),` ${part.alias}`);
+  assert.equal(restored.expand(visible),wire);
+});
+
+test('canonical node prefixes restore both display levels and ordinal gaps',()=>{
+  const token='[[node:room:0]]',codec=createPromptReferenceText({icons:true});
+  const wire=`🧊8 ${token} 与🧩7 ${token}，原始 ${token}`;
+  assert.equal(codec.compact(wire),'🧊8 与🧩7，原始 🧩7');
+  assert.equal(codec.remember('其他物体',object).alias,'🧊9');
+  assert.equal(codec.remember('其他部件','[[node:room:1]]').alias,'🧩8');
+  const numbered=createPromptReferenceText({icons:true});
+  assert.equal(numbered.compact(`【物体8】 ${token} 与【部件7】 ${token}`),'🧊8 与🧩7');
+  const raw=createPromptReferenceText({icons:true,resolve:()=>({kind:'object',displayKind:'object'})});
+  assert.equal(raw.compact(token),'🧩1');
+});
+
+test('legacy node drafts keep their saved class without consulting the current selection',()=>{
+  const token='[[node:room:0]]';
+  const codec=createPromptReferenceText({icons:true,resolve:()=>({kind:'object',displayKind:'object'})});
+  codec.reset([{token,alias:'【部件4】',kind:'node',label:'旧部件'}]);
+  assert.equal(codec.compact(`【部件4】 ${token}`),'🧩4');
+  assert.equal(codec.expand('🧩4'),`🧩4 ${token}`);
+  codec.reset([{token,alias:'【物体8】',displayKind:'object',label:'保存的物品'},
+    {token,alias:'【部件4】',displayKind:'node',label:'保存的部件'}]);
+  assert.equal(codec.compact(`【物体8】 ${token} 【部件4】 ${token}`),'🧊8 🧩4');
+  assert.deepEqual(codec.entries('🧊8 🧩4').map(entry=>entry.displayKind),['object','node']);
+  codec.reset([{token,alias:'【旧节点】',label:'未保存级别'}]);
+  assert.equal(codec.compact(`【旧节点】 ${token}`),'🧩1');
+});
+
 test('icon drafts migrate numbered and named brackets without changing targets or ordinal gaps',()=>{
   const codec=createPromptReferenceText({icons:true});
   const precise='片段0.000000001s · 原始机位 #8';

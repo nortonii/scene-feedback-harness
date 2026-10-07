@@ -37,4 +37,15 @@ check(icon('old [[image:a]] and 🖼️1 [[image:b]] then [[image:a]]'),'old �
 check(icon('柜子 [[object:a]] 柜子 [[object:b]]',objects),'🧊1 🧊2');
 check(icon('普通说明【其他】保持；🕒1 片段0.100000001s'),'普通说明【其他】保持；🕒1 片段0.100000001s');
 check(icon('【时间戳3】 片段0.100000001s'),'🕒3 片段0.100000001s');
+const node='[[node:room:0]]';
+check(icon(`改🧊8 ${node}，查看🧩7 ${node}，再看🧊8 ${node}。`),'改🧊8，查看🧩7，再看🧊8。');
+check(icon(`【物体8】 ${node} 与【部件7】 ${node}`),'🧊8 与🧩7');
+check(icon(`${node} 与🧊1 ${node}`),'🧩1 与🧊1');
+check(icon(`🧊1 ${node} 与🧊1 [[object:other]]`),'🧊1 与🧊2');
+check(icon(`[[object:other]] 与🧊1 ${node}`),'🧊2 与🧊1');
+const frozenNode=[{token:node,kind:'node',scene_node:{node_name:'整件柜子',display_kind:'object'}}];
+check(icon(`整件柜子 ${node}`,frozenNode),'🧊1');
+check(icon(`🧩7 ${node} 与🧊8 ${node}`,frozenNode),'🧩7 与🧊8');
+check(icon(`旧节点 ${node}`),'旧节点 🧩1');
+assert.deepEqual(frozenNode,[{token:node,kind:'node',scene_node:{node_name:'整件柜子',display_kind:'object'}}]);checked++;
 console.log(`${checked} reference display checks passed`);

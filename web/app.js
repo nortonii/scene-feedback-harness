@@ -24,6 +24,7 @@ import { imageToken, collectImageReferences, createPromptImageStore } from './pr
 import { createPromptMentions } from './prompt-mentions.js';
 import { createPromptReferenceText } from './prompt-reference-text.js';
 import {referenceAliasLabel} from './prompt-reference-icons.js';
+import {createPromptReferenceHit} from './prompt-reference-hit.js';
 import { compactReferenceMessage } from './prompt-reference-display.js';
 
 const id = (name) => document.getElementById(name);
@@ -159,6 +160,8 @@ let workspaceChrome = null;
 let feedbackEvidence = null;
 let snapshotGallery = null;
 let pendingTimelineTimeQuote = null;
+let annotationClicks = [];
+let annotationPreviewTimer = null;
 let liveScenePreview = null;
 let livePreviewTimer = null;
 let workspaceSidebar = null;
@@ -578,6 +581,7 @@ function setSubmitLabel(label) {
 
 function updateSubmitLabel() {
   updateAnnotationHistory();
+  for(const button of ui.imageRefs.querySelectorAll('.prompt-reference-remove,.prompt-image-remove'))button.disabled=!editable();
   const status = state.agent?.status || 'disconnected';
   if (state.feedbackTransport === 'mcp_events') {
     setSubmitLabel(state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送' : '发送反馈');
@@ -3971,7 +3975,6 @@ function bindTimelineEvents() {
     }
     pendingTimelineTimeQuote={sessionId:state.sessionId,sourceSignature:state.referenceClipSignature,
       viewId:timelineViewId() || null,timeSec:state.timelineTarget ?? Number(ui.seek.value),generation:state.seekGeneration};
-    announce('参考帧更新完成后将引用此时间。');
   });
   ui.clipInput.addEventListener('change', () => uploadClip(ui.clipInput.files));
   ui.play.addEventListener('click', async () => {
@@ -4297,8 +4300,13 @@ function annotationReferenceLabel(annotation) {
   const location = [annotation.pane === 'reference' ? '参考图' + (ref?.name ? ' ' + ref.name : '') : '',annotationTimeLabel(annotation)].filter(Boolean).join(' · ');
   return annotation.name + (location ? '（' + location + '）' : '');
 }
-function insertAnnotationReference(annotation) {
-  return insertNoteReference(annotationReferenceLabel(annotation), `[[annotation:${annotation.id}]]`);
+function insertAnnotationReference(annotation,options={}) {
+  return insertNoteReference(annotationReferenceLabel(annotation), `[[annotation:${annotation.id}]]`,options);
+}
+function quoteAnnotationReference(annotationId) {
+  if(!editable() || promptMentions?.isComposing())return false;
+  const annotation=state.annotations.find(mark=>mark.id===annotationId);
+  return !!annotation && insertAnnotationReference(annotation,{preserveTool:true});
 }
 async function revealAnnotation(annotation) {
   if (!editable()) return;
@@ -4315,7 +4323,7 @@ async function revealAnnotation(annotation) {
   workspaceChrome?.open(annotation.pane);
   (annotation.pane === 'scene' ? ui.sceneCanvas : ui.referenceCanvas).focus({preventScroll:true});
 }
-function selectAnnotationFromPointer(event,pane) {
+function annotationFromPointer(event,pane) {
   if (pane === 'scene' && state.sceneView !== 'snapshot') return;
   const canvas = event.currentTarget;
   const point = pointFromPointer(event,canvas), rect = canvas.getBoundingClientRect();
@@ -4330,12 +4338,16 @@ function selectAnnotationFromPointer(event,pane) {
       ((pane !== 'scene' || workspaceControls.sceneLabelsVisible()) && hitsAnnotationName(context,mark,point,point,{width:canvas.clientWidth,height:canvas.clientHeight,zoom,radius:3}));
   });
   context.restore();
+  return mark;
+}
+function selectAnnotationFromPointer(event,pane) {
+  const canvas=event.currentTarget,mark=annotationFromPointer(event,pane);
   state.selectedAnnotationId = mark?.id || null;
   canvas.focus({preventScroll:true}); drawOverlays();
   if (!mark) return;
   event.preventDefault(); event.stopPropagation();
   canvas.setPointerCapture(event.pointerId);
-  annotationReferenceDrag = {pointerId:event.pointerId,canvas,id:mark.id,x:event.clientX,y:event.clientY,dragging:false};
+  annotationReferenceDrag = {pointerId:event.pointerId,canvas,id:mark.id,x:event.clientX,y:event.clientY,dragging:false,maxDistance:0};
 }
 function overAnnotationDropTarget(event) {
   const dock = id('chat-dock');
@@ -4346,6 +4358,7 @@ function overAnnotationDropTarget(event) {
 function moveAnnotationReferenceDrag(event) {
   const drag = annotationReferenceDrag;
   if (!drag || drag.pointerId !== event.pointerId) return false;
+  drag.maxDistance=Math.max(drag.maxDistance,Math.hypot(event.clientX-drag.x,event.clientY-drag.y));
   if (!editable() || !selectedAnnotation()) { finishAnnotationReferenceDrag(); return true; }
   if (!drag.dragging && Math.hypot(event.clientX-drag.x,event.clientY-drag.y) < 6) return true;
   if (!drag.dragging) { drag.dragging = true; minimalLayout?.openChat(); }
@@ -4367,10 +4380,20 @@ function finishAnnotationReferenceDrag(event=null) {
   if (drag.canvas.hasPointerCapture(drag.pointerId)) drag.canvas.releasePointerCapture(drag.pointerId);
   const mark = state.annotations.find(mark => mark.id === drag.id);
   const dropped = event && event.pointerId === drag.pointerId && drag.dragging && overAnnotationDropTarget(event);
+  const valid=event?.type==='pointerup' && event.button===0 && event.isPrimary!==false && !drag.dragging &&
+    drag.maxDistance<6 && mark && editable() && toolMode(mark.pane)==='select' &&
+    annotationFromPointer(event,mark.pane)?.id===mark.id;
+  if(valid) {
+    annotationClicks.push({key:annotationClickKey(mark),at:performance.now()});
+    annotationClicks=annotationClicks.slice(-2);
+  } else annotationClicks=[];
   annotationDragGhost.classList.add('hidden');
   document.body.classList.remove('dragging-annotation-reference');
   id('chat-dock').classList.remove('annotation-drop-target','annotation-drop-over');
   if (dropped && mark && editable() && annotationVisibleInPane(mark,mark.pane)) insertAnnotationReference(mark);
+}
+function annotationClickKey(mark) {
+  return JSON.stringify([state.sessionId,mark.id,mark.pane,state.activeReferenceId,state.sceneView,state.snapshot?.id,state.time]);
 }
 
 function sweepEraser(to, canvas) {
@@ -4392,8 +4415,14 @@ function sweepEraser(to, canvas) {
 }
 function annotationPointerDown(event, pane) {
   if (!editable() || state.spacePan || event.button !== 0) return;
+  if(event.isPrimary===false){annotationClicks=[];return;}
   const mode = toolMode(pane);
-  if (mode === 'select') { selectAnnotationFromPointer(event,pane); return; }
+  if (mode === 'select') {
+    selectAnnotationFromPointer(event,pane);
+    if(!annotationReferenceDrag)annotationClicks=[];
+    return;
+  }
+  annotationClicks=[];
   if (pane === 'reference' && !activeReference()) return;
   pauseTimeline();
   const canvas = event.currentTarget;
@@ -4625,7 +4654,7 @@ function renderAnnotations() {
     const copy = document.createElement('div');
     copy.className = 'annotation-copy';
     copy.dataset.annotationId = annotation.id;
-    copy.title = '回看并选中标记，或拖到提示中引用';
+    copy.title = '单击回看，双击或拖到提示中引用';
     bindPromptDrag(copy,() => ({kind:'annotation',annotationId:annotation.id,label:annotationReferenceLabel(annotation)}),'annotation');
     const title = document.createElement('button');
     title.type = 'button'; title.className = 'annotation-select annotation-preview' + (annotation.pane === 'scene' ? ' annotation-open-scene' : '');
@@ -4640,8 +4669,19 @@ function renderAnnotations() {
     const stale = annotation.pane === 'scene' && annotation.scene_revision !== state.sceneRevision;
     subtitle.textContent = annotation.text || (stale ? '固定截图版本 ' + annotation.scene_revision : annotation.object_id ? '对象：' + annotation.object_id : '视觉提示');
     if (stale) subtitle.classList.add('stale-label');
-    title.title = '选中 ' + annotation.name;
-    title.addEventListener('click', () => revealAnnotation(annotation));
+    title.title = '单击回看 ' + annotation.name + '，双击引用';
+    title.addEventListener('click', event => {
+      clearTimeout(annotationPreviewTimer);
+      if(event.detail===0) {revealAnnotation(annotation);return;}
+      // Keep this row and its view alive until a possible second click.
+      if(event.detail===1)annotationPreviewTimer=setTimeout(()=>{
+        if(title.isConnected && state.annotations.some(mark=>mark.id===annotation.id))revealAnnotation(annotation);
+      },500);
+    });
+    copy.addEventListener('dblclick',event=>{
+      event.preventDefault();clearTimeout(annotationPreviewTimer);
+      quoteAnnotationReference(annotation.id);
+    });
     copy.append(title, subtitle);
     const cite = document.createElement('button');
     cite.type = 'button';
@@ -4933,7 +4973,7 @@ function previewPromptImage(entry) {
   ui.imagePreview.showModal();
 }
 function promptText() { return promptReferenceText.expand(ui.note.value); }
-function resolvePromptReference(token, fallback='') {
+function resolvePromptReference(token, fallback='',displayKind=null) {
   const match=/^\[\[(object|node|annotation|image|pose|pose_edit|time):(.+)\]\]$/.exec(token);
   if(!match) return null;
   const [,kind,key]=match;
@@ -4954,7 +4994,11 @@ function resolvePromptReference(token, fallback='') {
     const item=sceneObject(key);name=item?.name || fallback || '物体';label=item?.name || fallback;title='物体 · '+label;missing=!item;
   } else if(kind==='node') {
     const node=state.referencedSceneNodes.find(item=>item.parent_object_id+':'+item.node_path.join('/')===key);
-    name=node?.node_name || fallback || '部件';label=node?.node_name || fallback;title='部件 · '+label;missing=!node;
+    const category=displayKind==='object'?'物体':'部件';
+    name=node?.node_name || fallback || category;label=node?.node_name || fallback;
+    title=[category,label,node ? '来源 '+(sceneObject(node.parent_object_id)?.name || node.parent_object_id) : '',
+      node ? '节点 '+node.node_path.join('/') : '',Number.isInteger(node?.scene_revision)?'版本 '+node.scene_revision:''].filter(Boolean).join(' · ');
+    missing=!node;
   } else if(kind==='pose') {
     const job=state.humanJobs.find(item=>key.startsWith(item.job_id+':'));
     name=job?humanJobName(job):'人体结果';title=fallback;missing=!state.poseRefs.some(item=>poseToken(item.job_id,item.reference_id)===token);
@@ -4965,11 +5009,11 @@ function resolvePromptReference(token, fallback='') {
   }
   return {kind,name,label,title,missing};
 }
-function removePromptReference(token) {
+function removePromptReference(token,alias) {
   if(!editable()) return;
   // Retain source bytes until the draft is submitted, so native text undo can
   // restore a removed image reference with the same immutable evidence.
-  const text=promptReferenceText.remove(ui.note.value,token);
+  const text=promptReferenceText.remove(ui.note.value,token,alias);
   replacePromptText(text);
 }
 function replacePromptText(text) {
@@ -4982,7 +5026,7 @@ function replacePromptText(text) {
   renderPromptImageReferences();saveDraft();
 }
 function previewPromptReference(entry) {
-  const meta=resolvePromptReference(entry.token,entry.label);
+  const meta=resolvePromptReference(entry.token,entry.label,entry.kind);
   id('prompt-reference-title').textContent=entry.alias+' · '+referenceAliasLabel(entry.alias);
   id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
   id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
@@ -5000,7 +5044,7 @@ function renderPromptImageReferences() {
     const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
     const chip=document.createElement('div');chip.className=image?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
     const preview=document.createElement('button');preview.type='button';preview.className=image?'prompt-image-preview':'prompt-reference-preview';
-    preview.title=resolvePromptReference(entry.token,entry.label)?.title || entry.title || entry.label;
+    preview.title=resolvePromptReference(entry.token,entry.label,entry.kind)?.title || entry.title || entry.label;
     preview.setAttribute('aria-label',referenceAliasLabel(entry.alias)+' · '+preview.title);
     if(image) {
       chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;
@@ -5011,7 +5055,7 @@ function renderPromptImageReferences() {
     const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
     if(image) remove.dataset.imageRefId=image.id;
     remove.textContent='×';remove.title='移除 '+referenceAliasLabel(entry.alias);remove.setAttribute('aria-label',remove.title);remove.disabled=!editable();
-    remove.addEventListener('click',()=>removePromptReference(entry.token));chip.append(preview,remove);ui.imageRefs.append(chip);
+    remove.addEventListener('click',()=>removePromptReference(entry.token,entry.alias));chip.append(preview,remove);ui.imageRefs.append(chip);
   }
 }
 
@@ -5020,7 +5064,7 @@ function selectedPromptReference() {
   if (!item) return null;
   const node = state.selectedSceneNode;
   return node?.node_path?.length
-    ? {kind:'node',node:structuredClone(node),label:node.node_name || item.name || item.id,
+    ? {kind:'node',displayKind:state.selectionLevel==='item'?'object':'node',node:structuredClone(node),label:node.node_name || item.name || item.id,
       model_url:item.url || null,scene_revision:state.sceneRevision}
     : {kind:'object',objectId:item.id,label:item.name || item.id};
 }
@@ -5230,7 +5274,6 @@ function quotePromptTime(sourceType,snapshotId=null) {
   }
   try {
     if(insertPromptTimeCandidate(candidate)) {
-      announce('已加入时间戳引用，点击输入框内的时间卡片查看来源。');
       return true;
     }
     if(!editable())announce(promptTimeUnavailableMessage(),true);
@@ -5283,6 +5326,7 @@ function insertPromptMention(candidate) {
     ? selection.objectId === descriptor.objectId
     : selection.node.parent_object_id === descriptor.node.parent_object_id &&
       JSON.stringify(selection.node.node_path) === JSON.stringify(descriptor.node.node_path) &&
+      selection.displayKind === descriptor.displayKind &&
       selection.node.node_name === descriptor.node.node_name && selection.node.stable_id === descriptor.node.stable_id &&
       selection.node.semantic_id === descriptor.node.semantic_id && !!resolveSceneNode(descriptor.node));
   if (!sameTarget || !item || (item.url || null) !== descriptor.model_url) throw new Error('当前选择已变化，请重新选择要引用的物体或部件。');
@@ -5304,11 +5348,11 @@ function insertPromptDragReference(descriptor,options={}) {
   else if (descriptor.kind === 'object' && sceneObject(descriptor.objectId)) return insertNoteReference(descriptor.label,`[[object:${descriptor.objectId}]]`,options);
   else if (descriptor.kind === 'node' && sceneObject(descriptor.node.parent_object_id)?.url === descriptor.model_url) {
     return insertSceneNodeReference(descriptor.node,descriptor.label,
-      {model_url:descriptor.model_url,scene_revision:descriptor.scene_revision},options);
+      {model_url:descriptor.model_url,scene_revision:descriptor.scene_revision},{...options,displayKind:descriptor.displayKind || 'node'});
   }
   else if (descriptor.kind === 'annotation') {
     const marks=state.annotations.filter((mark) => mark.id === descriptor.annotationId);
-    if (marks.length === 1) return insertAnnotationReference(marks[0]);
+    if (marks.length === 1) return insertAnnotationReference(marks[0],options);
     announce('这处标记已失效，请重新选择。',true);
   }
   else announce('这处引用已失效，请重新选择后拖入。',true);
@@ -5384,6 +5428,10 @@ function promptInsertionRange(from,to) {
   return [start,end];
 }
 function bindCompactReferenceEditing() {
+  createPromptReferenceHit({textarea:ui.note,getRanges:value=>promptReferenceText.ranges(value),onHit:entry=>{
+    const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
+    if(image)previewPromptImage(image);else previewPromptReference(entry);
+  }});
   for(const event of ['focus','pointerdown']) ui.note.addEventListener(event,()=>workspaceChrome?.close({resetTool:false}));
   ui.note.addEventListener('compositionstart',()=>{
     const [start,end]=promptInsertionRange(ui.note.selectionStart,ui.note.selectionEnd);
@@ -5440,7 +5488,7 @@ function insertNoteText(text, {replaceSelection=true,focus=true,preserveTool=fal
   return true;
 }
 function insertNoteReference(label, token, options={}) {
-  return insertNoteText(promptReferenceText.remember(label,token).alias,options);
+  return insertNoteText(promptReferenceText.remember(label,token,{kind:options.displayKind}).alias,options);
 }
 function insertAllAnnotationReferences() {
   if (!editable() || !state.annotations.length) return;
@@ -5464,7 +5512,9 @@ function insertSceneNodeReference(node, label, source=null,options={}) {
   const index = state.referencedSceneNodes.findIndex((entry) => entry.parent_object_id + ':' + entry.node_path.join('/') === key);
   const captured = {...node, model_url:source?.model_url ?? sceneObject(node.parent_object_id)?.url ?? null,
     scene_revision:source?.scene_revision ?? state.sceneRevision};
-  if (!insertNoteReference(label || '场景节点', `[[node:${key}]]`,options)) return false;
+  const displayKind=options.displayKind || (state.selectedSceneNode?.parent_object_id===node.parent_object_id &&
+    JSON.stringify(state.selectedSceneNode.node_path)===JSON.stringify(node.node_path) && state.selectionLevel==='item' ? 'object' : 'node');
+  if (!insertNoteReference(label || '场景节点', `[[node:${key}]]`,{...options,displayKind})) return false;
   if (index < 0) state.referencedSceneNodes.push(captured);
   else state.referencedSceneNodes[index] = captured;
   saveDraft();
@@ -6006,6 +6056,7 @@ function bindEvents() {
     canvas.addEventListener('pointermove', annotationPointerMove);
     canvas.addEventListener('pointerup', annotationPointerUp);
     canvas.addEventListener('pointercancel', () => {
+      annotationClicks=[];
       finishAnnotationReferenceDrag();
       state.drag = null;
       drawOverlays();
@@ -6014,6 +6065,14 @@ function bindEvents() {
   for (const canvas of [ui.referenceCanvas,ui.sceneCanvas]) {
     canvas.tabIndex = 0;
     canvas.addEventListener('lostpointercapture', () => finishAnnotationReferenceDrag());
+    canvas.addEventListener('dblclick',event=>{
+      const pane=canvas===ui.referenceCanvas?'reference':'scene';
+      if(event.button!==0 || !editable() || toolMode(pane)!=='select' || annotationClicks.length!==2 ||
+        annotationClicks[0].key!==annotationClicks[1].key || performance.now()-annotationClicks[0].at>1500)return;
+      const mark=annotationFromPointer(event,pane);
+      if(!mark || annotationClickKey(mark)!==annotationClicks[1].key)return;
+      event.preventDefault();annotationClicks=[];quoteAnnotationReference(mark.id);
+    });
   }
   bindCompactReferenceEditing();
   ui.note.addEventListener('input',() => { renderPromptImageReferences(); saveDraft(); });

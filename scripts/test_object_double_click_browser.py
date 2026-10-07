@@ -61,12 +61,14 @@ def main():
                 page.mouse.click(p['x'],p['y']);assert note.input_value()=='开始  后面'
                 page.mouse.dblclick(p['x'],p['y'],delay=70)
                 assert '[[node:fixture_model:0]]' in page.evaluate('__dblRefs.promptText()')
+                assert '🧊1' in note.input_value() and '🧩' not in note.input_value()
                 assert note.input_value().startswith('开始') and note.input_value().endswith(' 后面')
                 assert before==evidence() and page.evaluate("__dblRefs.state.paneModes.reference==='point'")
                 print('PASS single-click selection; real item double-click cites its precise node without changing evidence or left tool',flush=True)
 
                 page.locator('[data-selection-level=part]').click();p=point();before=evidence();page.mouse.dblclick(p['x'],p['y'],delay=70)
                 assert '[[node:fixture_model:0/0]]' in page.evaluate('__dblRefs.promptText()') and before==evidence()
+                assert '🧩1' in note.input_value()
                 assert len(page.evaluate('__dblRefs.state.referencedSceneNodes'))==2
                 print('PASS part double-click cites the hit child instead of the whole GLB',flush=True)
 
@@ -77,7 +79,7 @@ def main():
                 row=page.locator('.object-item[data-object-id=box]');element=row.element_handle();before=evidence()
                 row.click();assert element.evaluate('el=>el.isConnected')
                 row.dblclick();assert '[[object:box]]' in page.evaluate('__dblRefs.promptText()') and before==evidence()
-                assert '🧊1' in note.input_value()
+                assert '🧊2' in note.input_value()
                 print('PASS selected-name and object-list double-click; first selection preserves the clicked row',flush=True)
 
                 note.fill('');page.evaluate("document.getElementById('references-dialog').showModal()")
@@ -85,7 +87,7 @@ def main():
                 page.mouse.move(start['x']+start['width']/2,start['y']+start['height']/2);page.mouse.down()
                 page.mouse.move(end['x']+40,end['y']+end['height']/2,steps=18);page.mouse.up()
                 page.wait_for_function("__dblRefs.promptText().includes('[[object:box]]')")
-                assert note.input_value()=='🧊1'
+                assert note.input_value()=='🧊2'
                 print('PASS existing native object drag still inserts the same exact reference',flush=True)
 
                 note.fill('');p=point();page.mouse.move(p['x'],p['y']);page.mouse.down();page.mouse.move(p['x']+45,p['y']+20,steps=4);page.mouse.move(p['x'],p['y'],steps=4);page.mouse.up()

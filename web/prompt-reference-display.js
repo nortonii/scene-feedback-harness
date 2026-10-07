@@ -84,6 +84,19 @@ function compactIconMessage(text,inlineReferences) {
   }
   const explicitPattern=new RegExp('('+ALIAS_PATTERN+')[ \\t]*$','u');
   const aliases=new Map(),used=new Set(),numbers=new Map();
+  function displayKind(kind,alias,reference) {
+    if(kind!=='node')return kind;
+    const explicit=iconAliasParts(alias)?.kind || /^【(物体|部件)[1-9]\d{0,6}】$/u.exec(alias || '')?.[1];
+    if(explicit==='object' || explicit==='物体')return 'object';
+    if(explicit==='node' || explicit==='部件')return 'node';
+    const saved=reference?.displayKind ?? reference?.display_kind ?? reference?.scene_node?.display_kind;
+    return saved==='object' ? 'object' : 'node';
+  }
+  const bindings=matches.map(match=> {
+    const token=match[0],explicit=explicitPattern.exec(source.slice(0,match.index));
+    const kind=displayKind(match[1],explicit?.[1],metadata.get(token));
+    return {match,kind,key:token+'\u0000'+kind,explicit};
+  });
   function preferred(kind,alias) {
     const parts=iconAliasParts(alias);
     if(parts?.kind===kind)return alias;
@@ -92,19 +105,19 @@ function compactIconMessage(text,inlineReferences) {
   }
   // Reserve explicit numbers throughout the note before numbering old named
   // labels, so different archived sources cannot acquire the same icon.
-  for(const match of matches) {
-    const alias=preferred(match[1],explicitPattern.exec(source.slice(0,match.index))?.[1]);
-    if(alias && !aliases.has(match[0]) && !used.has(alias)) {aliases.set(match[0],alias);used.add(alias);}
+  for(const {kind,key,explicit} of bindings) {
+    const alias=preferred(kind,explicit?.[1]);
+    if(alias && !aliases.has(key) && !used.has(alias)) {aliases.set(key,alias);used.add(alias);}
   }
   let result='',position=0;
-  for(const match of matches) {
-    const token=match[0],kind=match[1],chunk=source.slice(position,match.index);
+  for(const {match,kind,key} of bindings) {
+    const token=match[0],chunk=source.slice(position,match.index);
     const explicit=explicitPattern.exec(chunk);
-    let alias=aliases.get(token);
+    let alias=aliases.get(key);
     if(!alias) {
       let number=numbers.get(kind) || 1;
       do {alias=REFERENCE_ICONS[kind]+number++;}while(used.has(alias));
-      aliases.set(token,alias);used.add(alias);numbers.set(kind,number);
+      aliases.set(key,alias);used.add(alias);numbers.set(kind,number);
     }
     result+=(explicit ? chunk.slice(0,explicit.index) : removeKnownLabel(chunk,metadata.get(token)))+alias;
     position=match.index+token.length;

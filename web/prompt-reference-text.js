@@ -17,6 +17,15 @@ function tokenKind(token) {
   if (/^\[\[time:t[1-9]\d{0,6}\]\]$/.test(token)) return 'time';
   return null;
 }
+function displayKind(type,kind) {
+  return type==='node' && ['object','node'].includes(kind) ? kind : type;
+}
+function aliasKind(type,alias) {
+  if(type!=='node')return type;
+  const explicit=iconAliasParts(alias)?.kind || /^【(物体|部件)[1-9]\d{0,6}】$/u.exec(alias || '')?.[1];
+  return displayKind(type,explicit==='物体'?'object':explicit==='部件'?'node':explicit);
+}
+function bindingKey(token,kind) { return token+'\u0000'+kind; }
 function cleanText(value,limit=1024) {
   return typeof value === 'string' && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value) && value.trim() ? value : '';
 }
@@ -58,7 +67,7 @@ function outsideToken(text,index) {
 
 export function createPromptReferenceText({resolve=()=>null,numbered=false,icons=false}={}) {
   numbered ||= icons;
-  const byToken=new Map(), byAlias=new Map(), byTimeKey=new Map();
+  const byBinding=new Map(), byAlias=new Map(), byTimeKey=new Map();
   const nextNumbers=new Map();
   let legacyAliases=new Map();
   let nextImage=1,nextTime=1,nextTimeToken=1,reserved=new Set();
@@ -110,10 +119,13 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false,icons
     }
     return alias;
   }
-  function register(label,token,{preferred,metadata,useResolver=true}={}) {
+  function register(label,token,{preferred,metadata,useResolver=true,kind}={}) {
     const type=tokenKind(token);
     if (!type) return null;
-    const previous=byToken.get(token);
+    // Display identity can differ for one exact node path. Keep both aliases
+    // alive so native textarea undo never loses its original source binding.
+    const shownKind=displayKind(type,kind),key=bindingKey(token,shownKind);
+    const previous=byBinding.get(key);
     let descriptor=metadata || null;
     if (useResolver && type!=='time') {
       try { descriptor=resolve(token,cleanText(label) || previous?.label || '') || null; }
@@ -122,7 +134,7 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false,icons
     if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) descriptor={};
     const capturedTime=type==='time' ? previous?.timeText || timeText(descriptor.timeText) : null;
     if(type==='time' && !capturedTime)return null;
-    const name=readableName(cleanText(descriptor.name) || previous?.name,type);
+    const name=readableName(cleanText(descriptor.name) || previous?.name,shownKind);
     const fullLabel=capturedTime || cleanText(descriptor.label) || cleanText(label) || previous?.label || '';
     const labels=[...new Set([...(previous?.labels || []),...(Array.isArray(descriptor.labels) ? descriptor.labels.slice(-16) : []),
       cleanText(label),fullLabel].filter(item=>cleanText(item)))].slice(-16);
@@ -133,8 +145,8 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false,icons
           typeof value === 'string' && value.length <= 512 && !value.startsWith('data:')) extra[key]=value;
     }
     const entry={...previous,...extra,token,label:fullLabel,
-      alias:previous?.alias || allocate(type,name,preferred),
-      kind:type==='time'?'time':cleanText(descriptor.kind,64) || previous?.kind || type,
+      alias:previous?.alias || allocate(shownKind,name,preferred),
+      kind:shownKind,displayKind:shownKind,
       title:capturedTime || cleanText(descriptor.title,2048) || fullLabel || previous?.title || name,name,labels};
     if(type==='time') {
       entry.timeText=capturedTime;
@@ -142,10 +154,10 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false,icons
       byTimeKey.set(entry.timeKey+'\u0000'+capturedTime,entry);
       nextTimeToken=Math.max(nextTimeToken,Number(/^\[\[time:t(\d+)\]\]$/.exec(token)[1])+1);
     }
-    byToken.set(token,entry); byAlias.set(entry.alias,entry);
+    byBinding.set(key,entry); byAlias.set(entry.alias,entry);
     return entry;
   }
-  function remember(label,token) { return register(label,token); }
+  function remember(label,token,{kind}={}) { return register(label,token,{kind}); }
   function rememberTime(text,key=text) {
     const captured=timeText(text),sourceKey=cleanText(key,32768);
     if(!captured || !sourceKey)return null;
@@ -175,7 +187,9 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false,icons
       const beforeAlias=ALIAS_AT_END.exec(prefix);
       const preferred=beforeAlias && validAlias(beforeAlias[1]) &&
         standalone(prefix,beforeAlias.index,beforeAlias[1].length) ? beforeAlias[1] : null;
-      const entry=register('',token,{preferred:preferredAlias(tokenKind(token),preferred)});
+      const bound=byAlias.get(preferred);
+      const kind=bound?.token===token ? bound.displayKind : aliasKind(tokenKind(token),preferred);
+      const entry=register('',token,{kind,preferred:preferredAlias(kind,preferred)});
       if(!entry)continue;
       if (preferred) prefix=prefix.slice(0,beforeAlias.index);
       else {
@@ -227,42 +241,45 @@ export function createPromptReferenceText({resolve=()=>null,numbered=false,icons
     const text=compact(value), found=[], seen=new Set();
     for (const match of aliasMatches(text)) {
       const entry=byAlias.get(match[0]);
-      if (!seen.has(entry.token)) { seen.add(entry.token); found.push(entry); }
+      const key=bindingKey(entry.token,entry.displayKind);
+      if (!seen.has(key)) { seen.add(key); found.push(entry); }
     }
     return found;
   }
-  function remove(value,token) {
-    const text=compact(value), entry=byToken.get(token);
-    if (!entry) return text;
+  function remove(value,token,alias) {
+    const text=compact(value);
+    if(alias!==undefined && byAlias.get(alias)?.token!==token)return text;
     let output='',cursor=0;
     for (const match of aliasMatches(text)) {
-      if (match[0] !== entry.alias) continue;
+      if (byAlias.get(match[0]).token!==token || alias!==undefined && match[0]!==alias) continue;
       output+=text.slice(cursor,match.index); cursor=match.index+match[0].length;
     }
     return output+text.slice(cursor);
   }
   function exportRecords() {
-    return [...byToken.values()].map(({token,label,alias,kind,title,name,labels,timeText,timeKey})=>({token,label,alias,kind,title,name,labels:[...labels],
+    return [...byBinding.values()].map(({token,label,alias,kind,displayKind,title,name,labels,timeText,timeKey})=>({token,label,alias,kind,displayKind,title,name,labels:[...labels],
       ...(kind==='time'?{timeText,timeKey}:{})}));
   }
   function reset(records=[]) {
-    byToken.clear();byAlias.clear();byTimeKey.clear();nextNumbers.clear();legacyAliases.clear();nextImage=1;nextTime=1;nextTimeToken=1;
+    byBinding.clear();byAlias.clear();byTimeKey.clear();nextNumbers.clear();legacyAliases.clear();nextImage=1;nextTime=1;nextTimeToken=1;
     const usable=(Array.isArray(records) ? records : []).slice(0,4096).filter(record=>record &&
       typeof record === 'object' && tokenKind(record.token) && (tokenKind(record.token)!=='time' || timeText(record.timeText)));
     const owners=new Map();
     for (const record of usable) {
-      const alias=preferredAlias(tokenKind(record.token),record.alias);
-      if (validAlias(alias) && acceptsAlias(tokenKind(record.token),alias) && !owners.has(alias)) {
-        owners.set(alias,record.token);
+      const kind=displayKind(tokenKind(record.token),record.displayKind ?? record.kind);
+      const alias=preferredAlias(kind,record.alias);
+      if (validAlias(alias) && acceptsAlias(kind,alias) && !owners.has(alias)) {
+        owners.set(alias,bindingKey(record.token,kind));
       }
     }
     reserved=new Set(owners.keys());
     const oldOwners=new Set();
     for (const record of usable) {
-      if (byToken.has(record.token)) continue;
-      const alias=preferredAlias(tokenKind(record.token),record.alias);
-      const preferred=owners.get(alias) === record.token ? alias : null;
-      const entry=register(record.label,record.token,{metadata:record,preferred,useResolver:false});
+      const kind=displayKind(tokenKind(record.token),record.displayKind ?? record.kind),key=bindingKey(record.token,kind);
+      if (byBinding.has(key)) continue;
+      const alias=preferredAlias(kind,record.alias);
+      const preferred=owners.get(alias) === key ? alias : null;
+      const entry=register(record.label,record.token,{kind,metadata:record,preferred,useResolver:false});
       if(numbered && validAlias(record.alias) && !oldOwners.has(record.alias)) {
         oldOwners.add(record.alias);
         if(entry.alias!==record.alias)legacyAliases.set(record.alias,entry.alias);

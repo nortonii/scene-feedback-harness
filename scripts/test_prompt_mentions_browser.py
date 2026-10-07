@@ -157,7 +157,7 @@ def main():
                 select_model(page,'part')
                 query(page,"Door"); choose(page,"node","Door")
                 assert canonical(page).count("[[node:fixture_model:") == 2
-                assert "🧩1" in field.input_value() and "🧩2" in field.input_value()
+                assert "🧊2" in field.input_value() and "🧩1" in field.input_value()
                 assert len(page.evaluate("__mentionCheck.state.referencedSceneNodes")) == 2
                 candidates=page.evaluate('__mentionCheck.getPromptMentionCandidates()')
                 assert len(candidates)==1 and candidates[0]['kind']=='node' and candidates[0]['label']=='Door'
