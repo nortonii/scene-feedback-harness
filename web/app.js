@@ -223,6 +223,8 @@ const pointer = new THREE.Vector2();
 const gltfLoader = new GLTFLoader();
 let selectionHelper = null;
 let pointerDown = null;
+let sceneClicks = [];
+let objectListSignature = null;
 let orbitStart = null;
 
 function announce(message, error=false) {
@@ -2208,8 +2210,9 @@ function renderSelection() {
       ? (state.selectedSceneNode.node_name || '子节点 ' + state.selectedSceneNode.node_path.join('/'))
       : '';
     name.textContent = (item.name || item.id) + (nodeLabel ? ' / ' + nodeLabel : '');
-    name.title = '拖到提示中引用选中的物品或部件';
+    name.title = '双击或拖到提示中引用选中的物品或部件';
     bindPromptDrag(name,selectedPromptReference,'selection');
+    name.addEventListener('dblclick',event=>{event.preventDefault();quoteObjectReference(selectedPromptReference());});
     const objectId = document.createElement('div');
     objectId.className = 'selected-id';
     objectId.textContent = item.id + (state.selectedSceneNode ? ' · 节点 ' + (state.selectedSceneNode.node_path.join('/') || '根') : '');
@@ -2240,8 +2243,14 @@ function renderSelection() {
   promptMentions?.refresh();
 }
 function renderObjectList() {
-  ui.objectList.replaceChildren();
   id('object-count').textContent = String(state.sceneObjects.length);
+  const signature=JSON.stringify([state.sessionId,state.sceneObjects.map(item=>[item.id,item.name,item.type,item.color,item.url])]);
+  if(signature===objectListSignature) {
+    for(const button of ui.objectList.querySelectorAll('.object-item'))button.classList.toggle('active',button.dataset.objectId===state.selectedId);
+    for(const button of ui.objectList.querySelectorAll('.object-reference-insert'))button.disabled=!editable();
+    return;
+  }
+  objectListSignature=signature;ui.objectList.replaceChildren();
   if (!state.sceneObjects.length) {
     const empty = document.createElement('p');
     empty.className = 'muted';
@@ -2256,7 +2265,7 @@ function renderObjectList() {
     button.type = 'button';
     button.className = 'object-item' + (state.selectedId === item.id ? ' active' : '');
     button.dataset.objectId = item.id;
-    button.title = '点选物体，或拖到提示中引用';
+    button.title = '单击选择，双击或拖到提示中引用';
     bindPromptDrag(button,() => ({kind:'object',objectId:item.id,label:item.name || item.id}),'object');
     const swatch = document.createElement('span');
     swatch.className = 'object-color';
@@ -2267,6 +2276,9 @@ function renderObjectList() {
     kind.textContent = ({box:'方盒',sphere:'球体',cylinder:'圆柱',model:'模型'})[item.type] || item.type;
     button.append(swatch, name, kind);
     button.addEventListener('click', () => selectObject(item.id));
+    button.addEventListener('dblclick',event=>{
+      event.preventDefault();quoteObjectReference({kind:'object',objectId:item.id,label:sceneObject(item.id)?.name || item.name || item.id});
+    });
     const cite = document.createElement('button');
     cite.type = 'button';
     cite.className = 'reference-insert object-reference-insert';
@@ -5276,13 +5288,23 @@ function insertPromptMention(candidate) {
   if (!sameTarget || !item || (item.url || null) !== descriptor.model_url) throw new Error('当前选择已变化，请重新选择要引用的物体或部件。');
   return insertPromptDragReference(descriptor);
 }
-function insertPromptDragReference(descriptor) {
+function quoteObjectReference(descriptor) {
+  if(!editable() || promptMentions?.isComposing()) {announce('当前不能新增引用，请完成输入或等待工作台就绪。',true);return false;}
+  if(!descriptor || !['object','node'].includes(descriptor.kind) ||
+      descriptor.kind==='node' && !resolveSceneNode(descriptor.node)) {
+    announce('这处物品或部件已不可用，请重新选择。',true);return false;
+  }
+  const inserted=insertPromptDragReference(descriptor,{preserveTool:true});
+  if(inserted)announce('已加入物品或部件引用。');
+  return inserted;
+}
+function insertPromptDragReference(descriptor,options={}) {
   if (!editable() || !descriptor) return false;
   if (descriptor.kind === 'image') return addPromptImageReference(descriptor.image);
-  else if (descriptor.kind === 'object' && sceneObject(descriptor.objectId)) return insertNoteReference(descriptor.label,`[[object:${descriptor.objectId}]]`);
+  else if (descriptor.kind === 'object' && sceneObject(descriptor.objectId)) return insertNoteReference(descriptor.label,`[[object:${descriptor.objectId}]]`,options);
   else if (descriptor.kind === 'node' && sceneObject(descriptor.node.parent_object_id)?.url === descriptor.model_url) {
     return insertSceneNodeReference(descriptor.node,descriptor.label,
-      {model_url:descriptor.model_url,scene_revision:descriptor.scene_revision});
+      {model_url:descriptor.model_url,scene_revision:descriptor.scene_revision},options);
   }
   else if (descriptor.kind === 'annotation') {
     const marks=state.annotations.filter((mark) => mark.id === descriptor.annotationId);
@@ -5294,8 +5316,11 @@ function insertPromptDragReference(descriptor) {
 }
 function bindPromptDrag(element,getDescriptor,kind) {
   element.draggable = true; element.dataset.promptDrag = kind;
-  let dragged = false;
+  let dragged = false,dragFinishedAt=-Infinity;
   element.addEventListener('click',(event) => { if (dragged) { event.preventDefault(); event.stopImmediatePropagation(); } },true);
+  element.addEventListener('dblclick',event=>{
+    if(dragged || performance.now()-dragFinishedAt<500){event.preventDefault();event.stopImmediatePropagation();}
+  },true);
   element.addEventListener('dragstart',(event) => {
     if (!editable() || !event.dataTransfer) { event.preventDefault(); return; }
     try {
@@ -5310,6 +5335,7 @@ function bindPromptDrag(element,getDescriptor,kind) {
     } catch (error) { event.preventDefault(); announce(error.message,true); }
   });
   element.addEventListener('dragend',() => {
+    dragFinishedAt=performance.now();
     promptDrag = null; ui.note.closest('.prompt-input').classList.remove('prompt-drop-active');
     setTimeout(() => { dragged = false; },0);
   });
@@ -5423,8 +5449,8 @@ function insertNoteText(text, {replaceSelection=true,focus=true,preserveTool=fal
   saveDraft();
   return true;
 }
-function insertNoteReference(label, token) {
-  return insertNoteText(promptReferenceText.remember(label,token).alias);
+function insertNoteReference(label, token, options={}) {
+  return insertNoteText(promptReferenceText.remember(label,token).alias,options);
 }
 function insertAllAnnotationReferences() {
   if (!editable() || !state.annotations.length) return;
@@ -5442,13 +5468,13 @@ function insertAllAnnotationReferences() {
     announce('已引用 ' + references.length + ' 条标记，可继续补充提示。');
   }
 }
-function insertSceneNodeReference(node, label, source=null) {
+function insertSceneNodeReference(node, label, source=null,options={}) {
   if (!editable() || !node?.node_path?.length) return false;
   const key = node.parent_object_id + ':' + node.node_path.join('/');
   const index = state.referencedSceneNodes.findIndex((entry) => entry.parent_object_id + ':' + entry.node_path.join('/') === key);
   const captured = {...node, model_url:source?.model_url ?? sceneObject(node.parent_object_id)?.url ?? null,
     scene_revision:source?.scene_revision ?? state.sceneRevision};
-  if (!insertNoteReference(label || '场景节点', `[[node:${key}]]`)) return false;
+  if (!insertNoteReference(label || '场景节点', `[[node:${key}]]`,options)) return false;
   if (index < 0) state.referencedSceneNodes.push(captured);
   else state.referencedSceneNodes[index] = captured;
   saveDraft();
@@ -5754,6 +5780,11 @@ function pickScene(event) {
 function handleSceneClick(event) {
   const selection = pickScene(event);
   if (selection) selectObject(selection.objectId, selection.sceneNode, selection.detailNode);
+  return selection;
+}
+function sceneClickKey(selection) {
+  return JSON.stringify([state.sessionId,selection.objectId,sceneObject(selection.objectId)?.url || null,
+    selection.sceneNode?.node_path,state.selectionLevel,state.sceneRevision]);
 }
 function resizeScene() {
   const width = ui.sceneStage.clientWidth;
@@ -6076,11 +6107,16 @@ function bindEvents() {
     minimalLayout?.closeReferences();
   };
   renderer.domElement.addEventListener('dblclick', (event) => {
-    if (!editable() || state.sceneView !== 'live' || toolMode('scene') !== 'select') return;
+    if (event.button!==0 || !editable() || state.sceneView !== 'live' || toolMode('scene') !== 'select' ||
+        sceneClicks.length!==2 || sceneClicks.some(click=>!click.valid) ||
+        performance.now()-sceneClicks[0].at>1500 || sceneClicks[0].key!==sceneClicks[1].key) return;
     const selection = pickScene(event);
     if (!selection) return;
+    const key=sceneClickKey(selection);
+    if(key!==sceneClicks[1].key)return;
+    event.preventDefault();sceneClicks=[];
     selectObject(selection.objectId, selection.sceneNode, selection.detailNode);
-    focusSelection();
+    quoteObjectReference(selectedPromptReference());
   });
   document.addEventListener('keydown', (event) => {
     if (event.key.toLowerCase() !== 'f' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 ||
@@ -6101,14 +6137,23 @@ function bindEvents() {
     if (event.key === 'Escape') { event.preventDefault(); hideTextEditor(); }
   });
   renderer.domElement.addEventListener('pointerdown', (event) => {
-    pointerDown = {x:event.clientX, y:event.clientY, button:event.button};
+    if(event.button!==0 || event.isPrimary===false){pointerDown=null;sceneClicks=[];return;}
+    pointerDown = {x:event.clientX, y:event.clientY,id:event.pointerId,maxDistance:0};
+  });
+  renderer.domElement.addEventListener('pointermove',event=>{
+    if(pointerDown?.id===event.pointerId)pointerDown.maxDistance=Math.max(pointerDown.maxDistance,Math.hypot(event.clientX-pointerDown.x,event.clientY-pointerDown.y));
   });
   renderer.domElement.addEventListener('pointerup', (event) => {
-    if (!pointerDown || pointerDown.button !== 0 || toolMode('scene') !== 'select' || state.sceneView !== 'live') return;
-    const distance = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
+    const gesture=pointerDown;
     pointerDown = null;
-    if (distance < 5) handleSceneClick(event);
+    const valid=gesture?.id===event.pointerId && event.button===0 && editable() && toolMode('scene')==='select' && state.sceneView==='live' &&
+      Math.max(gesture.maxDistance,Math.hypot(event.clientX-gesture.x,event.clientY-gesture.y))<5;
+    const selection=valid ? handleSceneClick(event) : null;
+    sceneClicks.push({valid:!!selection,at:performance.now(),
+      key:selection ? sceneClickKey(selection) : null});
+    sceneClicks=sceneClicks.slice(-2);
   });
+  renderer.domElement.addEventListener('pointercancel',()=>{pointerDown=null;sceneClicks=[];});
   controls.addEventListener('start', () => {
     orbitStart = {position:camera.position.clone(), target:controls.target.clone(), quaternion:camera.quaternion.clone()};
   });
