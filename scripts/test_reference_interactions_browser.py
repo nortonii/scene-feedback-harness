@@ -90,15 +90,46 @@ def main():
                 assert note.input_value()=='🕒1' and '正面' in page.evaluate('__refs.promptText()')
                 assert not page.locator('#toast').evaluate("el=>el.classList.contains('show')")
                 assert evidence()==before
+                brightness=page.evaluate("JSON.stringify(['body','#reference-stage','#scene-stage'].map(s=>{const c=getComputedStyle(document.querySelector(s));return [c.filter,c.backdropFilter,c.opacity,c.backgroundColor]}))")
                 note.click(position={'x':22,'y':20})
-                page.wait_for_function("document.getElementById('prompt-reference-dialog').open")
+                page.wait_for_function("!document.getElementById('prompt-reference-dialog').hidden")
                 assert '时间戳1' in page.locator('#prompt-reference-title').inner_text()
                 assert '正面' in page.locator('#prompt-reference-detail').inner_text()
+                assert page.locator('#prompt-reference-dialog').bounding_box()['width']<=261
+                assert page.evaluate("document.querySelector(':modal')===null && document.activeElement===__refs.ui.note")
+                assert brightness==page.evaluate("JSON.stringify(['body','#reference-stage','#scene-stage'].map(s=>{const c=getComputedStyle(document.querySelector(s));return [c.filter,c.backdropFilter,c.opacity,c.backgroundColor]}))")
+                page.screenshot(path='/tmp/scene_feedback_reference_popover_048.png')
+                rect=note.bounding_box();page.mouse.move(rect['x']+rect['width']-25,rect['y']+20)
+                page.wait_for_function("document.getElementById('prompt-reference-dialog').hidden")
+                page.mouse.move(rect['x']+22,rect['y']+20);page.wait_for_timeout(200)
+                assert page.locator('#prompt-reference-dialog').evaluate('el=>el.hidden'),'hover alone must not reopen a source'
+                note.click(position={'x':22,'y':20})
+                page.wait_for_function("!document.getElementById('prompt-reference-dialog').hidden")
                 page.locator('#prompt-reference-close').click()
                 note.click(position={'x':note.bounding_box()['width']-25,'y':20})
-                assert not page.locator('#prompt-reference-dialog').evaluate('el=>el.open')
+                assert page.locator('#prompt-reference-dialog').evaluate('el=>el.hidden')
                 assert evidence()==before
-                print('PASS: timeline double-click inserts silently; clicking the native inline time icon opens exact details, blank space does not',flush=True)
+                print('PASS: silent time citation; compact inline details preserve focus and brightness, leave into blank space closes, hover cannot reopen',flush=True)
+
+                control(page,'#drag-reference-image').click()
+                image=page.evaluate('structuredClone(__refs.state.imageRefs[0])')
+                card=page.locator('.prompt-image-preview').first
+                card.click()
+                popup=page.locator('#prompt-image-preview-dialog')
+                assert not popup.evaluate('el=>el.hidden') and popup.bounding_box()['width']<=301
+                assert page.locator('#prompt-image-preview-image').get_attribute('src')==image['annotated_data_url']
+                page.locator('#prompt-image-preview-toggle').click()
+                assert page.locator('#prompt-image-preview-image').get_attribute('src')==image['original_data_url']
+                page.keyboard.press('Delete');assert evidence()==before,'preview controls must not delete a selected scene mark'
+                page.locator('.prompt-reference-preview').filter(has_text='🕒1').click()
+                assert popup.evaluate('el=>el.hidden') and page.locator('#prompt-image-preview-image').get_attribute('src') is None
+                card.click()
+                assert not popup.evaluate('el=>el.hidden') and page.locator('#prompt-image-preview-image').get_attribute('src')==image['annotated_data_url']
+                assert page.locator('#prompt-reference-dialog').evaluate('el=>el.hidden')
+                page.mouse.move(1,1);page.wait_for_function("document.getElementById('prompt-image-preview-dialog').hidden")
+                assert page.locator('#prompt-image-preview-image').get_attribute('src') is None
+                assert evidence()==before
+                print('PASS: small source-bound image preview toggles original/marked pixels, switches and reopens without clearing the new image, then closes and releases pixels',flush=True)
 
                 # Detailed selection may hit the same root path as item-level
                 # selection. Display bindings differ; the target remains exact.
@@ -110,7 +141,7 @@ def main():
                 assert note.input_value()=='🧊1 🧩1'
                 assert page.evaluate("__refs.promptText().split('[[node:fixture_model:0]]').length-1")==2
                 note.click(position={'x':22,'y':20})
-                page.wait_for_function("document.getElementById('prompt-reference-dialog').open")
+                page.wait_for_function("!document.getElementById('prompt-reference-dialog').hidden")
                 assert '物体1' in page.locator('#prompt-reference-title').inner_text()
                 assert page.locator('#prompt-reference-detail').inner_text().startswith('物体 · Cabinet')
                 page.locator('#prompt-reference-close').click()

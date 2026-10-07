@@ -24,7 +24,8 @@ import { imageToken, collectImageReferences, createPromptImageStore } from './pr
 import { createPromptMentions } from './prompt-mentions.js';
 import { createPromptReferenceText } from './prompt-reference-text.js';
 import {referenceAliasLabel} from './prompt-reference-icons.js';
-import {createPromptReferenceHit} from './prompt-reference-hit.js';
+import {createPromptReferenceHit,hitPromptReference} from './prompt-reference-hit.js';
+import {createPromptReferencePopover} from './prompt-reference-popover.js';
 import { compactReferenceMessage } from './prompt-reference-display.js';
 
 const id = (name) => document.getElementById(name);
@@ -154,6 +155,8 @@ let minimalLayout = null;
 let promptMentions = null;
 let promptAttachments = null;
 const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference,numbered:true,icons:true});
+const promptReferencePopover=createPromptReferencePopover({getInlineHit:(x,y)=>
+  hitPromptReference(ui.note,promptReferenceText.ranges(ui.note.value),x,y)});
 let workspaceControls = null;
 let immersiveWorkspace = null;
 let workspaceChrome = null;
@@ -4963,14 +4966,16 @@ function addPromptImageReference(entry) {
   renderPromptImageReferences();
   return true;
 }
-function previewPromptImage(entry) {
+function previewPromptImage(entry,source={}) {
+  promptReferencePopover.close();
   imagePreviewReference = entry;
-  ui.imagePreviewTitle.textContent = entry.label;
+  ui.imagePreviewTitle.textContent = (source.entry?.alias || '图片')+' · '+(entry.pane==='reference'?'参考图':'场景截图');
+  ui.imagePreviewTitle.title = entry.label;
   ui.imagePreviewImage.src = entry.annotated_data_url || entry.original_data_url;
   ui.imagePreviewToggle.classList.toggle('hidden',!entry.annotated_data_url);
   ui.imagePreviewToggle.textContent = '查看原图';
   ui.imagePreviewToggle.dataset.original = 'false';
-  ui.imagePreview.showModal();
+  promptReferencePopover.show(ui.imagePreview,source);
 }
 function promptText() { return promptReferenceText.expand(ui.note.value); }
 function resolvePromptReference(token, fallback='',displayKind=null) {
@@ -5025,15 +5030,16 @@ function replacePromptText(text) {
   ui.note.setSelectionRange(Math.min(start,text.length),Math.min(end,text.length));
   renderPromptImageReferences();saveDraft();
 }
-function previewPromptReference(entry) {
+function previewPromptReference(entry,source={}) {
+  promptReferencePopover.close();
   const meta=resolvePromptReference(entry.token,entry.label,entry.kind);
   id('prompt-reference-title').textContent=entry.alias+' · '+referenceAliasLabel(entry.alias);
   id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
   id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
   const locate=id('prompt-reference-locate');
   const mark=entry.kind==='annotation'?state.annotations.find(item=>`[[annotation:${item.id}]]`===entry.token):null;
-  locate.hidden=!mark;locate.onclick=()=>{id('prompt-reference-dialog').close();revealAnnotation(mark);};
-  id('prompt-reference-dialog').showModal();
+  locate.hidden=!mark;locate.onclick=()=>{promptReferencePopover.close();revealAnnotation(mark);};
+  promptReferencePopover.show(id('prompt-reference-dialog'),source);
 }
 function renderPromptImageReferences() {
   feedbackEvidence?.refresh();
@@ -5051,7 +5057,7 @@ function renderPromptImageReferences() {
       const thumbnail=document.createElement('img');thumbnail.src=image.annotated_data_url || image.original_data_url;thumbnail.alt='';preview.append(thumbnail);
     }
     const label=document.createElement('span');label.className='prompt-reference-alias';label.textContent=entry.alias+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
-    preview.addEventListener('click',()=>image?previewPromptImage(image):previewPromptReference(entry));
+    preview.addEventListener('click',event=>image?previewPromptImage(image,{anchor:preview,event,entry}):previewPromptReference(entry,{anchor:preview,event,entry}));
     const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
     if(image) remove.dataset.imageRefId=image.id;
     remove.textContent='×';remove.title='移除 '+referenceAliasLabel(entry.alias);remove.setAttribute('aria-label',remove.title);remove.disabled=!editable();
@@ -5409,7 +5415,7 @@ function bindPromptReferenceEvents() {
     const descriptor = promptDrag.descriptor; promptDrag = null;
     insertPromptDragReference(descriptor);
   });
-  id('prompt-image-preview-close').addEventListener('click',() => ui.imagePreview.close());
+  id('prompt-image-preview-close').addEventListener('click',() => promptReferencePopover.close());
   ui.imagePreview.addEventListener('close',() => { imagePreviewReference = null; ui.imagePreviewImage.removeAttribute('src'); });
   ui.imagePreviewToggle.addEventListener('click',() => {
     if (!imagePreviewReference?.annotated_data_url) return;
@@ -5428,16 +5434,17 @@ function promptInsertionRange(from,to) {
   return [start,end];
 }
 function bindCompactReferenceEditing() {
-  createPromptReferenceHit({textarea:ui.note,getRanges:value=>promptReferenceText.ranges(value),onHit:entry=>{
+  createPromptReferenceHit({textarea:ui.note,getRanges:value=>promptReferenceText.ranges(value),onHit:(entry,range,event)=>{
     const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
-    if(image)previewPromptImage(image);else previewPromptReference(entry);
+    const source={anchor:ui.note,event,range,entry};
+    if(image)previewPromptImage(image,source);else previewPromptReference(entry,source);
   }});
   for(const event of ['focus','pointerdown']) ui.note.addEventListener(event,()=>workspaceChrome?.close({resetTool:false}));
   ui.note.addEventListener('compositionstart',()=>{
     const [start,end]=promptInsertionRange(ui.note.selectionStart,ui.note.selectionEnd);
     ui.note.setSelectionRange(start,end);
   });
-  id('prompt-reference-close').addEventListener('click',()=>id('prompt-reference-dialog').close());
+  id('prompt-reference-close').addEventListener('click',() => promptReferencePopover.close());
   ui.note.addEventListener('beforeinput',event=>{
     if(event.isComposing || !editable() || !/^(delete|insert)/.test(event.inputType)) return;
     const text=ui.note.value,start=ui.note.selectionStart,end=ui.note.selectionEnd;
@@ -6170,7 +6177,7 @@ function bindEvents() {
   });
   document.addEventListener('keydown', (event) => {
     if (event.key.toLowerCase() !== 'f' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 ||
-        event.target.closest('input, textarea, select, [contenteditable], dialog[open]') || document.querySelector('dialog[open]') || state.sceneView !== 'live') return;
+        event.target.closest('input, textarea, select, [contenteditable], dialog[open]') || document.querySelector('dialog[open], .prompt-reference-popover:not([hidden])') || state.sceneView !== 'live') return;
     event.preventDefault(); focusSelection();
   });
   id('ground-axis').addEventListener('change', () => {
@@ -6222,6 +6229,8 @@ function bindEvents() {
     scheduleLiveScenePreview();
   });
   document.addEventListener('keydown', (event) => {
+    if(document.querySelector('.prompt-reference-popover:not([hidden])') &&
+      !event.target.closest('input, textarea, select, [contenteditable]'))return;
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.isComposing &&
         !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false]), dialog[open]')) {
       const key = event.key.toLowerCase();

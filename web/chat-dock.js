@@ -57,7 +57,7 @@ export function setupChatDock({getState}) {
     const editing=focusWithin && editable(active) && (composing || performance.now()<editUntil);
     return surfaces.some(mouseWithin) || focusHeld || editing || pointerPress ||
       popupNodes().some(element=>popupVisible(element) && element.getAttribute('aria-busy')==='true') ||
-      !!document.querySelector('dialog[open]') || pending || state.agent?.status==='awaiting_approval' ||
+      !!document.querySelector('dialog[open], .prompt-reference-popover:not([hidden])') || pending || state.agent?.status==='awaiting_approval' ||
       moveDrag || resizeDrag || dock.classList.contains('panel-resizing') || dropActive;
   }
   function renderPreview() {

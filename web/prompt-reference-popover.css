@@ -1,0 +1,86 @@
+/* Clicked source details sit beside the composer without affecting the canvas. */
+#prompt-reference-dialog,
+#prompt-image-preview-dialog {
+  position: fixed;
+  z-index: 130;
+  inset: auto;
+  box-sizing: border-box;
+  width: 260px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border: 1px solid var(--line, #d9d9d3);
+  border-radius: 12px;
+  background: var(--paper, #faf9f5);
+  color: var(--ink, #252520);
+  box-shadow: 0 5px 18px #17171518;
+  filter: none;
+  backdrop-filter: none;
+}
+#prompt-image-preview-dialog { width: 300px; }
+#prompt-reference-dialog[hidden],
+#prompt-image-preview-dialog[hidden],
+#prompt-reference-dialog [hidden],
+#prompt-image-preview-dialog [hidden] { display: none !important; }
+#prompt-reference-dialog .dialog-head,
+#prompt-image-preview-dialog .dialog-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 7px;
+}
+#prompt-reference-dialog h2,
+#prompt-image-preview-dialog h2 {
+  margin: 0;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+#prompt-reference-dialog .icon-button,
+#prompt-image-preview-dialog .icon-button {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted, #65655e);
+  font-size: 17px;
+  line-height: 1;
+}
+#prompt-reference-dialog .icon-button:hover,
+#prompt-image-preview-dialog .icon-button:hover { background: var(--surface-hover, #eeeee8); }
+#prompt-reference-dialog p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+#prompt-reference-status:not(:empty) { margin-top: 7px; }
+#prompt-reference-dialog #prompt-reference-locate,
+#prompt-image-preview-dialog #prompt-image-preview-toggle {
+  margin-top: 8px;
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+#prompt-image-preview-dialog #prompt-image-preview-toggle { margin-top: 0; }
+#prompt-image-preview-dialog #prompt-image-preview-image {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  margin-top: 7px;
+  border-radius: 6px;
+  object-fit: contain;
+}
