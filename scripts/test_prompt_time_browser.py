@@ -106,7 +106,7 @@ def main():
 
                 select_model(page,'part');field.press('Space');field.press_sequentially('@Door')
                 page.locator('.prompt-mention-option[data-mention-kind="node"]').click()
-                assert '[[node:fixture_model:' in canonical(page) and '【Door】' in field.input_value()
+                assert '[[node:fixture_model:' in canonical(page) and '【部件1】' in field.input_value()
                 query(page,'整个');field.press('Control+Enter')
                 assert '整个片段' in canonical(page) and '1.500' in canonical(page)
                 assert '0.000–1.500s · 全部机位' in canonical(page)

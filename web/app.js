@@ -151,12 +151,13 @@ const frameImages = {
 let minimalLayout = null;
 let promptMentions = null;
 let promptAttachments = null;
-const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference});
+const promptReferenceText = createPromptReferenceText({resolve:resolvePromptReference,numbered:true});
 let workspaceControls = null;
 let immersiveWorkspace = null;
 let workspaceChrome = null;
 let feedbackEvidence = null;
 let snapshotGallery = null;
+let pendingTimelineTimeQuote = null;
 let liveScenePreview = null;
 let livePreviewTimer = null;
 let workspaceSidebar = null;
@@ -3660,6 +3661,12 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=timel
   const switchingView = !!view && view.clip_id !== state.activeViewId;
   const ref = viewFrameAtTime(view, wanted);
   const next = ref && referenceViews().length === 1 && !preserveTime ? ref.time_sec : wanted;
+  if(pendingTimelineTimeQuote) {
+    const intent=pendingTimelineTimeQuote;
+    if(!playback && intent.sessionId===state.sessionId && intent.sourceSignature===state.referenceClipSignature &&
+        intent.viewId===(view?.clip_id || null) && Math.abs(intent.timeSec-next)<1e-7) intent.generation=generation;
+    else {pendingTimelineTimeQuote=null;announce('时间或机位已变化，未插入原时间引用。',true);}
+  }
   const overlayUrl = ref ? timelineOverlayUrl(ref, {forceAlign:switchingView}) : null;
   const imagesReady = !ref || (imageReadyAtUrl(ui.referenceImage, ref.url) &&
     imageReadyAtUrl(ui.compareImage, overlayUrl));
@@ -3714,6 +3721,7 @@ async function seekTimeline(time, {playback=false, forcePose=false, viewId=timel
       renderTimeline({moments:false});
       drawOverlays();
     }
+    finishPendingTimelineTimeQuote();
   }
 }
 
@@ -3741,6 +3749,10 @@ function renderReferenceHeading() {
   const label=id('reference-frame-label'); label.hidden=!video;
   const frames=video ? referenceView().frames : [];
   if(video) label.textContent=`${Math.max(1,frames.findIndex(frame=>frame.id===ref?.id)+1)} / ${frames.length} 帧`;
+  label.tabIndex=video ? 0 : -1;
+  label.setAttribute('aria-disabled',String(!video || !editable() || state.seeking || state.pendingViewId || state.timelineTarget !== null || !referencePixelsReady()));
+  label.title=video ? `参考采样 ${promptTimeSeconds(ref.time_sec)}s · 双击或按 Enter / 空格引用此帧` : '';
+  label.setAttribute('aria-label',video ? `${label.textContent}，参考采样 ${promptTimeSeconds(ref.time_sec)} 秒；双击或按 Enter / 空格引用此帧` : '参考帧');
   document.querySelector('.reference-pane').classList.toggle('single-reference-video',video && referenceViews().length===1 && state.references.length===0);
 }
 function feedbackEvidenceData() {
@@ -3931,20 +3943,22 @@ async function uploadClip(files) {
 }
 
 function bindTimelineEvents() {
-  const quoteCurrentTime = () => {
-    if (!editable()) return;
-    const candidate=getPromptTimeCandidates().find(item=>item.descriptor.sourceType==='timeline');
-    if (!candidate) {
-      announce(promptTimeEmptyMessage(),true);
-      return;
+  for(const [element,sourceType] of [[ui.time,'timeline'],[id('reference-frame-label'),'reference']]) {
+    element.addEventListener('dblclick',event=>{event.preventDefault();quotePromptTime(sourceType);});
+    element.addEventListener('keydown',event=>{
+      if (!['Enter',' '].includes(event.key) || event.repeat || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+      event.preventDefault();event.stopPropagation();quotePromptTime(sourceType);
+    });
+  }
+  ui.seek.addEventListener('dblclick',event=>{
+    event.preventDefault();
+    if(!editable()) {announce(promptTimeUnavailableMessage(),true);return;}
+    if(!state.seeking && !state.pendingViewId && state.timelineTarget===null && state.scrubRequest===null) {
+      quotePromptTime('timeline');return;
     }
-    try { insertPromptTimeCandidate(candidate); }
-    catch (error) { announce(error.message || '此时间暂时无法引用。',true); }
-  };
-  ui.time.addEventListener('dblclick',event=>{event.preventDefault();quoteCurrentTime();});
-  ui.time.addEventListener('keydown',event=>{
-    if (!['Enter',' '].includes(event.key) || event.repeat || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
-    event.preventDefault();event.stopPropagation();quoteCurrentTime();
+    pendingTimelineTimeQuote={sessionId:state.sessionId,sourceSignature:state.referenceClipSignature,
+      viewId:timelineViewId() || null,timeSec:state.timelineTarget ?? Number(ui.seek.value),generation:state.seekGeneration};
+    announce('参考帧更新完成后将引用此时间。');
   });
   ui.clipInput.addEventListener('change', () => uploadClip(ui.clipInput.files));
   ui.play.addEventListener('click', async () => {
@@ -3961,6 +3975,7 @@ function bindTimelineEvents() {
   });
   ui.seek.addEventListener('input', () => scrubTimeline(Number(ui.seek.value)));
   ui.seek.addEventListener('change', () => scrubTimeline(Number(ui.seek.value), {final:true}));
+  ui.note.addEventListener('compositionend',()=>queueMicrotask(finishPendingTimelineTimeQuote));
   id('timeline-prev').addEventListener('click', () => stepReferenceTimeline(-1));
   id('timeline-next').addEventListener('click', () => stepReferenceTimeline(1));
 }
@@ -5083,7 +5098,7 @@ function promptTimeNames(names) {
   return numbered.length && numbered.every(item => item && item[1] === numbered[0][1])
     ? numbered[0][1]+numbered.map(item => item[2]).join('/') : unique.join(' / ');
 }
-function getPromptTimeCandidates() {
+function getPromptTimeCandidates({snapshotId=null}={}) {
   if (!editable() || !dynamicEnabled() || state.seeking || state.pendingViewId || state.timelineTarget !== null) return [];
   const context=promptTimeContext(), candidates=[];
   const add=(key,label,detail,sourceType,fields,text,search='') => candidates.push({key,kind:'time',sessionId:state.sessionId,label,detail,
@@ -5114,7 +5129,7 @@ function getPromptTimeCandidates() {
       frameText+sceneText,[view.name,index+1,frame.name,promptTimeSeconds(state.time)].join(' '));
   }
   const moments=state.dynamicSnapshots.map(promptTimeMoment).filter(Boolean);
-  const frozen=state.sceneView === 'snapshot' && moments.find(member => member.id === state.snapshot?.id);
+  const frozen=moments.find(member => member.id === (snapshotId || (state.sceneView === 'snapshot' ? state.snapshot?.id : null)));
   if (frozen) add('time:snapshot:'+frozen.id,'当前冻结场景截图 · '+promptTimeSeconds(frozen.timeSec)+'s',
     [promptTimeNames([frozen.name]),promptTimeFrameText(frozen)].filter(Boolean).join(' · '),'snapshot',{members:[frozen]},
     `${promptTimeNames([frozen.name]) || '截图'} · ${promptTimeMomentText(frozen)}`,[frozen.name,frozen.viewName].join(' '));
@@ -5181,7 +5196,8 @@ function promptTimeSourceKey(candidate) {
 }
 function insertPromptTimeCandidate(candidate) {
   if (!editable() || candidate?.kind !== 'time' || candidate.sessionId !== state.sessionId || candidate.disabled) return false;
-  const current=getPromptTimeCandidates().find(item => item.key === candidate.key);
+  const snapshotId=candidate.descriptor?.sourceType==='snapshot' ? candidate.descriptor.members?.[0]?.id : null;
+  const current=getPromptTimeCandidates({snapshotId}).find(item => item.key === candidate.key);
   if (!current || JSON.stringify(current.descriptor) !== JSON.stringify(candidate.descriptor)) {
     throw new Error('此时间的来源、时刻或标记已变化，请重新输入 / 选择。');
   }
@@ -5191,6 +5207,47 @@ function insertPromptTimeCandidate(candidate) {
   // survive reload without pausing playback or changing its reference pixels.
   if(state.playing)saveDraft({allowPlaying:true});
   return true;
+}
+function quotePromptTime(sourceType,snapshotId=null) {
+  if (!editable()) {announce(promptTimeUnavailableMessage(),true);return false;}
+  const candidate=getPromptTimeCandidates({snapshotId}).find(item=>item.descriptor.sourceType===sourceType);
+  if(!candidate) {
+    const updating=state.seeking || state.pendingViewId || state.timelineTarget !== null || clipReference() && !referencePixelsReady();
+    announce(sourceType==='snapshot' && !updating ? '这张截图的时间来源已不可用，请重新选择有效时刻。' : promptTimeEmptyMessage(),true);
+    return false;
+  }
+  try {
+    if(insertPromptTimeCandidate(candidate)) {
+      announce('已加入时间戳引用，点击输入框内的时间卡片查看来源。');
+      return true;
+    }
+    if(!editable())announce(promptTimeUnavailableMessage(),true);
+    else announce('时间引用未插入，请检查提示长度及时间来源。',true);
+  } catch(error) {announce(error.message || '此时间暂时无法引用。',true);}
+  return false;
+}
+function finishPendingTimelineTimeQuote() {
+  const intent=pendingTimelineTimeQuote;
+  if(!intent)return;
+  if(intent.sessionId!==state.sessionId || intent.sourceSignature!==state.referenceClipSignature || intent.generation!==state.seekGeneration) {
+    pendingTimelineTimeQuote=null;announce('时间来源已变化，未插入原时间引用。',true);return;
+  }
+  if(state.seeking || state.pendingViewId || state.timelineTarget!==null || state.scrubRequest!==null)return;
+  if(promptMentions?.isComposing())return;
+  pendingTimelineTimeQuote=null;
+  if((referenceView()?.clip_id || null)!==intent.viewId || Math.abs(state.time-intent.timeSec)>1e-7) {
+    announce('时间或机位已变化，未插入原时间引用。',true);return;
+  }
+  quotePromptTime('timeline');
+}
+function promptTimeUnavailableMessage() {
+  if (!state.workspaceReady) return '工作台尚未连接，请稍后引用时间';
+  if (state.sessionStatus !== 'open') return '当前会话已结束，不能新增引用';
+  if (state.pendingSubmission) return '请先处理尚未确认的反馈，再新增引用';
+  if (state.submitting) return '反馈正在提交，请稍后引用时间';
+  if (state.sceneLoading) return '场景正在加载，请稍后引用时间';
+  if (state.uploading || state.creatingProject || state.navigatingProject) return '来源正在更新，请稍后引用时间';
+  return '当前不能编辑提示，请稍后重试';
 }
 function promptTimeEmptyMessage() {
   if (state.seeking || state.pendingViewId || state.timelineTarget !== null) return '参考帧正在更新，完成后再选择片段时间';
@@ -5805,6 +5862,7 @@ function bindEvents() {
     onLive:browseScene,
     getTimeline:()=>({duration:timelineDuration(),viewId:state.referenceClip ? referenceView()?.clip_id : null}),
     onOpen:id=>state.dynamicSnapshots.some(entry=>entry.id===id) ? openMoment(id) : openSceneSnapshot(id),
+    onTime:id=>quotePromptTime('snapshot',id),
     onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}}});

@@ -3,6 +3,7 @@
 const TOKEN_SCAN = /\[\[(?:object|node|annotation|image|pose|pose_edit|time):[^\[\]\r\n]{1,512}\]\]/g;
 const ALIAS_SCAN = /【[^【】\r\n]{1,128}】/gu;
 const DEFAULT_NAMES = {object:'物体',node:'部件',annotation:'标记',image:'图片',pose:'人体',pose_edit:'修正',time:'时间戳'};
+const NUMBERED_NAMES = {...DEFAULT_NAMES};
 const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined,{granularity:'grapheme'}) : null;
 const characters = (value) => segmenter ? [...segmenter.segment(value)].map(item=>item.segment) : Array.from(value);
 
@@ -53,15 +54,31 @@ function outsideToken(text,index) {
   return text.lastIndexOf('[[',index) <= text.lastIndexOf(']]',index);
 }
 
-export function createPromptReferenceText({resolve=()=>null}={}) {
+export function createPromptReferenceText({resolve=()=>null,numbered=false}={}) {
   const byToken=new Map(), byAlias=new Map(), byTimeKey=new Map();
+  const nextNumbers=new Map();
+  let legacyAliases=new Map();
   let nextImage=1,nextTime=1,nextTimeToken=1,reserved=new Set();
+  function numberedAlias(kind,alias) {
+    const match=new RegExp('^【'+NUMBERED_NAMES[kind]+'([1-9]\\d{0,6})】$').exec(alias || '');
+    return match && Number(match[1])<=1000000 ? Number(match[1]) : 0;
+  }
+  function acceptsAlias(kind,alias) {
+    return numbered ? !!numberedAlias(kind,alias) :
+      (kind!=='image' || !!imageNumber(alias)) && (kind!=='time' || !!timeNumber(alias));
+  }
 
   function allocate(kind,name,preferred) {
-    if (validAlias(preferred) && !byAlias.has(preferred) && (kind !== 'image' || imageNumber(preferred)) && (kind !== 'time' || timeNumber(preferred))) {
+    if (validAlias(preferred) && !byAlias.has(preferred) && acceptsAlias(kind,preferred)) {
+      if(numbered)nextNumbers.set(kind,Math.max(nextNumbers.get(kind) || 1,numberedAlias(kind,preferred)+1));
       if (kind === 'image') nextImage=Math.max(nextImage,imageNumber(preferred)+1);
       if (kind === 'time') nextTime=Math.max(nextTime,timeNumber(preferred)+1);
       return preferred;
+    }
+    if(numbered) {
+      let number=nextNumbers.get(kind) || 1,alias;
+      do {alias=`【${NUMBERED_NAMES[kind]}${number++}】`;} while(byAlias.has(alias) || reserved.has(alias));
+      nextNumbers.set(kind,number);return alias;
     }
     if (kind === 'image') {
       let alias;
@@ -127,7 +144,14 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
   }
 
   function compact(value) {
-    const text=String(value ?? '');
+    let text=String(value ?? '');
+    if(legacyAliases.size) {
+      // Apply only at draft restoration. Keeping old aliases active afterwards
+      // could steal a newly allocated numbered alias from a different source.
+      const legacy=legacyAliases;legacyAliases=new Map();
+      text=text.replace(ALIAS_SCAN,(alias,index)=>legacy.has(alias) &&
+        standalone(text,index,alias.length) && outsideToken(text,index) ? legacy.get(alias) : alias);
+    }
     let output='', cursor=0;
     for (const match of text.matchAll(TOKEN_SCAN)) {
       const token=match[0];
@@ -206,21 +230,25 @@ export function createPromptReferenceText({resolve=()=>null}={}) {
       ...(kind==='time'?{timeText,timeKey}:{})}));
   }
   function reset(records=[]) {
-    byToken.clear();byAlias.clear();byTimeKey.clear();nextImage=1;nextTime=1;nextTimeToken=1;
+    byToken.clear();byAlias.clear();byTimeKey.clear();nextNumbers.clear();legacyAliases.clear();nextImage=1;nextTime=1;nextTimeToken=1;
     const usable=(Array.isArray(records) ? records : []).slice(0,4096).filter(record=>record &&
       typeof record === 'object' && tokenKind(record.token) && (tokenKind(record.token)!=='time' || timeText(record.timeText)));
     const owners=new Map();
     for (const record of usable) {
-      if (validAlias(record.alias) && (tokenKind(record.token) !== 'image' || imageNumber(record.alias)) &&
-          (tokenKind(record.token)!=='time' || timeNumber(record.alias)) && !owners.has(record.alias)) {
+      if (validAlias(record.alias) && acceptsAlias(tokenKind(record.token),record.alias) && !owners.has(record.alias)) {
         owners.set(record.alias,record.token);
       }
     }
     reserved=new Set(owners.keys());
+    const oldOwners=new Set();
     for (const record of usable) {
       if (byToken.has(record.token)) continue;
       const preferred=owners.get(record.alias) === record.token ? record.alias : null;
-      register(record.label,record.token,{metadata:record,preferred,useResolver:false});
+      const entry=register(record.label,record.token,{metadata:record,preferred,useResolver:false});
+      if(numbered && validAlias(record.alias) && !oldOwners.has(record.alias)) {
+        oldOwners.add(record.alias);
+        if(entry.alias!==record.alias)legacyAliases.set(record.alias,entry.alias);
+      }
     }
     reserved.clear();
   }

@@ -229,3 +229,31 @@ test('incomplete time records stay literal and long precise descriptions round t
   assert.equal(restored.compact(wire),entry.alias);
   assert.equal(restored.entries(entry.alias)[0].timeText,description);
 });
+
+test('numbered composer references keep independent counters and exact identities for every source kind',()=>{
+  const codec=createPromptReferenceText({numbered:true,resolve:token=>sources[token] || null});
+  const a='a'.repeat(32),b='b'.repeat(32);
+  const tokens=[object,'[[object:another]]','[[node:room:0/1]]',point,'[[annotation:line_a]]',image,`[[pose:${a}:${b}]]`,`[[pose_edit:${a}]]`];
+  const visible=codec.compact(tokens.join(' '));
+  assert.equal(visible,'【物体1】 【物体2】 【部件1】 【标记1】 【标记2】 【图片1】 【人体1】 【修正1】');
+  tokens.forEach(token=>assert(codec.expand(visible).includes(token)));
+  assert.equal(codec.remember('renamed',object).alias,'【物体1】');
+  const time=codec.rememberTime('片段0.125s','current-frame');
+  assert.equal(time.alias,'【时间戳1】');
+  assert.equal(codec.compact(codec.expand(visible+' '+time.alias)),visible+' '+time.alias);
+});
+
+test('numbered restoration migrates only registered old aliases without stealing new image symbols',()=>{
+  const codec=createPromptReferenceText({numbered:true});
+  codec.reset([{token:object,alias:'【图片1】',name:'图片1',label:'柜子'},
+    {token:image,alias:'【图1】',name:'参考图',label:'original.png'},
+    {token:point,alias:'【点1】',name:'点1',label:'原图上的点1'}]);
+  assert.equal(codec.compact('改【图片1】参考【图1】和【点1】；用户自己的【其他】'),
+    '改【物体1】参考【图片1】和【标记1】；用户自己的【其他】');
+  assert.equal(codec.expand('新【图片1】'),`新【图片1】 ${image}`);
+  assert.equal(codec.compact(`【图片1】 ${object} 与【图1】 ${image}`),'【物体1】 与【图片1】');
+  const records=codec.exportRecords(),restored=createPromptReferenceText({numbered:true});restored.reset(records);
+  assert.equal(restored.compact(codec.expand('【物体1】 【图片1】 【标记1】')),'【物体1】 【图片1】 【标记1】');
+  assert.equal(restored.remember('another image','[[image:other]]').alias,'【图片2】');
+  assert.equal(restored.remember('another mark','[[annotation:other]]').alias,'【标记2】');
+});

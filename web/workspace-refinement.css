@@ -53,9 +53,9 @@ button .action-icon, summary .action-icon { pointer-events: none; }
 .reference-timeline #timeline-play { grid-area: 1/2; gap: 4px; padding: 4px; }
 .reference-timeline #timeline-next { grid-area: 1/3; }
 .reference-timeline #timeline-time { grid-area: 1/4; justify-self: end; font-size: 12px; }
-#timeline-time[role=button] { cursor: pointer; }
-#timeline-time[aria-disabled=true] { cursor: default; }
-#timeline-time:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
+:is(#timeline-time,#reference-frame-label)[role=button] { cursor: pointer; }
+:is(#timeline-time,#reference-frame-label)[aria-disabled=true] { cursor: default; }
+:is(#timeline-time,#reference-frame-label):focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 4px; }
 .reference-timeline #timeline-seek { grid-area: 2/1/3/-1; margin: 4px 0; }
 .reference-timeline #animation-choices { grid-area: 3/1/4/-1; }
 .timeline-controls .action-icon { width: 15px; height: 15px; }
