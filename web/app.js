@@ -112,6 +112,7 @@ const state = {
   projectId:null, projectName:null, sceneDisplayName:null, projects:null, loadingProjects:false,
   projectLoadError:null, projectListSignature:null, projectModelChoice:null, projectEffortChoice:'',
   projectModelSignature:null, projectEffortSignature:null, creatingProject:false, navigatingProject:false,
+  projectUnloadSupported:false, unloadingProjectId:null, projectUnloadConfirmId:null, projectUnloadError:null, projectUnloadEpoch:0,
   pendingProjectCreate:null, projectCreationResult:null, projectCreationError:null,
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server', feedbackTransport:null, eventDelivery:null,
@@ -664,6 +665,7 @@ function updateProjectTitle() {
   ui.projectsButton.setAttribute('aria-label', '展开工作台侧栏，当前场景：' + name);
 }
 function projectBusyReason({allowCreation=false}={}) {
+  if (state.unloadingProjectId) return '正在卸载场景…';
   if (state.submitting) return '正在保存反馈，请稍后切换场景。';
   if (state.uploading) return '正在导入文件，请稍后切换场景。';
   if (state.creatingTarget || state.switchingTarget) return '正在连接 Codex 任务，请稍后切换场景。';
@@ -717,45 +719,124 @@ function renderProjectPicker() {
   if (!ui.projectsDialog.open) return;
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const busy = projectBusyReason();
-  const signature = JSON.stringify([projects, state.projectId, busy, state.loadingProjects, state.feedbackTransport]);
-  if (signature !== state.projectListSignature) {
-    state.projectListSignature = signature;
-    ui.projectsList.replaceChildren();
-    for (const project of projects) {
-      const button = document.createElement('button');
-      button.type = 'button'; button.className = 'project-item';
-      const heading = document.createElement('div'); heading.className = 'project-name';
-      const name = document.createElement('strong'); name.textContent = project.name || '未命名场景';
-      const current = project.project_id === state.projectId;
-      const unavailable = project.creation_status === 'unavailable';
-      button.classList.toggle('is-current',current);
-      if(current) button.setAttribute('aria-current','page');
-      const label = document.createElement('span'); label.textContent = unavailable ? '不可用' : current ? '当前' : '';
-      heading.append(name, label);
-      const detail = document.createElement('div'); detail.className = 'project-detail';
-      detail.textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
-        (state.feedbackTransport === 'mcp_events' ? '' : project.thread_id ? ' · 已连接 Codex 任务' : ' · 尚未连接任务');
-      button.append(heading, detail);
-      if (project.creation_error) {
-        const error = document.createElement('div'); error.className = 'project-detail project-error';
-        error.textContent = (unavailable ? '场景不可用：' : '任务创建未完成：') + String(project.creation_error).slice(0, 200);
-        button.append(error);
-      } else if (['creating','pending','in_progress'].includes(project.creation_status)) {
-        detail.textContent += ' · 正在创建任务';
-      }
-      button.disabled = unavailable || current || !!busy || !projectNavigationURL(project, location.origin);
-      button.addEventListener('click', () => navigateProject(project));
-      ui.projectsList.append(button);
-    }
-    if (!projects.length) {
-      const empty = document.createElement('p'); empty.className = 'muted';
-      empty.textContent = state.loadingProjects ? '正在读取场景…' : '还没有可切换的场景。';
-      ui.projectsList.append(empty);
-    }
+  // Reuse each row so polling cannot dismiss a confirmation or steal focus.
+  const existing = new Map([...ui.projectsList.querySelectorAll('.project-row')].map(row => [row.dataset.projectId,row]));
+  const wanted = new Set(projects.map(project=>project.project_id));
+  for (const [projectId,row] of existing) if (!wanted.has(projectId)) {row.remove();existing.delete(projectId);}
+  let cursor = ui.projectsList.firstChild;
+  for (const project of projects) {
+    let row = existing.get(project.project_id);
+    if (!row) row = makeProjectRow(project.project_id);
+    existing.delete(project.project_id);
+    if (row !== cursor) ui.projectsList.insertBefore(row,cursor);
+    cursor = row.nextSibling;
+    const button = row.querySelector('.project-item');
+    const current = project.project_id === state.projectId;
+    const unavailable = project.creation_status === 'unavailable';
+    button.classList.toggle('is-current',current);
+    if (current) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current');
+    row.querySelector('.project-name strong').textContent = project.name || '未命名场景';
+    row.querySelector('.project-name span').textContent = unavailable ? '不可用' : current ? '当前' : '';
+    row.querySelector('.project-detail').textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
+      (state.feedbackTransport === 'mcp_events' ? '' : project.thread_id ? ' · 已连接 Codex 任务' : ' · 尚未连接任务') +
+      (!project.creation_error && ['creating','pending','in_progress'].includes(project.creation_status) ? ' · 正在创建任务' : '');
+    const error = row.querySelector('.project-error');
+    error.hidden = !project.creation_error;
+    error.textContent = project.creation_error ? (unavailable ? '场景不可用：' : '任务创建未完成：') + String(project.creation_error).slice(0,200) : '';
+    button.disabled = unavailable || current || !!busy || !projectNavigationURL(project,location.origin);
+    const removable = state.projectUnloadSupported && project.can_unload === true;
+    const confirmed = removable && state.projectUnloadConfirmId === project.project_id;
+    const trigger = row.querySelector('.project-unload-trigger');
+    trigger.hidden = !removable;
+    trigger.disabled = !!busy || !!state.pendingSubmission || !state.workspaceReady;
+    trigger.setAttribute('aria-expanded',String(confirmed));
+    trigger.setAttribute('aria-label','卸载场景：' + (project.name || '未命名场景'));
+    row.querySelector('.project-unload-panel').hidden = !confirmed;
+    row.querySelector('.project-unload-description').textContent = '仅从工作台移除，源文件、场景数据和草稿保留。' +
+      (project.kind === 'imported' ? '重新导入此文件夹可恢复。' : '');
+    const pending = state.unloadingProjectId === project.project_id;
+    const confirm = row.querySelector('.project-unload-confirm');
+    confirm.textContent = pending ? '正在卸载…' : '卸载';
+    confirm.disabled = !!busy || !!state.pendingSubmission || !state.workspaceReady;
+    row.querySelector('.project-unload-cancel').disabled = !!state.unloadingProjectId;
+    const unloadError = row.querySelector('.project-unload-error');
+    unloadError.textContent = confirmed ? state.projectUnloadError || '' : '';
+    unloadError.hidden = !unloadError.textContent;
   }
-  ui.refreshProjects.disabled = state.loadingProjects || state.creatingProject || state.navigatingProject;
+  for (const row of existing.values()) row.remove();
+  let empty = ui.projectsList.querySelector('.project-list-empty');
+  if (!projects.length) {
+    if (!empty) {empty=document.createElement('p');empty.className='muted project-list-empty';ui.projectsList.append(empty);}
+    empty.textContent = state.loadingProjects ? '正在读取场景…' : '还没有可切换的场景。';
+  } else empty?.remove();
+  ui.refreshProjects.disabled = state.loadingProjects || state.creatingProject || state.navigatingProject || !!state.unloadingProjectId;
   ui.projectsStatus.textContent = busy || (state.projectLoadError ? '场景列表读取失败：' + state.projectLoadError : '');
   renderCreateProject();
+}
+function makeProjectRow(projectId) {
+  const row = document.createElement('div');row.className='project-row';row.dataset.projectId=projectId;
+  const button = document.createElement('button');button.type='button';button.className='project-item';
+  const heading = document.createElement('div');heading.className='project-name';heading.append(document.createElement('strong'),document.createElement('span'));
+  const detail = document.createElement('div');detail.className='project-detail';
+  const error = document.createElement('div');error.className='project-detail project-error';
+  button.append(heading,detail,error);
+  button.addEventListener('click',()=>navigateProject(state.projects?.find(project=>project.project_id===projectId)));
+  const trigger = document.createElement('button');trigger.type='button';trigger.className='project-unload-trigger';trigger.title='卸载场景';
+  setActionIcon(trigger,'close');
+  const panel = document.createElement('div');panel.className='project-unload-panel';panel.hidden=true;panel.setAttribute('role','group');panel.setAttribute('aria-label','确认卸载场景');
+  const description = document.createElement('p');description.className='project-unload-description';
+  const unloadError = document.createElement('p');unloadError.className='project-unload-error';unloadError.setAttribute('role','status');
+  const actions = document.createElement('div');actions.className='project-unload-actions';
+  const cancel = document.createElement('button');cancel.type='button';cancel.className='project-unload-cancel';cancel.textContent='取消';
+  const confirm = document.createElement('button');confirm.type='button';confirm.className='project-unload-confirm';confirm.textContent='卸载';
+  actions.append(cancel,confirm);panel.append(description,unloadError,actions);row.append(button,trigger,panel);
+  trigger.addEventListener('click',()=>{
+    if (projectBusyReason() || state.pendingSubmission) return;
+    state.projectUnloadConfirmId=state.projectUnloadConfirmId===projectId ? null : projectId;
+    state.projectUnloadError=null;renderProjectPicker();
+    if (state.projectUnloadConfirmId) cancel.focus({preventScroll:true});
+  });
+  cancel.addEventListener('click',()=>{
+    if (state.unloadingProjectId) return;
+    state.projectUnloadConfirmId=null;state.projectUnloadError=null;renderProjectPicker();trigger.focus({preventScroll:true});
+  });
+  confirm.addEventListener('click',()=>unloadSceneProject(projectId));
+  return row;
+}
+async function unloadSceneProject(projectId) {
+  const project=state.projects?.find(item=>item.project_id===projectId);
+  if (!state.projectUnloadSupported || !project?.can_unload || state.projectUnloadConfirmId!==projectId || projectBusyReason() || state.pendingSubmission) return;
+  const current=projectId===state.projectId;
+  let leaving=false;
+  state.unloadingProjectId=projectId;state.projectUnloadError=null;
+  if (current) {
+    state.navigatingProject=true;
+    pauseTimeline();hideTextEditor();state.drag=null;
+    saveDraft();
+  }
+  renderProjectPicker();updateSubmitLabel();updateMode();
+  if (current) ui.note.disabled=true;
+  try {
+    if (current) {await saveMomentDraft.pending;await promptImageStore.pending.catch(()=>{});}
+    const result=await api('/api/projects/'+encodeURIComponent(projectId),{method:'DELETE'});
+    const fallback=projectNavigationURL(result.fallback,location.origin);
+    if (result.unloaded_project_id!==projectId || (current && !fallback)) throw new Error('服务未返回可打开的默认场景，请重试卸载。');
+    state.projectUnloadEpoch++;
+    state.projects=state.projects.filter(item=>item.project_id!==projectId);
+    state.projectUnloadConfirmId=null;
+    if (state.projectCreationResult?.project_id===projectId) clearProjectRequest();
+    if (current) {location.assign(fallback);leaving=true;return;}
+    await loadProjects().catch(()=>{});
+  } catch (error) {
+    state.projectUnloadError='卸载未完成：'+error.message;
+    state.projectUnloadConfirmId=projectId;
+  } finally {
+    if (!leaving) {
+      state.unloadingProjectId=null;
+      if (current) state.navigatingProject=false;
+      renderProjectPicker();updateSubmitLabel();updateMode();
+    }
+  }
 }
 function renderCreateProject() {
   const pending = state.pendingProjectCreate;
@@ -830,9 +911,12 @@ function renderCreateProject() {
 async function loadProjects() {
   if (state.loadingProjects) return;
   state.loadingProjects = true; renderProjectPicker();
+  const unloadEpoch=state.projectUnloadEpoch;
   try {
     const result = await api('/api/projects');
+    if (unloadEpoch!==state.projectUnloadEpoch) return;
     state.projects = Array.isArray(result.projects) ? result.projects : [];
+    state.projectUnloadSupported=result.project_unload_supported===true;
     state.projectId = result.current_project_id || state.projectId;
     state.projectLoadError = null;
     const pending = state.pendingProjectCreate;
@@ -5948,7 +6032,7 @@ function bindEvents() {
     onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
   workspaceFolderImport=setupWorkspaceFolderImport({api,
-    isEnabled:()=>state.workspaceReady && state.projectFolderImportSupported && !state.creatingProject && !state.navigatingProject,
+    isEnabled:()=>state.workspaceReady && state.projectFolderImportSupported && !state.creatingProject && !state.navigatingProject && !state.unloadingProjectId,
     onImported:()=>loadProjects(),onError:message=>announce(message,true)});
   workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{
     workspaceFolderImport?.onPage(page);

@@ -43,6 +43,7 @@ WORKSPACE_QUEUE_ROUTE = re.compile(r"^/api/workspace/queue/([0-9a-f]{32})/confir
 WORKSPACE_APPROVAL_ROUTE = re.compile(r"^/api/workspace/approvals/([0-9a-f]{32})/respond$")
 WORKSPACE_FEEDBACK_ROUTE = re.compile(r"^/api/workspace/feedback/([0-9a-f]{32})$")
 PROJECT_ROUTE = re.compile(r"^/p/([0-9a-f]{32})(/.*)?$")
+PROJECT_UNLOAD_ROUTE = re.compile(r"^/api/projects/([0-9a-f]{32})$")
 POSE_ROUTE = re.compile(r"^/api/workspace/pose/([0-9a-f]{32})$")
 
 
@@ -311,8 +312,35 @@ def _make_server_unlocked(
         def _dispatch(self) -> None:
             self._check_request_origin()
             parsed = urlsplit(self.path)
-            path = self._select_context(unquote(parsed.path))
+            raw_path = unquote(parsed.path)
+            try:
+                path = self._select_context(raw_path)
+            except APIError as exc:
+                # A successful current-scene unload can lose its HTTP response.
+                # Permit only the exact same DELETE with its retained capability;
+                # every other route for an unloaded scene remains inaccessible.
+                prefix = PROJECT_ROUTE.fullmatch(raw_path)
+                target = PROJECT_UNLOAD_ROUTE.fullmatch(prefix.group(2) or "") if prefix else None
+                if (exc.status != 404 or self.command != "DELETE" or not prefix or not target
+                    or prefix.group(1) != target.group(1)):
+                    raise
+                self.context = root_context
+                self.project_prefix = ""
+                if self._needs_lan_access() and not self._has_lan_access():
+                    raise APIError(403, "open a workbench access link first")
+                if not registry.authorize_unload_retry(target.group(1), self.headers.get("X-Workspace-Capability", "")):
+                    raise APIError(403, "this operation requires the unloaded workspace browser capability") from exc
+                return self._send_json(200, registry.unload(target.group(1)))
             query = parse_qs(parsed.query)
+            unload_match = PROJECT_UNLOAD_ROUTE.fullmatch(path)
+            if self.command == "DELETE" and unload_match and unload_match.group(1) == self.context.project_id:
+                # Unload checks and detaches its target atomically. Taking an
+                # operation lease here would prevent unloading the caller itself.
+                return self._dispatch_context(path, query)
+            with registry.operation(self.context):
+                return self._dispatch_context(path, query)
+
+        def _dispatch_context(self, path: str, query: dict[str, list[str]]) -> None:
             if path == "/open":
                 # A local desktop shortcut can restore browser access without
                 # storing a bearer token in a bookmark or chat message.
@@ -363,6 +391,10 @@ def _make_server_unlocked(
             project_root = self.context.project_dir
             if self.command == "GET" and path == "/api/projects":
                 return self._send_json(200, registry.list(self.context.project_id))
+            unload_match = PROJECT_UNLOAD_ROUTE.fullmatch(path)
+            if self.command == "DELETE" and unload_match:
+                self._require_browser_capability()
+                return self._send_json(200, registry.unload(unload_match.group(1)))
             if self.command == "POST" and path == "/api/projects/folders":
                 self._require_browser_capability()
                 payload = self._read_json()
@@ -632,6 +664,9 @@ def _make_server_unlocked(
             self._handle()
 
         def do_PUT(self) -> None:
+            self._handle()
+
+        def do_DELETE(self) -> None:
             self._handle()
 
         def log_message(self, format: str, *args: object) -> None:

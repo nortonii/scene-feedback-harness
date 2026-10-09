@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager, ExitStack, nullcontext
 import copy
 import hmac
 import json
@@ -55,6 +56,7 @@ class ProjectRegistry:
         self._factory = context_factory
         self._configure = configure_context
         self._contexts = {root.project_id: root}
+        self._active_operations: dict[str, int] = {}
         self._closed = False
         self._import_requests: dict[str, str] = {}
         root_record = {
@@ -84,6 +86,8 @@ class ProjectRegistry:
                 if not isinstance(project_id, str) or not PROJECT_ID.fullmatch(project_id) or project_id in self._records:
                     raise RuntimeError("invalid or duplicate project ID in registry")
                 request_id = record.get("request_id")
+                if "loaded" in record and type(record["loaded"]) is not bool:
+                    raise RuntimeError("invalid project loaded state in registry")
                 if request_id is not None:
                     if not isinstance(request_id, str) or not PROJECT_ID.fullmatch(request_id) or request_id in requests:
                         raise RuntimeError("invalid or duplicate creation request in registry")
@@ -94,6 +98,8 @@ class ProjectRegistry:
             saved_root = self._records.get(root.project_id)
             if saved_root is None or any(saved_root.get(key) != root_record[key] for key in ("project_dir", "data_dir")):
                 raise RuntimeError("default project directories changed in registry")
+            if saved_root.get("loaded") is False:
+                raise RuntimeError("default project cannot be unloaded")
             root.name = saved_root["name"]
         else:
             self._records = {root.project_id: root_record}
@@ -103,6 +109,8 @@ class ProjectRegistry:
         try:
             for project_id, record in self._records.items():
                 if project_id == root.project_id:
+                    continue
+                if record.get("loaded") is False:
                     continue
                 if record.get("kind") != "imported":
                     self._validate_managed_paths(record)
@@ -210,14 +218,42 @@ class ProjectRegistry:
         with self._lock:
             if self._closed:
                 raise APIError(503, "reconstruction service is closing")
-            context = self._contexts.get(project_id)
-        if context is None:
             record = self._records.get(project_id)
-            if record is not None:
-                raise APIError(503, record.get("creation_error", "reconstruction project is unavailable"),
-                               detail={"project": self._unavailable_metadata(record)})
-            raise APIError(404, "reconstruction project not found")
-        return context
+            if record is not None and record.get("loaded") is False:
+                raise APIError(404, "reconstruction scene is unloaded; import its folder to open it again")
+            context = self._contexts.get(project_id)
+            if context is None:
+                if record is not None:
+                    raise APIError(503, record.get("creation_error", "reconstruction project is unavailable"),
+                                   detail={"project": self._unavailable_metadata(record)})
+                raise APIError(404, "reconstruction project not found")
+            return context
+
+    @contextmanager
+    def operation(self, context: ProjectContext):
+        """Lease a routed context so unloading cannot race an in-flight request.
+
+        A handler may have selected its context before another handler unloads
+        it. Verify identity while reserving the operation, then let catalog
+        operations proceed without holding the catalog lock for file I/O.
+        Unload refuses a leased context instead of waiting, avoiding a lock
+        cycle with a folder import submitted through that context.
+        """
+        with self._lock:
+            if self._closed:
+                raise APIError(503, "reconstruction service is closing")
+            if self._contexts.get(context.project_id) is not context:
+                raise APIError(404, "reconstruction scene is unloaded or unavailable")
+            self._active_operations[context.project_id] = self._active_operations.get(context.project_id, 0) + 1
+        try:
+            yield context
+        finally:
+            with self._lock:
+                remaining = self._active_operations[context.project_id] - 1
+                if remaining:
+                    self._active_operations[context.project_id] = remaining
+                else:
+                    self._active_operations.pop(context.project_id, None)
 
     def by_control_token(self, token: str) -> ProjectContext:
         for context in self.contexts():
@@ -251,6 +287,7 @@ class ProjectRegistry:
             "project_dir": str(context.project_dir), "session_id": workspace["session_id"],
             "thread_id": workspace.get("thread_id"), "scene_revision": workspace["scene_revision"],
             "creation_status": record.get("creation_status", "ready"),
+            "can_unload": context is not self.root,
             "url": f"/p/{context.project_id}/?{urlencode({'session_id': workspace['session_id']})}",
         }
         for key in ("creation_error", "created_thread_id", "request_id"):
@@ -267,6 +304,7 @@ class ProjectRegistry:
         )}
         query = urlencode({"session_id": record["session_id"]}) if record.get("session_id") else ""
         result["url"] = f"/p/{record['project_id']}/" + ("?" + query if query else "")
+        result["can_unload"] = record["project_id"] != self.root.project_id
         for key in ("creation_error", "created_thread_id", "request_id"):
             if record.get(key):
                 result[key] = record[key]
@@ -283,8 +321,134 @@ class ProjectRegistry:
             if before != json.dumps(self._records, sort_keys=True):
                 self._save()
             return {"projects": [self.metadata(self._contexts[project_id]) if project_id in self._contexts
-                                 else self._unavailable_metadata(record) for project_id, record in self._records.items()],
-                    "current_project_id": current_project_id}
+                                 else self._unavailable_metadata(record) for project_id, record in self._records.items()
+                                 if record.get("loaded") is not False],
+                    "current_project_id": current_project_id, "project_unload_supported": True}
+
+    @staticmethod
+    def _check_unload_workspace(workspace: dict[str, Any], gateway: WorkspaceGateway | None = None) -> None:
+        if workspace.get("active_feedback_id") or workspace.get("approvals"):
+            raise APIError(409, "请先完成正在处理的反馈或审批，再卸载场景。")
+        if workspace.get("agent", {}).get("status") in {"running", "dispatching", "awaiting_approval", "delivery_uncertain", "starting", "creating"}:
+            raise APIError(409, "Codex 正在处理这个场景，请等处理完成后再卸载。")
+        for item in workspace.get("queue", []):
+            status = item.get("status")
+            if item.get("feedback_transport") == "mcp_events" and gateway is not None and gateway.mcp_events is not None:
+                # Event delivery receipts are stored outside SceneStore. A
+                # delivered receipt permits closing this local viewer; it
+                # does not claim that the remote model turn has completed.
+                status = gateway.mcp_events.feedback_status(item["feedback_id"])["status"]
+            returned = status == "returned_to_mcp" and (gateway is None or gateway.adapter is None)
+            if not returned and status not in {"completed", "failed", "interrupted", "discarded", "event_delivered"}:
+                raise APIError(409, "这个场景还有等待发送或确认的反馈，请处理完后再卸载。")
+
+    def unload(self, project_id: str) -> dict[str, Any]:
+        """Detach a child without deleting its source, data, or Codex task."""
+        if not isinstance(project_id, str) or not PROJECT_ID.fullmatch(project_id):
+            raise APIError(400, "project_id must be a 32-character lowercase UUID hex value")
+        # Import and reactivation hold this same lock through data-lock release.
+        # A repeated import can therefore never open a half-closed context.
+        with self._import_lock:
+            with self._lock:
+                if self._closed:
+                    raise APIError(503, "reconstruction service is closing")
+                record = self._records.get(project_id)
+                if record is None:
+                    raise APIError(404, "reconstruction project not found")
+                if project_id == self.root.project_id:
+                    raise APIError(409, "默认场景不能卸载。")
+                if record.get("loaded") is False:
+                    return {"unloaded_project_id": project_id, "fallback": self.metadata(self.root)}
+                if record.get("creation_status") in {"creating", "uncertain"}:
+                    raise APIError(409, "这个场景的任务仍在创建或等待确认，请先处理完成。")
+                context = self._contexts.get(project_id)
+                if self._active_operations.get(project_id):
+                    raise APIError(409, "场景正在读取或更新，请稍后再卸载。")
+            with ExitStack() as locks:
+                if context is not None:
+                    gateway = context.gateway
+                    for lock in (gateway._supervisor_lock, gateway._adapter_event_lock, gateway._worker_lock,
+                                 gateway.target_binding_lock):
+                        if not lock.acquire(blocking=False):
+                            raise APIError(409, "场景正在更新或连接 Codex，请稍后再卸载。")
+                        locks.callback(lock.release)
+                    if gateway._worker_running:
+                        raise APIError(409, "反馈正在发送，请等发送完成后再卸载。")
+                    adapter = gateway.adapter
+                    if adapter is not None:
+                        status = adapter.status()
+                        if status.get("turn_state") in {"active", "running", "starting", "uncertain"} or status.get("pending_requests"):
+                            raise APIError(409, "Codex 正在处理这个场景，请等处理完成后再卸载。")
+                        if status.get("connected") and hasattr(adapter, "inspect_thread_status"):
+                            try:
+                                if adapter.inspect_thread_status() != "idle":
+                                    raise APIError(409, "Codex 正在处理这个场景，请等处理完成后再卸载。")
+                            except APIError:
+                                raise
+                            except Exception as exc:
+                                raise APIError(503, "暂时无法确认 Codex 任务状态，请稍后再卸载。") from exc
+                else:
+                    # An unavailable child has no local runtime to stop. Keep
+                    # unresolved durable feedback discoverable in the catalog.
+                    state_path = Path(record["data_dir"]) / "state.json"
+                    if state_path.is_file():
+                        try:
+                            state = json.loads(state_path.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            state = {}
+                        self._check_unload_workspace(state.get("workspace", {}))
+                with self._lock, context.store.lock if context is not None else nullcontext():
+                    if self._closed:
+                        raise APIError(503, "reconstruction service is closing")
+                    if self._active_operations.get(project_id):
+                        raise APIError(409, "场景正在读取或更新，请稍后再卸载。")
+                    if context is not None:
+                        self._check_unload_workspace(context.store.state.get("workspace", {}), context.gateway)
+                    fallback = self.metadata(self.root)
+                    previous = copy.deepcopy(record)
+                    try:
+                        if context is not None:
+                            self._refresh_creation(context)
+                        record["loaded"] = False
+                        self._save()
+                    except BaseException:
+                        record.clear()
+                        record.update(previous)
+                        raise
+                    self._contexts.pop(project_id, None)
+                    if context is not None:
+                        context.gateway._started = False
+                        context.gateway._supervisor_stop.set()
+                        context.gateway._adapter_token = object()
+            # Joining workers and releasing the store lock happens after the
+            # catalog lock is released. Original assets and persisted tasks
+            # remain intact, including the old browser/control credentials.
+            self._close_import_context(context)
+            return {"unloaded_project_id": project_id, "fallback": fallback}
+
+    def authorize_unload_retry(self, project_id: str, browser_token: str) -> bool:
+        """Authorize only an idempotent DELETE at its now-unloaded URL.
+
+        Read the preserved credential file without opening a context, adapter,
+        or worker. Normal routing and all other APIs continue to reject it.
+        """
+        if not isinstance(project_id, str) or not PROJECT_ID.fullmatch(project_id) or not isinstance(browser_token, str):
+            return False
+        with self._lock:
+            record = self._records.get(project_id)
+            if self._closed or record is None or record.get("loaded") is not False or project_id == self.root.project_id:
+                return False
+            data = self.managed_dir / project_id / "data"
+            if record.get("data_dir") != str(data) or data.resolve() != data:
+                return False
+            token_path = data / "browser_token"
+            if token_path.is_symlink():
+                return False
+            try:
+                token = token_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                return False
+            return bool(token) and hmac.compare_digest(browser_token.encode("utf-8"), token.encode("utf-8"))
 
     @staticmethod
     def _creation_spec(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -420,13 +584,53 @@ class ProjectRegistry:
         try:
             context.gateway.close()
         except Exception:
-            logging.exception("Could not close failed imported scene %s", context.project_id)
+            logging.exception("Could not close scene context %s", context.project_id)
         finally:
             if context.data_lock is not None:
                 try:
                     context.data_lock.close()
                 except Exception:
-                    logging.exception("Could not release failed imported scene lock %s", context.project_id)
+                    logging.exception("Could not release scene data lock %s", context.project_id)
+
+    def _reactivate_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Restore preserved data without copying sources or creating a task.
+
+        The caller holds _import_lock through factory, publication, and cleanup,
+        the same lifecycle boundary used by unload and initial folder import.
+        """
+        project_id = record["project_id"]
+        self._validate_managed_paths(record)
+        context = None
+        try:
+            context = self._factory(copy.deepcopy(record), False)
+            self._configure(context)
+            self._install_binding_guard(context)
+            if (context.project_id != project_id or str(context.project_dir) != record["project_dir"]
+                    or str(context.store.data_dir) != record["data_dir"]):
+                raise RuntimeError("restored scene must use its preserved context and data directory")
+            if record.get("kind") == "imported":
+                self._start_imported_context(context, restored=True)
+            else:
+                context.gateway.start()
+            with self._lock:
+                if self._closed:
+                    raise APIError(503, "reconstruction service is closing")
+                previous = copy.deepcopy(record)
+                try:
+                    record["loaded"] = True
+                    self._contexts[project_id] = context
+                    self._refresh_creation(context)
+                    result = self.metadata(context)
+                    self._save()
+                except BaseException:
+                    record.clear()
+                    record.update(previous)
+                    self._contexts.pop(project_id, None)
+                    raise
+            return result
+        except BaseException:
+            self._close_import_context(context)
+            raise
 
     def _import_instance(self, instance: ReadyInstance) -> tuple[dict[str, Any], bool]:
         with self._lock:
@@ -434,10 +638,15 @@ class ProjectRegistry:
                 raise APIError(503, "reconstruction service is closing")
             existing = self._source_record(instance.root)
             if existing is not None:
-                context = self._contexts.get(existing["project_id"])
-                if context is None:
-                    raise APIError(503, existing.get("creation_error", "registered source is unavailable"))
-                return self.metadata(context), False
+                if existing.get("loaded") is False:
+                    context = None
+                else:
+                    context = self._contexts.get(existing["project_id"])
+                    if context is None:
+                        raise APIError(503, existing.get("creation_error", "registered source is unavailable"))
+                    return self.metadata(context), False
+        if existing is not None:
+            return self._reactivate_record(existing), True
         project_id = uuid.uuid5(uuid.NAMESPACE_URL, "scene-feedback-import:" + str(instance.root)).hex
         base = self.managed_dir / project_id
         record = {"project_id": project_id, "name": instance.name, "kind": "imported",
