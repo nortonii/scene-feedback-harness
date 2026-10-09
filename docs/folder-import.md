@@ -32,6 +32,57 @@
 
 每个导入场景独立保存工作台数据与反馈。导入过程只读取来源素材，不改原 GLB、可编辑 `.blend`、参考图或参考清单。
 
+## 导入前检查 ready
+
+点击「打开并导入」时，服务会先自动检查待导入实例的模型、参考图、相机和帧时间。检查通过的实例加入场景列表，有使用限制的实例继续导入并显示提示；无法通过的实例报出具体原因，其余有效实例继续导入。目录里若没有可导入实例，会显示失败或未发现实例的原因。检查使用当前工作台的素材读取与导入校验；视频会由现有 FFmpeg 在临时目录内取样检查，临时文件随后清理。
+
+新实例检查所选来源包。已注册实例再次导入时，检查并复用已经保存的工作台模型与参考数据；卸载后恢复也保留已有修改，不拿来源初始模型覆盖保存结果。独立 CLI／skill 自查始终检查传入的来源文件夹，不能据此判断另一份已保存工作台结果是否有效。排查重新导入失败时，应区分报告检查的是来源包还是已保存结果。
+
+导入结果包含各实例的检查情况。独立 CLI 和下面的 skill 也能提前生成只读报告，检查报告使用这些状态：
+
+| 结果 | 含义 |
+| --- | --- |
+| 可导入 `ready` | 该实例在本次检查中通过，已声明的资料完整 |
+| 可导入，有提示 `warning` | 素材可读且可以导入，但存在报告中的使用限制 |
+| 部分可导入 `partial` | 一些实例可导入，但另有失败实例或扫描已截断 |
+| 无法导入 `blocked` | 没有通过的实例，报告给出阻止原因 |
+| 未发现实例 `empty` | 在当前扫描边界内没有识别到可检查的 ready 实例 |
+
+父目录清单中的仅模型实例仍可导入，缺参考图与相机会显示提示。部分参考帧未附相机、静态图没有导入用相机或未提供 Blender 源工程也属于提示：仍可手动比较。已声明却损坏的模型、参考像素、相机或时间字段会阻止该实例导入并报错；单项失败不会撤销或阻止其他已通过实例。显式 `ready:false` 的实例列为跳过，不按已准备模型检查。
+
+检查范围包括 GLB 2.0 容器、BIN 内嵌资源与导入结构、当前视口的压缩解码器兼容性、参考 PNG/JPEG 的完整解码及尺寸、机位清单、帧率、精确时间戳、相机格式与图片尺寸匹配。沿用已有限制：GLB 不超过 100 MiB，参考图不超过 25 MiB，静态图至多 8 张，参考机位至多 8 个，每机位至多 600 帧；图片宽高均不超过 32,768 像素且总像素不超过 5,000 万。路径边界、清单大小、视频大小和目录扫描边界仍按当前导入规则检查。
+
+报告中的动画数量与时间跨度来自 GLB 元数据；它不运行 GPU 推理，不重开 Blender，也不证明动画播放、几何重建、人体追踪或视觉对齐质量。Blender 源文件只检查是否已提供且可读。参考图片像素检查证明文件可解码，不证明模型与照片的位置、比例或遮挡正确。独立自查只反映检查当时的来源内容；新实例导入时会重新校验来源，已注册实例则校验保存的工作台结果。
+
+### Agent 交付前自查
+
+插件包含 [`workbench-ready-check` skill](../skills/workbench-ready-check/SKILL.md)。可在让 agent 交付场景前要求它自查：
+
+```text
+请用 $workbench-ready-check 检查 /absolute/path/to/ready-scenes，处理阻止导入的问题，并说明仍有的使用限制。
+```
+
+skill 使用 `scripts/check_workbench_ready.py --json` 读取同一份检查报告；独立检查只读取来源，不创建工作台、导入场景或启动模型任务。插件安装目录使用随包附带的检查脚本，本机也可使用仓库脚本。它要求按实际报告说明可导入、使用提示、阻止项和扫描截断，不能把至少一个实例可导入解释成整个目录完全通过。
+
+### 命令行与 JSON 报告
+
+在仓库根目录运行：
+
+```bash
+.venv/bin/python scripts/check_workbench_ready.py \
+  /home/nortonii/assembly101/workbench_ready_scenes
+```
+
+默认输出中文实例摘要；加 `--json` 输出包含 `status`、`can_import`、`counters`、各实例 `checks` 和 `metrics` 的完整 JSON：
+
+```bash
+.venv/bin/python scripts/check_workbench_ready.py \
+  /home/nortonii/assembly101/workbench_ready_scenes \
+  --json --output /tmp/workbench-ready-report.json
+```
+
+命令默认不写报告或工作台数据。只有明确指定 `--output` 时才创建该 JSON 文件，已有文件不会覆盖。退出码 `0` 表示检查范围内所有实例可导入（允许提示）；`1` 表示部分失败、全部失败、未发现实例或扫描截断；`2` 表示参数、目录或报告文件错误。`can_import:true` 只表示至少一个实例可导入，不能代替整体 `status`。扫描截断时请选择更具体的子目录再检查。
+
 ## 标准实例标识
 
 标准实例在根目录放一份 `workbench-ready.json` 或 `workbench_ready.json`；这两个文件名都支持下表的 `schema_version: 1` 格式。保留其中一份即可，同时存在会报告标识歧义。已有视频 ready 包另按下文的兼容字段读取，无须补 `schema_version`。
@@ -185,7 +236,8 @@ core_env vision_env __pycache__ site-packages
 | 接口 | 请求 | 返回要点 |
 | --- | --- | --- |
 | `POST /api/projects/folders` | 可选绝对目录 `path` | 当前 `path`、`parent`、子目录 `directories` 与 `truncated` |
-| `POST /api/projects/import-folder` | 绝对目录 `path`、32 位小写 UUID hex `request_id` | `projects`、`imported`、`skipped`、`errors`、`truncated` 与扫描计数 `counters` |
+| `POST /api/projects/check-folder` | 绝对目录 `path`；使用当前工作台的浏览器访问权限 | 只读检查报告：`status`、`can_import`、`counters`、`instances[].checks`／`metrics`、`skipped`、`errors` 与 `truncated` |
+| `POST /api/projects/import-folder` | 绝对目录 `path`、32 位小写 UUID hex `request_id` | `projects`、`imported`、`skipped`、`errors`、`truncated`、扫描计数 `counters` 与自动检查报告 `ready_check` |
 | `DELETE /api/projects/<project_id>` | 要卸载的场景 ID；使用当前工作台的浏览器访问权限 | `unloaded_project_id` 与默认场景元数据 `fallback`；同一请求可安全重试，受保护或仍有操作的场景返回具体原因 |
 
 同一个 `request_id` 只能用于同一个文件夹，也不能复用新建场景的请求编号。接口结果用于刷新场景列表，不指定或切换当前正在编辑的场景。

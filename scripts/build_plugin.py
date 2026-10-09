@@ -28,6 +28,7 @@ FIXED_FILES = (
     "scripts/build_plugin.py",
     "scripts/configure_plugin.py",
     "scripts/start_blank_workbench.py",
+    "scripts/check_workbench_ready.py",
 )
 
 

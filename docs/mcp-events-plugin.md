@@ -3,6 +3,7 @@
 仓库现在也是一个 Agent Plugins 包：根目录 `plugin.json` 提供身份，
 `mcp.json` 连接项目专用的 MCP，`skills/visual-feedback/` 提供审图流程。
 插件负责参考图、3D 场景、标注、动态机位和外部二维人体结果的查看与引用。
+「打开并导入」会自动检查模型、参考素材、相机与帧时间；失败实例报错，其他有效实例继续导入，有使用限制的实例导入并显示提示。插件内的 [`workbench-ready-check` skill](../skills/workbench-ready-check/SKILL.md) 供 agent 在交付前自查，使用命令行 `scripts/check_workbench_ready.py --json` 获取只读报告，不创建工作台数据或 Codex 任务。仅模型实例与未附相机的参考仍可导入并手动比较，已声明但损坏的素材不能通过。检查范围与限制见[导入前检查](folder-import.md#导入前检查-ready)。
 人体追踪推理与重建位于独立的 [capsule skill](../external-skills/capsule-human-tracking/SKILL.md)，
 不随工作台插件安装。
 默认 skill 使用 WholeBody133。左图工具栏「关键点」可编辑原帧已声明的身体、脚、脸和手部关键点；本轮修改按帧累加为「关键点修改N」卡片，可自动插入提示或用 `@` 引用。原图、修正前后坐标与来源 JSON 随反馈提交；插件仅负责编辑与证据交换，不包含二维推理、三角化或 Blender 重建运行环境。
@@ -40,7 +41,7 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 保留完整 MCP、技能、详细介绍、图标，以及 `.codex-plugin/plugin.json` 和
 `.mcp.json` 兼容文件。仓库及配置出的本地安装目录仍可使用本地市场清单。
 
-请使用 `0.1.53` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
+请使用 `0.1.54` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
 上传请求的响应；本地 `plugin/read` 成功不能代替云端归档导入验证。
 官方 [包结构说明](https://developers.openai.com/plugins/build/plugins) 区分了
 单插件分发包和本地市场目录；[上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)
@@ -96,6 +97,8 @@ codex plugin add scene-feedback-harness@scene-feedback-local
 
 ```bash
 python3 scripts/build_plugin.py --output dist/scene-feedback-harness.zip
+# 带版本号的本次分发包：
+python3 scripts/build_plugin.py --output dist/scene-feedback-harness-0.1.54.zip
 # 或打包已配置的本地版本：
 python3 scripts/build_plugin.py --source dist/local-plugin --output dist/project-plugin.zip
 ```

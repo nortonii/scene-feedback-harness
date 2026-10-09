@@ -405,6 +405,13 @@ def _make_server_unlocked(
             if self.command == "POST" and path == "/api/projects/import-folder":
                 self._require_browser_capability()
                 return self._send_json(200, registry.import_folder(self._read_json()))
+            if self.command == "POST" and path == "/api/projects/check-folder":
+                self._require_browser_capability()
+                payload = self._read_json()
+                if set(payload) - {"path"}:
+                    raise APIError(400, "ready checking accepts only path")
+                from ready_check import check_ready_folder
+                return self._send_json(200, check_ready_folder(payload.get("path")))
             if self.command == "POST" and path == "/api/projects":
                 if self.context.gateway.feedback_transport == "mcp_events":
                     raise APIError(409, "create a separate event workspace instead of a Codex-bound project")
@@ -416,6 +423,7 @@ def _make_server_unlocked(
             if self.command == "GET" and path == "/api/workspace/state":
                 state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
                 state["project_folder_import_supported"] = True
+                state["project_ready_check_supported"] = True
                 state["blank_workbench"] = getattr(gateway, "blank_workbench", False) is True
                 state["lan_access"] = browser_access_mode
                 state["browser_url"] = self._browser_url(state["session_id"])

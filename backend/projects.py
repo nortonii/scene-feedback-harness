@@ -21,6 +21,7 @@ import uuid
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
 from ready_import import discover_ready_instances, host_directory, ReadyInstance
+from ready_check import check_ready_instance, check_saved_workspace, ready_check_report
 
 
 PROJECT_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -750,9 +751,30 @@ class ProjectRegistry:
                         raise
             discovery = discover_ready_instances(str(folder))
             projects, imported = [], []
+            checked = []
             skipped, errors = list(discovery.skipped), list(discovery.errors)
             for instance in discovery.instances:
+                check = None
                 try:
+                    with self._lock:
+                        existing = self._source_record(instance.root)
+                        context = self._contexts.get(existing["project_id"]) if existing is not None else None
+                    if existing is not None:
+                        if existing["project_id"] != self.root.project_id:
+                            self._validate_managed_paths(existing)
+                        state = None
+                        if context is not None:
+                            with context.store.lock:
+                                state = copy.deepcopy({key: context.store.state.get(key) for key in ("scene", "workspace", "sessions")})
+                        check = check_saved_workspace(existing["name"], instance.root, instance.format,
+                                                      Path(existing["data_dir"]), state)
+                    else:
+                        check = check_ready_instance(instance)
+                    checked.append(check)
+                    if not check["can_import"]:
+                        problems = [item["message"] for item in check["checks"] if item["status"] == "error"]
+                        errors.append({"path": str(instance.root), "error": "; ".join(problems), "code": "ready_check_failed"})
+                        continue
                     metadata, created = self._import_instance(instance)
                     projects.append(metadata)
                     item = {"path": str(instance.root), "project_id": metadata["project_id"], "name": metadata["name"]}
@@ -762,9 +784,21 @@ class ProjectRegistry:
                         skipped.append({**item, "reason": "source directory is already registered"})
                 except Exception as exc:
                     logging.warning("Could not import ready scene %s: %s", instance.root, exc)
-                    errors.append({"path": str(instance.root), "error": exc.message if isinstance(exc, APIError) else str(exc)[:500]})
+                    message = exc.message if isinstance(exc, APIError) else str(exc)[:500]
+                    errors.append({"path": str(instance.root), "error": message})
+                    if check is None:
+                        check = {"name": instance.name, "path": str(instance.root), "format": instance.format,
+                                 "checks": [], "metrics": {}}
+                        checked.append(check)
+                    check.update(status="blocked", can_import=False)
+                    check["checks"].append({"status": "error", "code": "import_failed", "message": "导入失败：" + message})
+            report = ready_check_report(discovery, checked)
+            for error in report["errors"]:
+                if not any(previous["path"] == error["path"] for previous in errors):
+                    errors.append(error)
             return {"path": str(folder), "request_id": request_id, "projects": projects,
                     "imported": imported, "skipped": skipped, "errors": errors,
+                    "ready_check": report,
                     "truncated": discovery.truncated,
                     "counters": {"imported": len(imported), "skipped": len(skipped), "errors": len(errors),
                                  "candidates": discovery.candidates, "directories_scanned": discovery.directories_scanned,
