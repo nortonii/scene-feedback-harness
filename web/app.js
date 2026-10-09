@@ -4876,6 +4876,7 @@ function renderAnnotations() {
   renderSceneSnapshots();
   renderReferenceStrip();
   updateSceneHint();
+  renderPromptImageReferences();
   if (!state.annotations.length) {
     const empty = document.createElement('div');
     empty.className = 'muted';
@@ -5213,6 +5214,29 @@ function previewPromptImage(entry,source={}) {
   promptReferencePopover.show(ui.imagePreview,source);
 }
 function promptText() { return promptReferenceText.expand(ui.note.value); }
+function annotationReferenceProblems(note=promptText()) {
+  const counts=new Map(),records=new Map(promptReferenceText.exportRecords().map(entry=>[entry.token,entry]));
+  for(const mark of state.annotations) counts.set(mark.id,(counts.get(mark.id) || 0)+1);
+  const found=new Map();
+  for(const match of note.matchAll(/\[\[annotation:([A-Za-z0-9_-]{1,64})\]\]/g)) {
+    const count=counts.get(match[1]) || 0;
+    if(count===1 || found.has(match[0])) continue;
+    const entry=records.get(match[0]),name=entry?.name || entry?.label || '标记';
+    found.set(match[0],{token:match[0],alias:entry?.alias || match[0],name,
+      reason:count?'重复':'已删除'});
+  }
+  return [...found.values()];
+}
+function focusInvalidPromptReference(error) {
+  ui.note.focus({preventScroll:true});
+  const tokens=new Set(error.invalidReferences?.map(item=>item.token) || []);
+  if(!tokens.size) return;
+  const range=promptReferenceText.ranges(ui.note.value).find(range=>tokens.has(range.entry.token));
+  const raw=range?null:[...tokens].map(token=>({start:ui.note.value.indexOf(token),end:ui.note.value.indexOf(token)+token.length})).find(range=>range.start>=0);
+  const target=range || raw;
+  if(target) ui.note.setSelectionRange(target.start,target.end);
+  renderPromptImageReferences();
+}
 function resolvePromptReference(token, fallback='',displayKind=null) {
   const match=/^\[\[(object|node|annotation|image|pose|pose_edit|time|scene):(.+)\]\]$/.exec(token);
   if(!match) return null;
@@ -5230,10 +5254,11 @@ function resolvePromptReference(token, fallback='',displayKind=null) {
     const entry=state.imageRefs.find(item=>item.id===key);
     label=entry?.label || fallback;name='图';title=label;missing=!entry;
   } else if(kind==='annotation') {
-    const mark=state.annotations.find(item=>item.id===key);
-    name=mark?.name || fallback.split('（')[0] || '标记';label=mark?annotationReferenceLabel(mark):fallback;
+    const matches=state.annotations.filter(item=>item.id===key),mark=matches.length===1?matches[0]:null;
+    const saved=!mark?promptReferenceText.exportRecords().find(entry=>entry.token===token):null;
+    name=mark?.name || saved?.name || fallback.split('（')[0] || '标记';label=mark?annotationReferenceLabel(mark):saved?.label || fallback;
     const snapshot=[...state.sceneSnapshots,...state.dynamicSnapshots].find(item=>item.id===(mark?.frame_id || mark?.snapshot_id));
-    title=[mark?.pane==='reference'?'参考图':'场景截图',snapshot?.name,label,mark?.text].filter(Boolean).join(' · ');missing=!mark;
+    title=saved?.title || [mark?.pane==='reference'?'参考图':'场景截图',snapshot?.name,label,mark?.text].filter(Boolean).join(' · ');missing=!mark;
   } else if(kind==='object') {
     const item=sceneObject(key);name=item?.name || fallback || '物体';label=item?.name || fallback;title='物体 · '+label;missing=!item;
   } else if(kind==='node') {
@@ -5275,6 +5300,8 @@ function previewPromptReference(entry,source={}) {
   id('prompt-reference-title').textContent=entry.alias+' · '+referenceAliasLabel(entry.alias);
   id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
   id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
+  const problem=entry.kind==='annotation'?annotationReferenceProblems().find(item=>item.token===entry.token):null;
+  if(problem) id('prompt-reference-status').textContent=problem.alias+'（'+problem.name+'）'+problem.reason+'。请点卡片右侧 × 移除引用，或恢复对应标记。';
   const scene=entry.kind==='scene'?state.sceneRefs.find(item=>sceneToken(item.id)===entry.token):null;
   sceneReferencePreviewImage.hidden=!scene;
   if(scene) {
@@ -5290,21 +5317,25 @@ function renderPromptImageReferences() {
   feedbackEvidence?.refresh();
   ui.imageRefs.replaceChildren();
   const entries=promptReferenceText.entries(ui.note.value);
+  const problems=new Map(annotationReferenceProblems().map(item=>[item.token,item]));
   ui.imageRefs.classList.toggle('hidden',!entries.length);
   for(const entry of entries) {
     const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
     const scene=entry.kind==='scene'?state.sceneRefs.find(item=>sceneToken(item.id)===entry.token):null;
     const visual=image || scene;
     const chip=document.createElement('div');chip.className=visual?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
+    const problem=problems.get(entry.token);
+    if(problem) {chip.classList.add('is-invalid');chip.dataset.referenceState=problem.reason==='已删除'?'deleted':'duplicate';}
     if(scene) chip.dataset.sceneRefId=scene.id;
     const preview=document.createElement('button');preview.type='button';preview.className=visual?'prompt-image-preview':'prompt-reference-preview';
     preview.title=resolvePromptReference(entry.token,entry.label,entry.kind)?.title || entry.title || entry.label;
+    if(problem) preview.title=entry.alias+'（'+problem.name+'）'+problem.reason;
     preview.setAttribute('aria-label',referenceAliasLabel(entry.alias)+' · '+preview.title);
     if(visual) {
       if(image) {chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;}
       const thumbnail=document.createElement('img');thumbnail.src=image?image.annotated_data_url || image.original_data_url:scene.preview_data_url || resourceURL(scene.reference.source_reference_image.url);thumbnail.alt='';preview.append(thumbnail);
     }
-    const label=document.createElement('span');label.className='prompt-reference-alias';label.textContent=entry.alias+(image?' · '+(image.pane==='reference'?'参考':'场景'):scene?' · 只读场景':'');preview.append(label);
+    const label=document.createElement('span');label.className='prompt-reference-alias';label.textContent=entry.alias+(problem?' · '+problem.reason:image?' · '+(image.pane==='reference'?'参考':'场景'):scene?' · 只读场景':'');preview.append(label);
     preview.addEventListener('click',event=>image?previewPromptImage(image,{anchor:preview,event,entry}):previewPromptReference(entry,{anchor:preview,event,entry}));
     const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
     if(image) remove.dataset.imageRefId=image.id;
@@ -5790,15 +5821,20 @@ function promptReferences(note=promptText()) {
   for (const match of note.matchAll(/\[\[(?:object|annotation|node):/g)) {
     if (!starts.has(match.index)) throw new Error('提示里有不完整的引用；请重新点击物体或标记旁的「引用」。');
   }
+  const invalid=annotationReferenceProblems(note);
+  if(invalid.length) {
+    const shown=invalid.slice(0,5).map(item=>item.alias+'（'+item.name+'）'+item.reason).join('；');
+    const error=new Error('标记引用失效：'+shown+(invalid.length>5?'；等共 '+invalid.length+' 条':'')+'。请移除对应引用，或恢复标记后再发送。');
+    error.invalidReferences=invalid;
+    throw error;
+  }
   const nodes = [];
   const seenNodes = new Set();
   for (const match of tokens) {
     const [, kind, objectId, path] = match;
     if (kind !== 'node' && path !== undefined) throw new Error('提示里的物体或标记引用格式不正确。');
     if (kind === 'annotation') {
-      if (state.annotations.filter((item) => item.id === objectId).length !== 1) {
-        throw new Error('提示引用的标记已删除或重复，请更新这处引用。');
-      }
+      // All invalid marks are reported together above, with their saved labels.
     } else if (kind === 'object') {
       if (!sceneObject(objectId) && !snapshotForFeedback() && !state.sceneSnapshots.length) {
         throw new Error('提示引用的对象已不在当前场景，请更新这处引用。');
@@ -5940,7 +5976,7 @@ async function submitFeedback() {
   let referencedSceneNodes = [];
   if (!state.pendingSubmission) {
     try { referencedSceneNodes = promptReferences(promptText); }
-    catch (error) { announce(error.message, true); ui.note.focus(); return; }
+    catch (error) { announce(error.message, true); focusInvalidPromptReference(error); return; }
   }
   if (!state.pendingSubmission && !state.annotations.length && !promptText.trim() && !state.references.length && !state.referenceClip) {
     announce('请添加参考图、画标记，或填写提示后再发送。', true);
