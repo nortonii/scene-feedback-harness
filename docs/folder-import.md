@@ -1,5 +1,29 @@
 # 从服务主机文件夹导入已准备场景
 
+## 空白工作台入口
+
+启动独立空白入口：
+
+```bash
+.venv/bin/python scripts/start_blank_workbench.py
+```
+
+默认访问 `http://127.0.0.1:18776/`。首页显示「打开文件夹」，导入后从左侧列表选择场景。直接打开根地址始终进入空白首页，已有导入实例保留在列表，卸载当前场景后返回空白首页。
+
+默认工作目录与数据目录分别为 `~/.local/share/scene-feedback/blank-workbench/workspace` 和 `~/.local/share/scene-feedback/blank-workbench/data`。可用 `--project-dir`、`--data-dir` 指定独立位置；它们不复用旧重建服务的数据。误指定含模型、参考图、任务或反馈的根数据时，启动器报错并保留原数据，需选择新目录。
+
+局域网启动示例（将 IP 换为服务主机地址）：
+
+```bash
+.venv/bin/python scripts/start_blank_workbench.py \
+  --port 18776 \
+  --listen-host 0.0.0.0 \
+  --public-base-url http://192.168.3.157:18776 \
+  --lan-access open
+```
+
+此模式可直接收藏根地址 `/`，不需要会话参数或访问凭证链接。通过工作台服务主机文件夹导入场景；启动采用 MCP Events 模式，不自动创建或绑定 Codex 任务。图文反馈仍按该场景的插件订阅方式接入模型。
+
 ## 打开与导入
 
 在侧栏「场景」旁点击文件夹图标「打开文件夹」。这里浏览的是**工作台服务所在机器**的目录；通过 LAN 打开的浏览器不会读取客户端电脑的本地文件夹。可以逐级浏览，也可以粘贴服务主机上的绝对路径。

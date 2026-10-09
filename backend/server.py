@@ -416,6 +416,7 @@ def _make_server_unlocked(
             if self.command == "GET" and path == "/api/workspace/state":
                 state = gateway.state(include_capability=True, preferred_session_id=query.get("session_id", [None])[0])
                 state["project_folder_import_supported"] = True
+                state["blank_workbench"] = getattr(gateway, "blank_workbench", False) is True
                 state["lan_access"] = browser_access_mode
                 state["browser_url"] = self._browser_url(state["session_id"])
                 return self._send_json(200, state)

@@ -200,6 +200,16 @@ Click `关键点` in the left image toolbar to drag any declared body, foot, fac
 
 The editor supports all declared keypoints; this skill’s `apply-corrections` still requires a canonical WholeBody133 parent and does not add points or change topology. The skill merges corrections into a new observation file, then uses `capsule.py wholebody-reconstruct` / `wholebody-build` to produce editable fixed capsule bodies and 20 finger segments per hand, Blender animation and optional GLB. Synchronized calibrated views and explicit actor association are required. Missing fingers hold their previous pose; uninitialized hands are reported as partial results. Face landmarks are reference evidence, without detailed face mesh reconstruction. See [WholeBody reconstruction](external-skills/capsule-human-tracking/references/wholebody-reconstruction.md).
 
+## Start with a blank workbench
+
+Start the dedicated blank entry, then click “打开文件夹” to import and choose a scene. The home page does not load the last viewed model or create a Codex task. Imported scenes, sessions and edits persist; unloading the current scene returns to the blank home.
+
+```bash
+.venv/bin/python scripts/start_blank_workbench.py
+```
+
+The default URL is `http://127.0.0.1:18776/`, with separate persistent data. See [blank entry setup](docs/folder-import.md#空白工作台入口) for LAN arguments and directories.
+
 ## Quick start: room and cabinet
 
 The browser UI uses Chinese labels: `截图` means “Browse snapshots,” `3D` returns to live selection, and `发送反馈` means “Send feedback.”

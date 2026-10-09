@@ -59,6 +59,7 @@ const ui = {
   projectPermissions:id('project-permissions'), createProject:id('create-project'),
   openCreatedProject:id('open-created-project'), createProjectHelp:id('create-project-help'),
   viewport:id('viewport'), sceneStage:id('scene-stage'), sceneCanvas:id('scene-annotations'),
+  emptyWorkspace:id('workspace-empty'), openEmptyFolder:id('workspace-empty-open-folder'),
   referenceStage:id('reference-stage'), referenceMedia:id('reference-media'),
   referenceImage:id('reference-image'), referenceCanvas:id('reference-annotations'),
   humanPanel:id('human-pose-panel'), humanCanvas:id('human-pose-overlay'),
@@ -498,7 +499,12 @@ async function ensureSession() {
   renderWorkspace(workspace);
   const sessionId = workspace.session_id;
   const session = await api('/api/sessions/' + encodeURIComponent(sessionId));
-  if (params.get('session_id') !== sessionId || params.has('session')) {
+  if (workspace.blank_workbench === true) {
+    params.delete('session');
+    params.delete('session_id');
+    const query = params.toString();
+    history.replaceState(null, '', '/' + (query ? '?' + query : '') + location.hash);
+  } else if (params.get('session_id') !== sessionId || params.has('session')) {
     params.delete('session');
     params.set('session_id', sessionId);
     history.replaceState(null, '', location.pathname + '?' + params.toString());
@@ -1203,6 +1209,14 @@ async function switchTask(threadId) {
     renderTargetPicker();
   }
 }
+function renderEmptyWorkspace() {
+  const empty=state.workspaceReady && Number.isInteger(state.sceneRevision) && !state.sceneLoading &&
+    state.sceneObjects.length===0 && state.references.length===0 && !state.referenceClip;
+  ui.emptyWorkspace.hidden=!empty;
+  document.body.classList.toggle('workspace-is-empty',empty);
+  ui.openEmptyFolder.disabled=!state.projectFolderImportSupported || state.creatingProject ||
+    state.navigatingProject || !!state.unloadingProjectId;
+}
 function renderWorkspace(workspace) {
   state.poseCorrectionsSupported = workspace.pose_corrections_supported === true;
   state.imageReferencesSupported = workspace.image_references_supported === true;
@@ -1219,6 +1233,7 @@ function renderWorkspace(workspace) {
   state.projectCreationSupported = state.feedbackTransport !== 'mcp_events' && (workspace.project_creation_supported ?? state.desktopAvailable);
   state.projectFolderImportSupported = workspace.project_folder_import_supported === true;
   workspaceFolderImport?.refreshAvailability();
+  renderEmptyWorkspace();
   const nextThreadId = state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
@@ -2463,6 +2478,7 @@ async function loadScene(sceneData) {
     saveDraft();
   } finally {
     state.sceneLoading = false;
+    renderEmptyWorkspace();
     scheduleLiveScenePreview();
     updateSubmitLabel(); updateMode(); renderTimeline();
     renderProjectPicker();
@@ -2745,6 +2761,7 @@ function setReferences(references) {
   const previousActive = activeReference();
   const previousCamera = JSON.stringify(previousActive?.camera || null);
   state.references = references;
+  renderEmptyWorkspace();
   if (!clipReference() && !references.some((ref) => ref.id === state.activeReferenceId)) {
     state.activeReferenceId = references[0]?.id || null;
   }
@@ -3674,6 +3691,7 @@ function setReferenceClip(clip, {restore=false}={}) {
   updateAnnotationHistory();
   frameImages.clear();
   state.referenceClip = clip;
+  renderEmptyWorkspace();
   state.referenceClipSignature = signature;
   if (!referenceViews().some((view) => view.clip_id === state.activeViewId)) state.activeViewId = clip?.clip_id || null;
   const inspectedView = !restore && viewForReferenceImage(referenceViews(), inspectedReference);
@@ -6038,6 +6056,11 @@ function bindEvents() {
     workspaceFolderImport?.onPage(page);
     if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}
   }});
+  ui.openEmptyFolder.addEventListener('click',async()=>{
+    if(ui.openEmptyFolder.disabled) return;
+    await workspaceSidebar.open('import');
+    if(workspaceSidebar.isOpen && workspaceSidebar.page==='import') id('folder-import-path')?.focus({preventScroll:true});
+  });
   minimalLayout = setupMinimalLayout({getState:() => state});
   setupTheme({onChange:applyTheme});
   immersiveWorkspace = setupImmersive({onResize:() => { resizeScene(); updateReferenceGeometry(); }, onLayoutChange:() => workspaceChrome?.layoutChanged(), hasActiveGesture:() => !!(state.drag || annotationReferenceDrag || state.textPending || state.poseEditDrag)});

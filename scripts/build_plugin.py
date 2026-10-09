@@ -27,6 +27,7 @@ FIXED_FILES = (
     "docs/mcp-events-plugin.md", "docs/folder-import.md", "scripts/plugin_bridge.py",
     "scripts/build_plugin.py",
     "scripts/configure_plugin.py",
+    "scripts/start_blank_workbench.py",
 )
 
 

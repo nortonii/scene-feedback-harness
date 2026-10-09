@@ -197,6 +197,16 @@ workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4"
 
 편집기는 선언된 모든 키포인트를 지원하지만 skill의 `apply-corrections`는 표준 WholeBody133 부모 결과가 필요하며 점을 추가하거나 구조를 바꾸지 않습니다. skill은 수정을 새 관측 파일에 병합하고, `capsule.py wholebody-reconstruct`, `wholebody-build`로 고정 캡슐 몸과 각 손 20개의 편집 가능한 손가락 구간, Blender 애니메이션, 선택적 GLB를 생성합니다. 동기화된 보정 다중 시점과 명시적인 동일 인물 대응이 필요합니다. 관측되지 않은 손가락은 이전 자세를 유지하고, 초기화되지 않은 손은 부분 결과로 보고합니다. 얼굴 점은 참고 증거이며 정밀 얼굴 메시를 재구성하지 않습니다. [WholeBody 재구성](external-skills/capsule-human-tracking/references/wholebody-reconstruction.md)을 참고하세요.
 
+## 빈 작업대에서 시작
+
+전용 빈 작업대를 실행한 뒤 “打开文件夹”에서 장면을 가져와 선택합니다. 홈은 마지막 모델을 자동으로 열거나 Codex 작업을 만들지 않습니다. 가져온 목록, 세션과 수정은 유지되며 현재 장면을 언로드하면 빈 홈으로 돌아갑니다.
+
+```bash
+.venv/bin/python scripts/start_blank_workbench.py
+```
+
+기본 주소는 `http://127.0.0.1:18776/`이며 데이터는 별도로 저장됩니다. LAN 옵션과 폴더는[빈 작업대 안내](docs/folder-import.md#空白工作台入口)를 참고하세요.
+
 ## 빠른 체험: 방과 캐비닛
 
 브라우저 버튼은 중국어로 표시됩니다. `截图`는 저장된 스크린샷 보기, `3D`는 실시간 선택으로 돌아가기, `发送反馈`는 피드백 보내기입니다.

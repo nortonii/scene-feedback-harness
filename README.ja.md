@@ -197,6 +197,16 @@ workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4"
 
 編集は宣言された全キーポイントに対応しますが、skill の `apply-corrections` は標準 WholeBody133 の親結果を必要とし、点の追加やトポロジー変更は行いません。skill は修正を新しい観測ファイルに統合し、`capsule.py wholebody-reconstruct`、`wholebody-build` で固定カプセル身体と各手20本の編集可能な指節、Blender 動画、任意の GLB を生成します。同期した較正済み複数視点と明示的な人物対応が必要です。見えない指は前の姿勢を保持し、初期化できない手は部分結果として報告します。顔68点は参照情報で、精密な顔メッシュは生成しません。[WholeBody 再構成](external-skills/capsule-human-tracking/references/wholebody-reconstruction.md)を参照してください。
 
+## 空のワークベンチから開始
+
+専用の空の入口を起動し、「打开文件夹」でシーンを取り込んで選びます。ホームでは前回のモデルを自動表示せず、Codex タスクも作成しません。取り込み済みの一覧・セッション・編集は保持され、現在のシーンをアンロードすると空のホームに戻ります。
+
+```bash
+.venv/bin/python scripts/start_blank_workbench.py
+```
+
+既定の URL は `http://127.0.0.1:18776/` です。データは独立して保存します。LAN 引数とディレクトリは[空の入口の設定](docs/folder-import.md#空白工作台入口)を参照してください。
+
 ## クイックスタート：部屋とキャビネット
 
 ブラウザーのボタン表示は中国語です。`截图` は保存した画像の閲覧、`3D` はライブの選択画面へ戻る操作、`发送反馈` はフィードバックの送信です。

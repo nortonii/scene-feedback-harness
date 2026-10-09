@@ -202,6 +202,16 @@ workspace_set_reference_clip(video_path="/absolute/path/to/project/camera_B.mp4"
 
 编辑器可修改全部声明关键点；当前 skill 的 `apply-corrections` 合并仍要求标准 WholeBody133 父结果，不会自动补点或替换拓扑。skill 合并到新观测文件，再通过 `capsule.py wholebody-reconstruct` / `wholebody-build` 重建固定胶囊身体和每手 20 段可编辑手指，输出 Blender 动画与可选 GLB。需要同步、已标定的多机位和明确的同人关联；不可见手指保持前一姿态，未能初始化的手明确报告为部分结果。68 个面部点仅作参考，不生成精细面部网格。详见 [WholeBody 重建说明](external-skills/capsule-human-tracking/references/wholebody-reconstruction.md)。
 
+## 从空白工作台开始
+
+先启动独立的空白入口，再点击「打开文件夹」导入并选择场景。首页不自动加载上次查看的模型或创建 Codex 任务；已导入列表、会话和修改会保留，卸载当前场景后回到空白首页。
+
+```bash
+.venv/bin/python scripts/start_blank_workbench.py
+```
+
+默认地址为 `http://127.0.0.1:18776/`，导入数据单独保存。局域网参数和目录说明见[空白入口说明](docs/folder-import.md#空白工作台入口)。
+
 ## 快速试用：房间与柜子
 
 需要 Python 3.11+、支持 WebGL 的浏览器，以及已登录的 **`codex-cli 0.156.1`**。App Server 的请求和响应格式已对照这个版本生成的 JSON Schema 核对；其他版本会明确报错，避免静默使用不兼容字段。
