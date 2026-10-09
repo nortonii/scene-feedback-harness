@@ -2724,6 +2724,7 @@ function updateSnapshotTransform() {
   // The complete bitmap, comparison and annotation canvas move together.
   // These browser-only values never enter the snapshot or its camera evidence.
   ui.snapshotMedia.style.transform=`translate(-50%,-50%) translate(${view.x}px,${view.y}px) scale(${view.zoom})`;
+  workspaceChrome?.layoutChanged();
 }
 function setSnapshotZoom(nextZoom,event) {
   if(state.sceneView!=='snapshot' || !state.snapshot) return;
@@ -3606,6 +3607,7 @@ function updateReferenceGeometry() {
 }
 function updateReferenceTransform() {
   ui.referenceMedia.style.transform = `translate(${state.referencePan.x}px, ${state.referencePan.y}px) scale(${state.referenceZoom})`;
+  workspaceChrome?.layoutChanged();
 }
 function setReferenceZoom(nextZoom, anchorEvent) {
   const oldZoom = state.referenceZoom;
