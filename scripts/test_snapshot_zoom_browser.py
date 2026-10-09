@@ -72,6 +72,25 @@ def media_bytes(store,url):
     return (store.media_dir/Path(url).name).read_bytes()
 
 
+def wheel_snapshot(page,delta):
+    count=page.evaluate('__snapshotZoom.wheelCount')
+    page.mouse.wheel(0,delta)
+    page.wait_for_function('count=>__snapshotZoom.wheelCount>count',arg=count)
+    page.evaluate('()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
+
+
+def pan_snapshot(page):
+    page.locator('#scene-annotations').focus();page.keyboard.down('Space')
+    previous=geometry(page);pan_start=point(previous['stage'],.57,.44)
+    page.mouse.move(**pan_start);page.mouse.down()
+    page.mouse.move(pan_start['x']+42,pan_start['y']-31,steps=8);page.mouse.up();page.keyboard.up('Space')
+    panned=geometry(page)
+    assert abs(panned['image']['x']-previous['image']['x']-42)<2 and abs(panned['image']['y']-previous['image']['y']+31)<2,{
+        'before':previous,'after':panned,'start':pan_start,
+        'pan':page.evaluate('[...__snapshotZoom.state.snapshotViewports]'),'marks':page.evaluate('__snapshotZoom.state.annotations')}
+    return panned
+
+
 def run_case(pw,root,args,*,dynamic=False):
     from playwright.sync_api import expect
     label='dynamic' if dynamic else 'static';project=root/label;project.mkdir()
@@ -94,7 +113,7 @@ def run_case(pw,root,args,*,dynamic=False):
         browser=pw.chromium.launch(headless=True,executable_path=args.browser_executable,args=[
             '--no-sandbox','--no-proxy-server','--use-gl=angle','--use-angle=swiftshader','--enable-unsafe-swiftshader'])
         context=browser.new_context(viewport={'width':1440,'height':1000},device_scale_factor=2)
-        hook='\nwindow.__snapshotZoom={state,cameraData,controls,saveMomentDraft,captureScene};'
+        hook='\nwindow.__snapshotZoom={state,cameraData,controls,saveMomentDraft,captureScene,wheelCount:0};ui.sceneStage.addEventListener("wheel",()=>__snapshotZoom.wheelCount++,{capture:true});'
         context.route('**/app.js',lambda route:route.fulfill(status=200,content_type='application/javascript',body=(ROOT/'web/app.js').read_text()+hook))
         page=context.new_page();page.on('pageerror',lambda error:errors.append(str(error)))
         page.on('request',lambda call:posted.append(call.post_data_json) if call.method=='POST' and call.url.endswith('/feedback') else None)
@@ -123,14 +142,32 @@ def run_case(pw,root,args,*,dynamic=False):
         # Panning while holding Space takes precedence over the active drawing
         # tool and never creates a mark or changes the frozen evidence camera.
         tool='arrow' if dynamic else 'line';choose_tool(page,tool,'scene')
-        page.locator('#scene-annotations').focus();page.keyboard.down('Space')
-        pan_start=point(geometry(page)['stage'],.57,.44)
-        previous_geometry=geometry(page);previous=previous_geometry['image'];page.mouse.move(**pan_start);page.mouse.down()
-        page.mouse.move(pan_start['x']+42,pan_start['y']-31,steps=8);page.mouse.up();page.keyboard.up('Space')
-        panned=geometry(page)
-        assert abs(panned['image']['x']-previous['x']-42)<2 and abs(panned['image']['y']-previous['y']+31)<2,{
-            'case':label,'before':previous_geometry,'after':panned,'start':pan_start,
-            'pan':page.evaluate('[...__snapshotZoom.state.snapshotViewports]'),'marks':page.evaluate('__snapshotZoom.state.annotations')}
+        panned=pan_snapshot(page)
+        assert page.evaluate('__snapshotZoom.state.annotations.length')==0
+        assert page.evaluate('__snapshotZoom.cameraData()')==camera_before
+
+        # Cross 1x with a nonzero pan: resetting its translation would make the
+        # same source pixel jump away from this fixed, real wheel position.
+        pivot={key:round(value) for key,value in point(panned['image'],.61,.57).items()}
+        page.mouse.move(**pivot)
+        for _ in range(30):
+            prior=geometry(page);ratio=prior['image']['width']/prior['logical'][0]
+            if ratio<.101:break
+            source_point=normalize(pivot,prior['image']);wheel_snapshot(page,300)
+            smaller=geometry(page)
+            assert smaller['image']['width']<prior['image']['width']
+            assert max(abs(a-b) for a,b in zip(source_point,normalize(pivot,smaller['image'])))<.004
+        minimum=geometry(page)
+        assert abs(minimum['image']['width']/minimum['logical'][0]-.1)<.002
+        for _ in range(2):wheel_snapshot(page,300)
+        assert geometry(page)==minimum,'additional wheel input at 0.1x must not shift the viewport'
+        for _ in range(20):
+            if geometry(page)['image']['width']/geometry(page)['logical'][0]>=.6:break
+            wheel_snapshot(page,-300)
+        smaller=geometry(page)
+        assert .6<=smaller['image']['width']/smaller['logical'][0]<.7
+        assert smaller['bitmap']==before['bitmap']
+        panned=pan_snapshot(page)
         assert page.evaluate('__snapshotZoom.state.annotations.length')==0
         assert page.evaluate('__snapshotZoom.cameraData()')==camera_before
         start=point(panned['image'],.42,.34);end=point(panned['image'],.55,.46)
@@ -143,7 +180,7 @@ def run_case(pw,root,args,*,dynamic=False):
         assert near_red(overlay,(.485,.40))>8
         assert page.evaluate('structuredClone(__snapshotZoom.state.snapshot)')==first
         viewport=panned['transform']
-        print(f'PASS {label}: real wheel anchors the source pixel, Space pan and {tool} use normalized image coordinates; image/comparison/canvas align, camera and source evidence stay fixed at DPR 2',flush=True)
+        print(f'PASS {label}: real wheel crosses 1x without a pixel jump, reaches a stable 0.1x limit, then 0.6x Space pan and {tool} use source coordinates; camera/evidence/annotation resolution stay fixed at DPR 2',flush=True)
 
         page.locator('#scene-live-card').click();page.wait_for_function('__snapshotZoom.state.sceneView==="live" && __snapshotZoom.controls.enabled')
         current=page.evaluate('__snapshotZoom.cameraData().position')

@@ -34,6 +34,7 @@ import { compactReferenceMessage } from './prompt-reference-display.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const SNAPSHOT_ZOOM_MIN = .1, SNAPSHOT_ZOOM_MAX = 8;
 const array = (value) => [value.x, value.y, value.z].map((n) => Number(n.toFixed(5)));
 const workspacePrefix = projectPrefix(location.pathname);
 const resourceURL = (url) => scopedURL(url, workspacePrefix);
@@ -384,7 +385,7 @@ function restoreDraft() {
     state.snapshotViewports=new Map((Array.isArray(draft.snapshotViewports)?draft.snapshotViewports:[]).slice(-24).filter(entry=>
       Array.isArray(entry) && typeof entry[0]==='string' && entry[0].length<=128 && entry[1] &&
       Number.isFinite(entry[1].zoom) && Number.isFinite(entry[1].x) && Number.isFinite(entry[1].y)).map(([id,view])=>
-      [id,{zoom:clamp(view.zoom,1,8),x:clamp(view.x,-100000,100000),y:clamp(view.y,-100000,100000)}]));
+      [id,{zoom:clamp(view.zoom,SNAPSHOT_ZOOM_MIN,SNAPSHOT_ZOOM_MAX),x:clamp(view.x,-100000,100000),y:clamp(view.y,-100000,100000)}]));
     ui.groupSelect.value = state.groupId;
     // Preserve drafts from the former two-field composer as one freeform prompt.
     const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
@@ -2726,7 +2727,7 @@ function updateSnapshotTransform() {
 }
 function setSnapshotZoom(nextZoom,event) {
   if(state.sceneView!=='snapshot' || !state.snapshot) return;
-  const previous=snapshotViewport(),zoom=clamp(nextZoom,1,8);
+  const previous=snapshotViewport(),zoom=clamp(nextZoom,SNAPSHOT_ZOOM_MIN,SNAPSHOT_ZOOM_MAX);
   if(zoom===previous.zoom) return;
   let {x,y}=previous;
   if(event) {
@@ -2734,7 +2735,6 @@ function setSnapshotZoom(nextZoom,event) {
     const factor=zoom/previous.zoom;
     x=anchorX-(anchorX-x)*factor;y=anchorY-(anchorY-y)*factor;
   }
-  if(zoom===1) {x=0;y=0;}
   setSnapshotViewport(state.snapshot.id,{zoom,x,y});updateSnapshotTransform();saveDraft();
 }
 function finishSnapshotPan(cancel=false) {
@@ -6466,8 +6466,8 @@ function bindEvents() {
     const width=ui.snapshotMedia.clientWidth*previous.zoom,height=ui.snapshotMedia.clientHeight*previous.zoom;
     const maxX=(ui.sceneStage.clientWidth+width)/2-Math.min(64,width/5),maxY=(ui.sceneStage.clientHeight+height)/2-Math.min(64,height/5);
     setSnapshotViewport(gesture.snapshotId,{zoom:previous.zoom,
-      x:previous.zoom===1?0:clamp(previous.x+event.clientX-gesture.startX,-maxX,maxX),
-      y:previous.zoom===1?0:clamp(previous.y+event.clientY-gesture.startY,-maxY,maxY)});
+      x:clamp(previous.x+event.clientX-gesture.startX,-maxX,maxX),
+      y:clamp(previous.y+event.clientY-gesture.startY,-maxY,maxY)});
     updateSnapshotTransform();
   },{capture:true});
   ui.sceneStage.addEventListener('pointerup',event=>{
