@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import OrderedDict
 import hashlib
 import json
 import os
@@ -13,13 +14,14 @@ import threading
 from typing import Any
 import uuid
 
-from core import APIError, ASSET_RE, SceneStore, _now, _safe_json, _vector
+from core import APIError, ASSET_RE, MAX_MODEL_BYTES, SceneStore, _now, _safe_json, _vector
 
 REFERENCE_ID = re.compile(r"^[0-9a-f]{32}$")
 MAX_SCENE_REFS = 4
 MAX_CAPTURE_BYTES = 200 * 1024 * 1024
 MAX_FEEDBACK_BYTES = 400 * 1024 * 1024
 MAX_RECORD_BYTES = 2 * 1024 * 1024
+MAX_INTEGRITY_CACHE = 1024
 MEDIA_URL = re.compile(r"^/media/[0-9a-f]{32}\.(?:png|jpg)$")
 
 
@@ -91,6 +93,10 @@ def _digest(path: Path) -> str:
     return result.hexdigest()
 
 
+def _stamp(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def public_reference(record: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(record)
     prefix = "/p/" + result["receiver_project_id"]
@@ -111,7 +117,35 @@ class SceneReferences:
         with store.lock:
             if not hasattr(store, "_scene_reference_lock"):
                 store._scene_reference_lock = threading.RLock()
+            if not hasattr(store, "_scene_reference_integrity_cache"):
+                store._scene_reference_integrity_cache = OrderedDict()
+                store._scene_reference_integrity_lock = threading.Lock()
             self.lock = store._scene_reference_lock
+            self.integrity_cache = store._scene_reference_integrity_cache
+            self.integrity_lock = store._scene_reference_integrity_lock
+
+    def _verify_digest(self, path: Path, expected: Any, *, full_check: bool) -> None:
+        if not isinstance(expected, str):
+            raise APIError(409, "scene reference file digest is invalid")
+        try:
+            stamp = _stamp(path.stat())
+            if not full_check:
+                with self.integrity_lock:
+                    if self.integrity_cache.get(path) == (stamp, expected):
+                        self.integrity_cache.move_to_end(path)
+                        return
+            digest = _digest(path)
+            if _stamp(path.stat()) != stamp or digest != expected:
+                raise APIError(409, "scene reference file content changed")
+        except OSError as exc:
+            raise APIError(409, "scene reference file cannot be read") from exc
+        # Cache only complete checks of stable files. Sending feedback always
+        # rereads the bytes; repeated previews may reuse an unchanged inode.
+        with self.integrity_lock:
+            self.integrity_cache[path] = (stamp, digest)
+            self.integrity_cache.move_to_end(path)
+            while len(self.integrity_cache) > MAX_INTEGRITY_CACHE:
+                self.integrity_cache.popitem(last=False)
 
     def owner(self, session_id: str | None = None) -> tuple[str, str]:
         with self.store.lock:
@@ -124,7 +158,7 @@ class SceneReferences:
                 raise APIError(409, "scene reference belongs to another receiver session")
             return project, session
 
-    def load(self, reference_id: Any, *, session_id: str | None = None) -> dict[str, Any]:
+    def load(self, reference_id: Any, *, session_id: str | None = None, full_check: bool = False) -> dict[str, Any]:
         if not isinstance(reference_id, str) or not REFERENCE_ID.fullmatch(reference_id):
             raise APIError(400, "scene reference ID must be a lowercase UUID hex value")
         owner, session = self.owner(session_id)
@@ -156,17 +190,16 @@ class SceneReferences:
             path = _resource(self.store, asset.get("url"), "assets")
             if asset.get("path") != str(path) or type(asset.get("bytes")) is not int or path.stat().st_size != asset["bytes"]:
                 raise APIError(409, "scene reference asset changed")
-            if not isinstance(asset.get("sha256"), str) or _digest(path) != asset["sha256"]:
-                raise APIError(409, "scene reference asset content changed")
+            self._verify_digest(path, asset.get("sha256"), full_check=full_check)
             total += asset["bytes"]
         if total > MAX_CAPTURE_BYTES:
             raise APIError(409, "scene reference asset budget exceeded")
         if record.get("source_reference_image"):
             image = record["source_reference_image"]
             path = _resource(self.store, image.get("url"), "media")
-            if (image.get("path") != str(path) or image.get("bytes") != path.stat().st_size
-                or not isinstance(image.get("sha256"), str) or _digest(path) != image["sha256"]):
+            if image.get("path") != str(path) or image.get("bytes") != path.stat().st_size:
                 raise APIError(409, "scene reference image path is invalid")
+            self._verify_digest(path, image.get("sha256"), full_check=full_check)
         return record
 
     def get(self, reference_id: Any) -> dict[str, Any]:
@@ -200,6 +233,8 @@ class SceneReferences:
                 total += info.st_size
                 if total > MAX_CAPTURE_BYTES:
                     raise APIError(413, "source scene GLBs exceed the 200 MiB reference limit")
+                if not 20 <= info.st_size <= MAX_MODEL_BYTES:
+                    raise APIError(400, "GLB must be between 20 bytes and 100 MB")
                 assets[obj["url"]] = path
                 stamps.append((obj["url"], info.st_size, info.st_mtime_ns))
             objects.append(item)
@@ -240,7 +275,8 @@ class SceneReferences:
             remapped = {}
             for url, source in assets.items():
                 source = _resource(source_store, url, "assets")
-                SceneStore._validate_glb_source(str(source))
+                # _copy_glb validates the complete destination container. A
+                # second validation of the source adds no verified evidence.
                 copied_url, digest = self.store._copy_glb(source)
                 path = self.store.assets_dir / copied_url.rsplit("/", 1)[-1]
                 owned.append(path)
@@ -333,7 +369,7 @@ def prepare_scene_refs(store: SceneStore, session_id: str, payload: dict[str, An
             raise APIError(400, "scene reference ID must be a lowercase UUID hex value")
         if reference_id in seen:
             raise APIError(400, "scene_refs must have unique IDs")
-        record = archive.load(reference_id, session_id=session_id)
+        record = archive.load(reference_id, session_id=session_id, full_check=True)
         if reference_id not in cited:
             raise APIError(400, "scene_refs contains a scene not cited in note")
         seen.add(reference_id)

@@ -22,7 +22,7 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import APIError, SceneStore
+from core import APIError, MAX_MODEL_BYTES, SceneStore
 from feedback_summary import model_input_plan
 from gateway import WorkspaceGateway
 from mcp_server import _visual_tool_result
@@ -118,6 +118,21 @@ class SceneReferenceTests(unittest.TestCase):
         self.assertNotIn("camera", self.archive.get(first["id"])["source_reference_image"])
         self.assertEqual(newer["source_reference_image"]["camera"]["camera_to_world"][0][3], 1)
 
+    def test_preview_cache_reuses_stable_hashes_but_feedback_rereads_every_file(self):
+        reference = self.capture()
+        with patch("scene_references._digest", wraps=scene_references._digest) as digest:
+            self.assertEqual(self.archive.get(reference["id"]), reference)
+            self.assertEqual(digest.call_count, 2)
+            for _ in range(3):
+                self.assertEqual(self.capture(), reference)
+                self.assertEqual(SceneReferences(self.receiver.store).get(reference["id"]), reference)
+            self.assertEqual(digest.call_count, 2, "preview reread unchanged GLB and GT bytes")
+            self.receiver.store.submit_feedback(self.session, self.payload(reference, preview=False))
+            self.assertEqual(digest.call_count, 4, "feedback reused preview hashes instead of reading evidence")
+            restored = SceneStore(self.receiver.store.data_dir)
+            SceneReferences(restored).get(reference["id"])
+            self.assertEqual(digest.call_count, 6, "process restart trusted a persisted cache")
+
     def test_snapshot_and_submission_survive_source_update_and_unload(self):
         reference = self.capture()
         archived = self.archive.get(reference["id"])
@@ -210,6 +225,21 @@ class SceneReferenceTests(unittest.TestCase):
             self.capture()
         self.assertEqual(caught.exception.status, 413)
         self.assertEqual(self.files(self.receiver.store), before_receiver)
+        source_url = self.source.store.scene()["objects"][0]["url"]
+        source_path = self.source.store.assets_dir / source_url.rsplit("/", 1)[-1]
+        source_path.write_bytes(b"bad GLB")
+        before_invalid = self.files(self.receiver.store)
+        with self.assertRaises(APIError) as caught:
+            self.capture()
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(self.files(self.receiver.store), before_invalid, "invalid copied GLB left receiver files")
+        with source_path.open("wb") as handle:
+            handle.truncate(MAX_MODEL_BYTES + 1)
+        with patch.object(self.receiver.store, "_copy_glb", side_effect=AssertionError("copied an oversized source")), \
+             self.assertRaises(APIError) as caught:
+            self.capture()
+        self.assertEqual(caught.exception.status, 400)
+        self.assertFalse(self.archive.root.exists() and list(self.archive.root.iterdir()))
 
     def test_same_size_archived_model_and_gt_damage_are_detected_and_never_silently_replaced(self):
         for field in ("assets", "source_reference_image"):
@@ -217,9 +247,13 @@ class SceneReferenceTests(unittest.TestCase):
                 reference = self.capture()
                 item = reference[field][0] if field == "assets" else reference[field]
                 path = Path(item["path"])
+                self.archive.get(reference["id"])
+                stamp = path.stat()
                 data = path.read_bytes()
                 os.chmod(path, 0o600)
                 path.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+                os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                os.chmod(path, stamp.st_mode & 0o777)
                 with self.assertRaises(APIError):
                     self.archive.get(reference["id"])
                 with self.assertRaises(APIError):

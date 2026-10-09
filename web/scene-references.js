@@ -33,6 +33,13 @@ export function collectSceneReferences(note,references) {
 }
 export function createSceneReferenceStore(openDatabase) {
   let pending=Promise.resolve();
+  async function read(key) {
+    const db=await openDatabase();
+    try {return await new Promise((resolve,reject)=>{
+      const request=db.transaction('drafts').objectStore('drafts').get(key);
+      request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+    });} finally {db.close();}
+  }
   return {
     get pending(){return pending;},
     save(sessionId,references) {
@@ -46,12 +53,31 @@ export function createSceneReferenceStore(openDatabase) {
       });return pending;
     },
     async load(sessionId) {
-      const db=await openDatabase();
-      try {const entries=await new Promise((resolve,reject)=>{
-        const request=db.transaction('drafts').objectStore('drafts').get('prompt-scenes:'+sessionId);
-        request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
-      });return Array.isArray(entries)?entries.filter(validSceneReference).slice(0,16):[];}
-      finally {db.close();}
+      const entries=await read('prompt-scenes:'+sessionId);
+      return Array.isArray(entries)?entries.filter(validSceneReference).slice(0,16):[];
+    },
+    async loadPreview(sessionId,id) {
+      await pending.catch(()=>{});
+      const entries=await read('scene-previews:'+sessionId);
+      return Array.isArray(entries)?entries.find(entry=>entry?.id===id) || null:null;
+    },
+    savePreview(sessionId,entry) {
+      if(!entry.preview_data_url) return Promise.resolve();
+      // Cache only the small rendered evidence. Source metadata always comes
+      // from the server's canonical immutable snapshot on the next citation.
+      const captured=structuredClone(Object.fromEntries(['id','preview_data_url','preview_camera','width','height','time_sec'].map(key=>[key,entry[key]])));
+      pending=pending.catch(()=>{}).then(async()=>{
+        const db=await openDatabase();
+        try {await new Promise((resolve,reject)=>{
+          const tx=db.transaction('drafts','readwrite'),store=tx.objectStore('drafts');
+          const key='scene-previews:'+sessionId,request=store.get(key);
+          request.onsuccess=()=>{
+            const entries=Array.isArray(request.result)?request.result.filter(item=>item?.id!==captured.id):[];
+            store.put([...entries.slice(-15),captured],key);
+          };
+          tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(tx.error || Error('场景预览缓存保存失败'));
+        });} finally {db.close();}
+      });return pending;
     }
   };
 }

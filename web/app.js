@@ -4185,7 +4185,14 @@ function saveSceneReferenceDraft() {
     if(state.sceneRefs.length) announce('场景引用草稿无法保存，刷新前请先发送或保留当前页面。',true);
   });
 }
-async function sceneReferenceFromRecord(reference) {
+async function sceneReferenceFromRecord(reference,session=state.sessionId) {
+  try {
+    const cached=await sceneReferenceStore.loadPreview(session,reference.id);
+    if(cached) {
+      const entry={...cached,reference:structuredClone(reference)};
+      if(validSceneReference(entry)) return entry;
+    }
+  } catch { /* A preview cache miss must not prevent a fresh capture. */ }
   let preview;
   try {preview=await renderSceneReferencePreview(reference,{resourceURL});}
   catch(error) {
@@ -4196,6 +4203,7 @@ async function sceneReferenceFromRecord(reference) {
     preview_data_url:preview.data_url || null,preview_camera:preview.camera || null,
     width:preview.width,height:preview.height,time_sec:preview.time_sec ?? 0};
   if(!validSceneReference(entry)) throw Error('参考场景没有可恢复的模型或参考图，未加入提示。');
+  await sceneReferenceStore.savePreview(session,entry).catch(()=>{});
   return entry;
 }
 async function restoreSceneReferenceDraft() {
@@ -4208,7 +4216,7 @@ async function restoreSceneReferenceDraft() {
       if(state.sceneRefs.some(entry=>entry.id===id)) continue;
       try {
         const reference=await api('/api/workspace/scene-references/'+id);
-        const entry=await sceneReferenceFromRecord(reference);
+        const entry=await sceneReferenceFromRecord(reference,session);
         if(state.sessionId!==session) return;
         state.sceneRefs.push(entry);
       } catch { /* Missing snapshots block submission instead of changing source. */ }
@@ -4233,16 +4241,20 @@ async function quoteOtherScene(projectId) {
     const reference=await api('/api/workspace/scene-references',{method:'POST',body:{project_id:projectId}});
     if(cited.length>=MAX_SCENE_REFERENCES && !citedIds.has(reference.id)) throw Error('这个场景已有新快照；一条提示最多引用 4 个参考场景，请先移除一处引用。');
     const existing=state.sceneRefs.find(entry=>entry.id===reference.id);
-    const entry=existing || await sceneReferenceFromRecord(reference);
+    const entry=existing || await sceneReferenceFromRecord(reference,source.session);
     if(!current()) throw Error('场景或提示已更改，已取消加入这处引用；请再引用一次。');
     const referenced=new Set(cited.map(item=>item.id));
     const next=existing?state.sceneRefs:[...state.sceneRefs.filter(item=>!referenced.has(item.id)).slice(-12),
       ...state.sceneRefs.filter(item=>referenced.has(item.id)),entry];
-    await sceneReferenceStore.save(source.session,next);
+    const signature=next.map(item=>item.id).join(',');
+    // An unchanged archived snapshot already owns its preview and draft bytes.
+    // Wait for an in-flight save without cloning and rewriting them again.
+    if(existing && state.draftSceneReferenceSignature===signature) await sceneReferenceStore.pending;
+    else await sceneReferenceStore.save(source.session,next);
     if(!current()) throw Error('场景或提示已更改，已取消加入这处引用；请再引用一次。');
     await workspaceSidebar.close({restoreFocus:false});
     if(!current()) throw Error('场景或提示已更改，已取消加入这处引用；请再引用一次。');
-    state.sceneRefs=next;state.draftSceneReferenceSignature=next.map(item=>item.id).join(',');
+    state.sceneRefs=next;state.draftSceneReferenceSignature=signature;
     ui.note.setSelectionRange(source.start,source.end);
     if(!insertNoteReference(sceneReferenceLabel(entry.reference),sceneToken(entry.id),{preserveTool:true})) return false;
     saveDraft();return true;

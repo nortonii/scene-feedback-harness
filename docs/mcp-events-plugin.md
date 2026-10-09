@@ -10,7 +10,7 @@
 
 原生输入框正文和聊天记录使用图标加编号：物体 `🧊1`、部件 `🧩1`、标记 `📍1`、图片 `🖼️1`、人体 `🧍1`、修正 `✏️1`、时间 `🕒1`、场景参考 `🏞️1`。圆角来源卡片提供完整来源预览、名称与精确来源详情，并支持移除；各类独立编号，同源复用，旧草稿自动迁移且保持精确绑定。聊天记录显示图标，归档数据仍保存协议 token 与准确的来源、图片、相机、机位、帧时间和场景版本。
 
-左侧场景行的引用按钮可只读捕获同一工作台已加载的其他可用场景，保留版本、场景 JSON、完整 GLB 副本、可用模型预览与首张 GT 图，显示为 `🏞️1`。预览不可用时可使用已有 GT，二者都不可用则不加入引用。不改变当前任务绑定，不启动来源任务，也不复制其会话文字或凭证；来源更新或卸载后，引用副本仍可用。场景引用通过 `scene_refs` 与 `[[scene:id]]` 绑定，模型摘要只说明名称、版本与归档路径并提供预览／GT，完整几何按需读取。每轮最多 4 个场景，GLB 复制预算为单场景 200 MiB、单反馈 400 MiB。只在当前工作台内选场景，`@` 候选范围保持原样，详见[场景参考说明](folder-import.md#引用其他场景作为参考)。
+左侧场景行的引用按钮可只读捕获同一工作台已加载的其他可用场景，保留版本、场景 JSON、完整 GLB 副本、可用模型预览与首张 GT 图，显示为 `🏞️1`。模型预览在后台生成；服务确认未变的同一快照可在新一轮或刷新后复用已有预览。预览不可用时可使用已有 GT，二者都不可用则明确报错，不加入引用。不改变当前任务绑定，不启动来源任务，也不复制其会话文字或凭证；来源更新或卸载后，引用副本仍可用。场景引用通过 `scene_refs` 与 `[[scene:id]]` 绑定，模型摘要只说明名称、版本与归档路径并提供预览／GT，完整几何按需读取。每轮最多 4 个场景，GLB 复制预算为单场景 200 MiB、单反馈 400 MiB。只在当前工作台内选场景，`@` 候选范围保持原样，详见[场景参考说明](folder-import.md#引用其他场景作为参考)。
 
 模型收到的文本使用简洁摘要，保留原用户文字、ID、来源精确时间、机位、`frame_index` 和版本，来源元数据只说明一次。关键点摘要只列改动关节的修改前／后值；完整关键点、相机矩阵和旧证据仍保存在 `state.json` 与原始修正档案中。MCP 首段文本与 `structuredContent` 默认都返回同一精简摘要，保留 `feedback_id`、完整 `state_path` 和来源归档指针。`workspace_get_feedback(feedback_id, include_details=False)` 默认读取摘要；传入 `include_details=True` 按需读取完整归档字段。两种方式的图片都只包含本轮相关来源，其他原图可按归档路径读取；stdio 与 Events RPC 使用同一参数。
 
@@ -43,7 +43,7 @@ ChatGPT 连接。配置中的项目 ID、项目目录和数据目录必须匹配
 保留完整 MCP、技能、详细介绍、图标，以及 `.codex-plugin/plugin.json` 和
 `.mcp.json` 兼容文件。仓库及配置出的本地安装目录仍可使用本地市场清单。
 
-请使用 `0.1.57` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
+请使用 `0.1.58` ZIP。如果界面只提示「无法添加插件」，应保留具体校验错误或
 上传请求的响应；本地 `plugin/read` 成功不能代替云端归档导入验证。
 官方 [包结构说明](https://developers.openai.com/plugins/build/plugins) 区分了
 单插件分发包和本地市场目录；[上传错误说明](https://developers.openai.com/plugins/deploy/submission-errors)
@@ -100,7 +100,7 @@ codex plugin add scene-feedback-harness@scene-feedback-local
 ```bash
 python3 scripts/build_plugin.py --output dist/scene-feedback-harness.zip
 # 带版本号的本次分发包：
-python3 scripts/build_plugin.py --output dist/scene-feedback-harness-0.1.57.zip
+python3 scripts/build_plugin.py --output dist/scene-feedback-harness-0.1.58.zip
 # 或打包已配置的本地版本：
 python3 scripts/build_plugin.py --source dist/local-plugin --output dist/project-plugin.zip
 ```
