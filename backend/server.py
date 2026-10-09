@@ -413,7 +413,7 @@ def _make_server_unlocked(
                 from ready_check import check_ready_folder
                 return self._send_json(200, check_ready_folder(payload.get("path")))
             if self.command == "POST" and path == "/api/projects":
-                if self.context.gateway.feedback_transport == "mcp_events":
+                if feedback_transport == "mcp_events":
                     raise APIError(409, "create a separate event workspace instead of a Codex-bound project")
                 self._require_browser_capability()
                 return self._send_json(201, registry.create(self._read_json()))
@@ -723,6 +723,13 @@ def _make_server_unlocked(
         if context is root_context and enable_codex and hasattr(context.gateway.adapter, "env_overrides"):
             context.gateway.adapter.env_overrides["SCENE_FEEDBACK_PORT"] = str(server.server_port)
             context.gateway.adapter._thread_config = context.gateway.adapter._project_mcp_config()
+        saved_workspace = context.gateway.ensure()
+        saved_target = saved_workspace.get("thread_id")
+        if external_review and saved_target and context.gateway.feedback_transport == "legacy" and context.gateway.adapter is None:
+            from shared_thread_adapter import SharedDesktopAdapter
+            kwargs = {"allow_owned_resume": True} if saved_target in saved_workspace.get("created_thread_ids", []) else {"allow_bound_resume": True}
+            kwargs.update(context.gateway._owned_adapter_config(saved_target))
+            context.gateway.adapter = SharedDesktopAdapter(saved_target, on_event=context.gateway.scoped_adapter_callback(), **kwargs)
 
     def create_context(record: dict, newly_created: bool) -> ProjectContext:
         child_project = Path(record["project_dir"])
@@ -761,11 +768,6 @@ def _make_server_unlocked(
             target_id = child_workspace.get("thread_id")
             if imported and not target_id:
                 child_store.workspace_agent(status="external_idle", error=None)
-            if external_review and target_id and feedback_transport == "legacy":
-                from shared_thread_adapter import SharedDesktopAdapter
-                kwargs = {"allow_owned_resume": True} if target_id in child_workspace.get("created_thread_ids", []) else {"allow_bound_resume": True}
-                kwargs.update(child_gateway._owned_adapter_config(target_id))
-                child_gateway.adapter = SharedDesktopAdapter(target_id, on_event=child_gateway.scoped_adapter_callback(), **kwargs)
             if not imported and enable_codex and not external_review:
                 from appserver_adapter import CodexAppServerAdapter
                 thread_path = child_data / "codex_app_server_thread.json"

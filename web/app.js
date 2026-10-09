@@ -118,7 +118,8 @@ const state = {
   pendingProjectCreate:null, projectCreationResult:null, projectCreationError:null,
   sessionId:null, sessionStatus:'connecting', feedbackCount:0,
   browserCapability:null, agent:{status:'disconnected'}, deliveryMode:'app_server', feedbackTransport:null, eventDelivery:null,
-  boundThreadId:null, desktopAvailable:false, projectCreationSupported:false, queue:[], approvals:[], targets:null, targetChoice:null,
+  boundThreadId:null, desktopAvailable:false, taskConnectionSupported:false, taskCreationSupported:false,
+  modelSelectionSupported:false, projectCreationSupported:false, queue:[], approvals:[], targets:null, targetChoice:null,
   targetOptionsSignature:null, loadingTargets:false, switchingTarget:false, targetLoadError:null,
   models:null, defaultModel:null, modelChoice:null, effortChoice:'', loadingModels:false,
   canSetPermissions:false,
@@ -521,10 +522,10 @@ async function ensureSession() {
   renderTimeline(); updateMode();
   renderWorkspace(workspace);
   await fetchEvents(true);
-  if (state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable) loadTargets().catch((error) => {
+  if (state.taskConnectionSupported && state.boundThreadId) loadTargets().catch((error) => {
     ui.targetHelp.textContent = '无法读取任务列表：' + error.message;
   });
-  if (state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable) loadModels().catch(() => {
+  if (state.taskCreationSupported && state.boundThreadId) loadModels().catch(() => {
     /* The new-task form shows the connection error. */
   });
   loadProjects().catch(() => { /* The scene picker shows catalog errors. */ });
@@ -598,7 +599,7 @@ function updateSubmitLabel() {
   const status = state.agent?.status || 'disconnected';
   if (state.feedbackTransport === 'mcp_events') {
     setSubmitLabel(state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送' : '发送反馈');
-    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
     ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
@@ -615,7 +616,7 @@ function updateSubmitLabel() {
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
       : bound ? '发送反馈' : '保存反馈';
     setSubmitLabel(label);
-    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
     ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
@@ -636,7 +637,7 @@ function updateSubmitLabel() {
     : status === 'disconnected' || status === 'error' ? '保存反馈'
     : '发送反馈';
   setSubmitLabel(label);
-  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject;
+  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
   if (['submitted', 'cancelled'].includes(state.sessionStatus)) ui.caption.textContent = '会话已结束，标记仍可查看。';
@@ -721,8 +722,8 @@ function rememberCreatedProject(project, error=null) {
 }
 function renderProjectPicker() {
   updateProjectTitle();
-  ui.createProjectPanel.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
-  id('sidebar-new-project').hidden=state.feedbackTransport==='mcp_events';
+  ui.createProjectPanel.classList.toggle('hidden', !state.projectCreationSupported);
+  id('sidebar-new-project').hidden=!state.projectCreationSupported;
   if (!ui.projectsDialog.open) return;
   const projects = Array.isArray(state.projects) ? state.projects : [];
   const busy = projectBusyReason();
@@ -745,7 +746,7 @@ function renderProjectPicker() {
     row.querySelector('.project-name strong').textContent = project.name || '未命名场景';
     row.querySelector('.project-name span').textContent = unavailable ? '不可用' : current ? '当前' : '';
     row.querySelector('.project-detail').textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
-      (state.feedbackTransport === 'mcp_events' ? '' : project.thread_id ? ' · 已连接 Codex 任务' : ' · 尚未连接任务') +
+      (project.thread_id ? ' · 已连接 Codex 任务' : state.feedbackTransport === 'mcp_events' ? '' : ' · 尚未连接任务') +
       (!project.creation_error && ['creating','pending','in_progress'].includes(project.creation_status) ? ' · 正在创建任务' : '');
     const error = row.querySelector('.project-error');
     error.hidden = !project.creation_error;
@@ -997,10 +998,11 @@ function openProjectsDialog() {
 function loadSidebarProjects() {
   renderProjectPicker();
   loadProjects().catch(() => {});
-  if (state.feedbackTransport !== 'mcp_events') loadModels({forProjects:true}).catch(() => {});
+  if (state.projectCreationSupported) loadModels({forProjects:true}).catch(() => {});
 }
 
 function renderCreateTarget() {
+  ui.createTargetPanel.classList.toggle('hidden',!state.taskCreationSupported);
   const models = Array.isArray(state.models) ? state.models.filter((item) => typeof item?.model === 'string') : [];
   if (!models.some((item) => item.model === state.modelChoice)) {
     state.modelChoice = models.find((item) => item.model === state.defaultModel)?.model ||
@@ -1051,17 +1053,17 @@ function renderCreateTarget() {
   ui.createEffort.disabled = !models.length || !efforts.length || busy;
   ui.createPermissions.disabled = busy || !state.canSetPermissions;
   ui.createTitle.disabled = busy;
-  ui.createTarget.disabled = !models.length || busy || !state.canSetPermissions;
+  ui.createTarget.disabled = !state.taskCreationSupported || !models.length || busy || !state.canSetPermissions;
   if (state.creatingTarget) ui.createTargetHelp.textContent = '正在创建任务并连接工作台…';
   else if (state.pendingSubmission) ui.createTargetHelp.textContent = '请先确认上一条反馈的送达状态。';
   else if (state.modelLoadError) ui.createTargetHelp.textContent = '无法读取可用模型：' + state.modelLoadError;
   else if (!state.canSetPermissions) ui.createTargetHelp.textContent = '服务正在更新任务权限功能；请等当前回合结束后刷新页面。';
-  else ui.createTargetHelp.textContent = '权限模式只应用于新任务；当前场景和参考图会留在工作台。';
+  else ui.createTargetHelp.textContent = '新任务会使用当前场景目录；所选权限只应用于新任务，模型和参考图会保留。';
 }
 function renderTargetPicker() {
   minimalLayout?.refresh();
-  ui.targetPicker.classList.toggle('hidden', state.feedbackTransport === 'mcp_events' || state.deliveryMode !== 'external' || !state.desktopAvailable);
-  if (state.feedbackTransport === 'mcp_events' || state.deliveryMode !== 'external' || !state.desktopAvailable) return;
+  ui.targetPicker.classList.toggle('hidden', !state.taskConnectionSupported);
+  if (!state.taskConnectionSupported) return;
   const bound = state.boundThreadId;
   const selected = state.targets?.find((item) => item.thread_id === bound);
   ui.currentTarget.textContent = bound
@@ -1115,11 +1117,13 @@ function renderTargetPicker() {
   if (state.pendingSubmission) ui.targetHelp.textContent = '请先完成上次未确认的提交，再切换目标任务。';
   else if (targetIsBusy(chosen)) ui.targetHelp.textContent = '所选任务仍在执行；请等它空闲后切换。';
   else if (state.targetLoadError) ui.targetHelp.textContent = '无法读取任务列表：' + state.targetLoadError;
-  else ui.targetHelp.textContent = '选择已打开的任务，或在下方新建。新反馈发往所选任务；未送达的旧反馈会等切回原任务。';
+  else ui.targetHelp.textContent = state.feedbackTransport === 'mcp_events'
+    ? '连接或新建后，新反馈直接进入所选任务；已保存的插件反馈保留原投递方式。'
+    : '选择已打开的任务，或在下方新建。新反馈发往所选任务；未送达的旧反馈会等切回原任务。';
   renderCreateTarget();
 }
 async function loadTargets() {
-  if (state.feedbackTransport === 'mcp_events' || state.deliveryMode !== 'external' || !state.desktopAvailable || state.loadingTargets) return;
+  if (!state.taskConnectionSupported || state.loadingTargets) return;
   state.loadingTargets = true;
   renderTargetPicker();
   try {
@@ -1135,7 +1139,7 @@ async function loadTargets() {
   }
 }
 async function loadModels({forProjects=false}={}) {
-  if (state.feedbackTransport === 'mcp_events' || (forProjects ? !state.projectCreationSupported : !state.desktopAvailable || state.deliveryMode !== 'external') || state.loadingModels) return;
+  if ((forProjects ? !state.projectCreationSupported : !state.taskCreationSupported || !state.modelSelectionSupported) || state.loadingModels) return;
   state.loadingModels = true;
   renderTargetPicker();
   renderCreateProject();
@@ -1156,7 +1160,7 @@ async function loadModels({forProjects=false}={}) {
   }
 }
 async function createTask() {
-  if (state.feedbackTransport === 'mcp_events' || !state.desktopAvailable || !state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
+  if (!state.taskCreationSupported || !state.modelChoice || !state.canSetPermissions || state.creatingTarget || state.switchingTarget || state.submitting || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
   const oldThreadId = state.boundThreadId;
   const body = {model:state.modelChoice, permission_mode:ui.createPermissions.value};
   const title = ui.createTitle.value.trim();
@@ -1164,6 +1168,7 @@ async function createTask() {
   if (state.effortChoice) body.reasoning_effort = state.effortChoice;
   state.creatingTarget = true;
   renderTargetPicker();
+  updateSubmitLabel();
   try {
     const result = await api('/api/workspace/targets', {method:'POST', body});
     if (result.workspace) renderWorkspace(result.workspace);
@@ -1189,14 +1194,16 @@ async function createTask() {
   } finally {
     state.creatingTarget = false;
     renderTargetPicker();
+    updateSubmitLabel();
   }
 }
 async function switchTask(threadId) {
-  if (state.feedbackTransport === 'mcp_events' || !state.desktopAvailable || !threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
+  if (!state.taskConnectionSupported || !threadId || threadId === state.boundThreadId || state.switchingTarget || state.creatingTarget || state.submitting || state.pendingSubmission || state.creatingProject || state.navigatingProject) return;
   const target = state.targets?.find((item) => item.thread_id === threadId);
   if (targetIsBusy(target)) return;
   state.switchingTarget = true;
   renderTargetPicker();
+  updateSubmitLabel();
   try {
     await api('/api/workspace/target', {method:'POST', body:{thread_id:threadId}});
     await refreshWorkspace();
@@ -1208,6 +1215,7 @@ async function switchTask(threadId) {
   } finally {
     state.switchingTarget = false;
     renderTargetPicker();
+    updateSubmitLabel();
   }
 }
 function renderEmptyWorkspace() {
@@ -1231,21 +1239,27 @@ function renderWorkspace(workspace) {
   state.eventDelivery = state.feedbackTransport === 'mcp_events' && workspace.event_delivery?.session_id === workspace.session_id
     ? workspace.event_delivery : null;
   state.desktopAvailable = workspace.desktop_available ?? !!workspace.thread_id;
+  state.taskConnectionSupported = workspace.task_connection_supported ?? (state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable);
+  state.taskCreationSupported = workspace.task_creation_supported ?? state.taskConnectionSupported;
+  state.modelSelectionSupported = workspace.model_selection_supported ?? state.taskCreationSupported;
   state.projectCreationSupported = state.feedbackTransport !== 'mcp_events' && (workspace.project_creation_supported ?? state.desktopAvailable);
   state.projectFolderImportSupported = workspace.project_folder_import_supported === true;
   workspaceFolderImport?.refreshAvailability();
   renderEmptyWorkspace();
-  const nextThreadId = state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' ? workspace.thread_id || null : null;
+  const nextThreadId = state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
-  ui.taskButton.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
+  ui.taskButton.classList.toggle('hidden', !state.taskConnectionSupported);
   ui.directTaskHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
   ui.eventTaskHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
+  ui.eventTaskHelp.textContent = state.taskConnectionSupported
+    ? '当前反馈通过插件事件发送。也可在「侧栏 → 任务」连接现有 Codex 任务或新建；连接后，新反馈直接进入该任务，已保存的插件反馈保留原投递方式。'
+    : '当前反馈通过插件事件发送；订阅状态可在「侧栏 → 执行记录」中查看。';
   ui.directDeliveryStatusHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
   ui.eventDeliveryStatusHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
   ui.directDeliveryHelp.classList.toggle('hidden', state.feedbackTransport === 'mcp_events');
   ui.eventDeliveryHelp.classList.toggle('hidden', state.feedbackTransport !== 'mcp_events');
-  if (state.feedbackTransport === 'mcp_events' && workspaceSidebar?.page==='tasks') workspaceSidebar.showPage('home');
+  if (!state.taskConnectionSupported && workspaceSidebar?.page==='tasks') workspaceSidebar.showPage('home');
   renderProjectPicker();
   state.agent = workspace.agent || {status:'disconnected'};
   state.queue = Array.isArray(workspace.queue) ? workspace.queue : [];
@@ -1419,6 +1433,21 @@ function renderQueue({boundExternal=false}={}) {
   const pendingIds = new Set();
   const latest = state.queue.at(-1);
   for (const item of state.queue) {
+    if(item?.feedback_transport==='mcp_events') {
+      const card=document.createElement('div');card.className='queue-card queue-event';card.dataset.feedbackId=item.feedback_id || '';
+      const title=document.createElement('strong');
+      title.textContent='插件事件 · '+(({event_pending:'等待事件投递',event_delivered:'已送达插件',event_failed:'投递失败',
+        event_unsubscribed:item.awaiting_subscription?'等待插件订阅':'原订阅已结束'})[item.status] || '反馈已保存');
+      const body=document.createElement('div');
+      body.textContent='针对场景版本 '+(item.scene_revision ?? '—')+'。'+(item.status==='event_delivered'
+        ? '此前已送达插件；这不表示模型已开始或完成处理。'
+        : item.status==='event_failed' ? '原插件事件投递失败，反馈仍保存在工作台。'
+        : item.status==='event_unsubscribed' && !item.awaiting_subscription ? '原订阅已结束，事件不会自动重新投递。'
+        : '此前的插件反馈仍等待原事件通道接收。')+' 这条反馈不会改发到当前 Codex 任务。';
+      card.append(title,body);
+      if(item.error) {const error=document.createElement('div');error.className='queue-warning';error.textContent='原事件通道：'+String(item.error).slice(0,240);card.append(error);}
+      ui.queue.append(card);continue;
+    }
     if (!item || ((item.status === 'completed' || item.status === 'discarded') && (!boundExternal || item !== latest))) continue;
     const oldTarget = boundExternal && !!item.target_thread_id && item.target_thread_id !== state.boundThreadId;
     const retryableFailed = item.status === 'failed' && !item.turn_id;
@@ -5764,7 +5793,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
   };
 }
 async function submitFeedback() {
-  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject) return;
+  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget) return;
   const promptText = promptReferenceText.expand(ui.note.value);
   if (!state.poseCorrectionsSupported && (/\[\[pose_edit:/.test(promptText) || state.pendingSubmission?.payload?.pose_edits?.length)) {
     announce('服务尚不支持关键点修正，请更新服务并刷新页面后发送。',true); return;
@@ -5843,7 +5872,7 @@ async function submitFeedback() {
       : state.deliveryMode === 'external' ? 'submitted' : 'queued');
     ui.caption.textContent = draftCleared ? '' : '新草稿已保留，可以继续编辑。';
     saveDraft();
-    if (state.feedbackTransport === 'mcp_events') {
+    if (result.delivery?.feedback_transport==='mcp_events' || delivery.startsWith('event_')) {
       const subscribers=Number.isInteger(result.delivery?.subscriber_count) ? result.delivery.subscriber_count
         : state.eventDelivery?.subscriber_count || 0;
       announce(delivery === 'event_delivered' ? '视觉反馈事件已送达订阅插件；请在插件所在宿主查看后续。'
@@ -6043,6 +6072,10 @@ function bindEvents() {
   workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{
     workspaceFolderImport?.onPage(page);
     if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}
+    if(page==='tasks' && state.taskConnectionSupported) {
+      renderTargetPicker();loadTargets().catch(()=>{});
+      if(state.taskCreationSupported) loadModels().catch(()=>{});
+    }
   }});
   ui.openEmptyFolder.addEventListener('click',async()=>{
     if(ui.openEmptyFolder.disabled) return;
@@ -6405,7 +6438,7 @@ try {
 }
 setInterval(poll, 1500);
 setInterval(() => {
-  if (state.workspaceReady && state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' && state.desktopAvailable && !state.loadingTargets && !state.switchingTarget) {
+  if (state.workspaceReady && state.taskConnectionSupported && (state.boundThreadId || workspaceSidebar?.page==='tasks') && !state.loadingTargets && !state.switchingTarget) {
     loadTargets().catch(() => { /* The picker shows the connection error. */ });
   }
 }, 20000);
