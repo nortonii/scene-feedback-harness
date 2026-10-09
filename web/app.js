@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { SceneNavigation } from './scene-navigation.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { SelectionOutline } from './selection-outline.js';
 import { frameAtTime, nearestFrameAtTime, stepTime, markMatchesMoment, viewForReferenceImage } from './dynamic.js';
 import { setupMinimalLayout } from './layout.js';
 import { setupImmersive } from './immersive.js';
@@ -232,7 +233,7 @@ threeScene.add(objectLayer, feedbackLayer);
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 const gltfLoader = new GLTFLoader();
-let selectionHelper = null;
+const selectionOutline = new SelectionOutline(renderer);
 let pointerDown = null;
 let sceneClicks = [];
 let objectListSignature = null;
@@ -2292,27 +2293,14 @@ function frameAll(options={}) {
   frameBox(box, options);
 }
 function clearSelectionHelper() {
-  if (!selectionHelper) return;
-  feedbackLayer.remove(selectionHelper);
-  selectionHelper.geometry.dispose();
-  selectionHelper.material.dispose();
-  selectionHelper = null;
+  selectionOutline.setSelection(null);
 }
 function renderSelection() {
-  clearSelectionHelper();
   const item = sceneObject(state.selectedId);
   if (item) {
     const selectedNode = resolveSceneNode(state.selectedSceneNode);
     if (state.selectedSceneNode && !selectedNode) state.selectedSceneNode = null;
-    const box = selectedNode ? new THREE.Box3().setFromObject(selectedNode) : objectBox(item.id);
-    if (box) {
-      selectionHelper = new THREE.Box3Helper(box, document.documentElement.dataset.theme === 'dark' ? 0xecece8 : 0x292925);
-      selectionHelper.material.transparent = true;
-      selectionHelper.material.opacity = 0.95;
-      selectionHelper.material.depthTest = false;
-      selectionHelper.renderOrder = 20;
-      feedbackLayer.add(selectionHelper);
-    }
+    selectionOutline.setSelection(selectedNode || state.objectNodes.get(item.id));
     ui.selectionSummary.className = 'selection-summary';
     ui.selectionSummary.replaceChildren();
     const name = document.createElement('div');
@@ -2343,6 +2331,7 @@ function renderSelection() {
     ui.selectedChip.classList.remove('hidden');
     ui.clearSelection.classList.remove('hidden');
   } else {
+    clearSelectionHelper();
     state.selectedId = null;
     state.selectedSceneNode = null;
     ui.selectionSummary.className = 'selection-summary muted';
@@ -2432,6 +2421,7 @@ async function loadScene(sceneData) {
       state.lastPickedDetailNode = null;
     }
     pauseTimeline();
+    clearSelectionHelper();
     for (const entry of state.animations.values()) {
       entry.mixer.stopAllAction();
       entry.mixer.uncacheRoot(entry.root);
@@ -2491,7 +2481,7 @@ function settleOrbit() {
 }
 function captureLiveScene({includeSize=false}={}) {
   controls.update();
-  renderer.render(threeScene, camera);
+  renderLiveScene();
   const source = renderer.domElement;
   const canvas = scaledCanvas(source.width, source.height, 1440);
   canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
@@ -2505,7 +2495,7 @@ function scheduleLiveScenePreview() {
     if (state.sceneLoading || state.sceneRevision === null) return;
     try {
       // Preview the actual renderer without changing the camera or saved evidence.
-      renderer.render(threeScene, camera);
+      renderLiveScene();
       const source=renderer.domElement, canvas=scaledCanvas(source.width,source.height,320);
       canvas.getContext('2d').drawImage(source,0,0,canvas.width,canvas.height);
       liveScenePreview=canvas.toDataURL('image/jpeg',.75);
@@ -3649,10 +3639,6 @@ function applyAnimationTime(time) {
         node.skeleton.update(); node.computeBoundingBox(); node.computeBoundingSphere();
       }
     });
-  }
-  if (selectionHelper && state.selectedId) {
-    const node = resolveSceneNode(state.selectedSceneNode) || state.objectNodes.get(state.selectedId);
-    if (node) selectionHelper.box.setFromObject(node, true);
   }
 }
 function renderAnimationChoices() {
@@ -5009,12 +4995,12 @@ function capturePromptImage(pane, saved=null) {
       const visible = feedbackLayer.visible;
       feedbackLayer.visible = false;
       try {
-        renderer.render(threeScene,camera);
+        renderLiveScene();
         source = document.createElement('canvas');
         source.width = renderer.domElement.width; source.height = renderer.domElement.height;
         source.getContext('2d').drawImage(renderer.domElement,0,0);
         entry.camera = structuredClone(cameraData());
-      } finally { feedbackLayer.visible = visible; renderer.render(threeScene,camera); }
+      } finally { feedbackLayer.visible = visible; renderLiveScene(); }
       marks = [];
       if (dynamicEnabled()) {
         entry.time_sec = state.time;
@@ -6000,7 +5986,9 @@ function applyTheme({dark, animate=false}) {
   };
   if (animate) backgroundTransition = {start:performance.now(), from:threeScene.background.clone(), gridFrom:grid.material.color.clone(), ...palette};
   else { backgroundTransition = null; apply(); }
-  if (selectionHelper) selectionHelper.material.color.set(dark ? '#ecece8' : '#292925');
+}
+function renderLiveScene() {
+  selectionOutline.render(threeScene,camera,{enabled:feedbackLayer.visible});
 }
 function animate(timestamp) {
   requestAnimationFrame(animate);
@@ -6014,7 +6002,7 @@ function animate(timestamp) {
   }
   advanceTimeline(timestamp);
   controls.tick(timestamp);
-  if (state.sceneView === 'live') renderer.render(threeScene, camera);
+  if (state.sceneView === 'live') renderLiveScene();
 }
 async function poll() {
   if (!state.sessionId || state.submitting || state.uploading || state.navigatingProject || poll.running) return;
