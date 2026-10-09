@@ -157,6 +157,11 @@ export function setupWorkspaceFolderImport({
       resultStatus.textContent=`已导入 ${imported.length} · 已跳过 ${skipped.length} · 失败 ${errors.length}`;
       if(!imported.length && skipped.length && !errors.length) resultStatus.textContent+='。没有新增场景。';
     }
+    const modelOnly=(Array.isArray(result.projects)?result.projects:[]).filter(project=>{
+      const source=project?.import_source;
+      return source && !source.manifest && !(Array.isArray(source.reference_images) && source.reference_images.length);
+    }).length;
+    if(modelOnly) resultStatus.textContent+=`。其中 ${modelOnly} 个实例只包含模型，尚无参考图。`;
     if(result.truncated)resultStatus.textContent+='。扫描达到边界，尚未遍历全部目录；请选择更具体的文件夹继续。';
     if(details.length) {
       errorDetails.hidden=false;errorSummary.textContent=`查看 ${details.length} 项跳过与失败详情`;

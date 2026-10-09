@@ -199,7 +199,7 @@ def _instance(root: Path, marker: Path, document: dict[str, Any], format: str) -
     manifest = _scoped_file(root, reference) if reference is not None else None
     if manifest is not None:
         _validate_reference_manifest(root, manifest)
-    elif not references:
+    elif not references and format != "scene_catalog":
         raise APIError(400, "ready scene needs a reference manifest or reference_images")
     blend = _scoped_file(root, document["blend"]) if document.get("blend") is not None else None
     camera_manifest = None
@@ -222,6 +222,94 @@ def _instance(root: Path, marker: Path, document: dict[str, Any], format: str) -
         world_up = world_up.lower()
     return ReadyInstance(root, name.strip(), glb, manifest, format, marker, references, blend,
                          document.get("scene_revision"), camera_manifest, world_up)
+
+
+def _scene_catalog(root: Path) -> tuple[Path, dict[str, Any]] | None:
+    """Recognize explicit scene directories, rather than arbitrary manifest files."""
+    marker = root / "manifest.json"
+    if not marker.exists():
+        return None
+    try:
+        document = _document(root, marker)
+    except APIError:
+        # Many unrelated exports use manifest.json. A malformed or differently
+        # shaped document cannot claim its directory or hide ready descendants.
+        return None
+    scenes = document.get("scenes")
+    if not isinstance(scenes, list) or not any(
+        isinstance(scene, dict) and ("folder" in scene or "glb" in scene) for scene in scenes
+    ):
+        return None
+    return marker, document
+
+
+def _catalog_instance(root: Path, marker: Path, scene: Any) -> ReadyInstance:
+    if not isinstance(scene, dict):
+        raise APIError(400, "scene catalog entries must be objects")
+    value = scene.get("folder")
+    if not isinstance(value, str) or not value:
+        raise APIError(400, "scene catalog entry needs a relative instance folder")
+    folder = Path(value)
+    if folder.is_absolute() or not folder.parts or ".." in folder.parts:
+        raise APIError(400, "scene catalog folders must be relative subdirectories")
+    instance_root = host_directory(root / folder)
+    if instance_root == root or not instance_root.is_relative_to(root):
+        raise APIError(400, "scene catalog folders must remain inside the catalog directory")
+    # All catalog paths are relative to the catalog, and every visual/editable
+    # asset must resolve within its declared instance. source_* and evidence
+    # metadata are provenance only, never fallbacks or commands to execute.
+    document = {**scene, "scene_glb_path": str(_scoped_file(instance_root, scene.get("glb"), base=root))}
+    if scene.get("blend") is not None:
+        blend = _scoped_file(instance_root, scene["blend"], base=root)
+        if blend.suffix.lower() != ".blend":
+            raise APIError(400, "scene catalog editable source must be a Blender file")
+        document["blend"] = str(blend)
+    reference = scene.get("reference_manifest")
+    if reference is None and isinstance(scene.get("reference_clip"), dict):
+        reference = scene["reference_clip"].get("manifest_path")
+    if reference is not None:
+        document["reference_manifest"] = str(_scoped_file(instance_root, reference, base=root))
+    images = scene.get("reference_images", [])
+    if not isinstance(images, list) or len(images) > 8:
+        raise APIError(400, "reference_images must contain at most 8 local image paths")
+    document["reference_images"] = [str(_scoped_file(instance_root, image, base=root)) for image in images]
+    if scene.get("camera_manifest") is not None:
+        document["camera_manifest"] = str(_scoped_file(instance_root, scene["camera_manifest"], base=root))
+    return _instance(instance_root, marker, document, "scene_catalog")
+
+
+def _discover_catalog(root: Path, depth: int, catalog: tuple[Path, dict[str, Any]],
+                      result: Discovery, seen: set[Path], *, max_depth: int, max_entries: int) -> None:
+    marker, document = catalog
+    if document.get("ready") is False:
+        result.candidates += 1
+        result.skipped.append({"path": str(root), "reason": "catalog explicitly declares ready:false"})
+        return
+    for index, scene in enumerate(document["scenes"]):
+        result.entries_scanned += 1
+        if result.entries_scanned > max_entries:
+            result.truncated = True
+            result.errors.append({"path": str(root), "error": "folder scan reached its entry limit"})
+            break
+        result.candidates += 1
+        label = str(marker) + f"#scenes[{index}]"
+        try:
+            if isinstance(scene, dict) and scene.get("ready") is False:
+                result.skipped.append({"path": label, "reason": "instance explicitly declares ready:false"})
+                continue
+            instance = _catalog_instance(root, marker, scene)
+            label = str(instance.root)
+            if depth + len(instance.root.relative_to(root).parts) > max_depth:
+                result.truncated = True
+                result.skipped.append({"path": label, "reason": "folder scan reached its depth limit"})
+            elif instance.root in seen:
+                result.skipped.append({"path": label, "reason": "source directory is already declared by this folder scan"})
+            else:
+                seen.add(instance.root)
+                result.directories_scanned += 1
+                result.instances.append(instance)
+        except (APIError, OSError, RuntimeError, ValueError) as exc:
+            result.errors.append({"path": label, "error": exc.message if isinstance(exc, APIError) else str(exc)[:500]})
 
 
 def _inspect(root: Path) -> tuple[bool, ReadyInstance | None, str | None]:
@@ -279,6 +367,7 @@ def discover_ready_instances(path: Any, *, max_depth: int = MAX_SCAN_DEPTH,
                              max_entries: int = MAX_SCAN_ENTRIES) -> Discovery:
     directory = host_directory(path)
     result = Discovery(directory)
+    seen: set[Path] = set()
     pending = [(directory, 0)]
     while pending:
         level, pending = pending, []
@@ -292,11 +381,18 @@ def discover_ready_instances(path: Any, *, max_depth: int = MAX_SCAN_DEPTH,
                     continue
                 candidate, instance, reason = _inspect(root)
                 if not candidate:
+                    catalog = _scene_catalog(root)
+                    if catalog is not None:
+                        _discover_catalog(root, depth, catalog, result, seen,
+                                          max_depth=max_depth, max_entries=max_entries)
+                        continue
                     unrecognized.append((root, depth))
                     continue
                 result.candidates += 1
                 if instance is not None:
-                    result.instances.append(instance)
+                    if instance.root not in seen:
+                        seen.add(instance.root)
+                        result.instances.append(instance)
                 else:
                     result.skipped.append({"path": str(root), "reason": reason})
                 # A recognized instance owns its history and evidence tree.

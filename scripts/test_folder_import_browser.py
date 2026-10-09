@@ -100,6 +100,22 @@ def fixtures(parent: Path) -> tuple[Path, Path, list[dict]]:
     return dynamic, static, views
 
 
+def model_catalog(parent: Path) -> list[Path]:
+    """A parent manifest names model-only children, as in the user's bundle."""
+    parent.mkdir()
+    instances, entries = [], []
+    for number, name in enumerate(("目录铲车", "目录消防车"), start=1):
+        instance = parent / f"0{number}_vehicle"
+        instance.mkdir()
+        model(instance / "scene.glb")
+        (instance / "scene.blend").write_bytes(f"editable catalog source {number}".encode())
+        instances.append(instance)
+        entries.append({"name": name, "folder": instance.name,
+                        "glb": f"{instance.name}/scene.glb", "blend": f"{instance.name}/scene.blend"})
+    (parent / "manifest.json").write_text(json.dumps({"scenes": entries}, ensure_ascii=False), encoding="utf-8")
+    return instances
+
+
 def http(base: str, path: str, *, payload=None, capability=None) -> tuple[int, dict]:
     headers = {}
     if capability is not None:
@@ -133,6 +149,8 @@ def main() -> None:
         original.mkdir()
         dynamic, static, expected_views = fixtures(root / "instances")
         before_sources = source_files(root / "instances")
+        catalog_instances = model_catalog(root / "model_catalog")
+        before_catalog = source_files(root / "model_catalog")
         model(original / "original.glb")
         png(original / "original.png", "gray")
         errors, browser_writes, browser_reads, imported_requests = [], [], [], []
@@ -318,6 +336,59 @@ def main() -> None:
                     expect(page.locator("#feedback-note")).to_have_value(draft)
                     assert store.scene() == original_scene and store.get_session(session_id) == original_session
                     assert source_files(root / "instances") == before_sources
+
+                    # A parent manifest can import explicitly listed model-only
+                    # children without making up reference evidence or a task.
+                    page.locator("#projects-dialog-button").click()
+                    page.wait_for_function("document.getElementById('projects-dialog').dataset.phase === 'open'")
+                    page.locator("#sidebar-open-folder").click()
+                    folder_path = page.locator("#folder-import-path")
+                    expect(folder_path).to_be_enabled()
+                    folder_path.fill(str(root / "model_catalog"))
+                    with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith("/api/projects/import-folder")) as importing:
+                        folder_path.press("Enter")
+                    catalog_result = importing.value.json()
+                    assert (len(catalog_result["imported"]), len(catalog_result["errors"])) == (2, 0), catalog_result
+                    expect(page.locator("#folder-import-result")).to_contain_text("其中 2 个实例只包含模型，尚无参考图")
+                    assert note.input_value() == draft
+                    assert store.scene() == original_scene and store.get_session(session_id) == original_session
+                    status, catalog_retry = http(base, "/api/projects/import-folder", payload={
+                        "path": str(root / "model_catalog"), "request_id": imported_requests[-1]["request_id"]}, capability=root_capability)
+                    assert status == 200 and catalog_retry["imported"] == [] and len(catalog_retry["projects"]) == 2
+                    assert factory.call_count == 4
+                    all_contexts = {context.project_dir: context for context in registry.contexts()[1:]}
+                    for instance in catalog_instances:
+                        imported_context = all_contexts[instance]
+                        session = imported_context.store.get_session(imported_context.gateway.ensure()["session_id"])
+                        assert session["reference_clip"] is None and session["reference_images"] == []
+                        workspace = imported_context.store.workspace()
+                        assert workspace["thread_id"] is None and workspace["created_thread_ids"] == [] and workspace["queue"] == []
+                        assert imported_context.gateway.adapter is None
+                        assert imported_context.store.browser_token != root_capability
+                        asset = imported_context.store.scene()["objects"][0]
+                        assert (imported_context.store.assets_dir / asset["url"].rsplit("/", 1)[-1]).read_bytes() == (instance / "scene.glb").read_bytes()
+                    page.locator('#sidebar-folder-import [data-sidebar-home]').click()
+                    expect(page.locator("#project-list .project-item")).to_have_count(5)
+                    catalog_metadata = catalog_result["projects"][0]
+                    page.locator("#project-list .project-item").filter(has_text=catalog_metadata["name"]).click()
+                    catalog_prefix = "/p/" + catalog_metadata["project_id"]
+                    page.wait_for_url(re.compile(re.escape(base + catalog_prefix) + r"/.*"))
+                    page.wait_for_function("window.__folderCheck?.state.workspaceReady && !__folderCheck.state.sceneLoading && "
+                                           "[...__folderCheck.state.objectNodes.values()].some(node=>node.userData.loaded && node.userData.gltfRoot) && "
+                                           "__folderCheck.renderer.info.render.triangles > 0")
+                    assert page.evaluate("__folderCheck.workspacePrefix") == catalog_prefix
+                    expect(page.locator("#reference-empty")).to_be_visible()
+                    expect(page.locator("#reference-media")).to_be_hidden()
+                    page.locator("#projects-dialog-button").click()
+                    page.wait_for_function("document.getElementById('projects-dialog').dataset.phase === 'open'")
+                    page.locator("#project-list .project-item").filter(has_text=registry.root.name).click()
+                    page.wait_for_url(re.compile(re.escape(base + "/p/" + registry.root.project_id) + r"/.*"))
+                    ready(page)
+                    expect(page.locator("#feedback-note")).to_have_value(draft)
+                    assert store.scene() == original_scene and store.get_session(session_id) == original_session
+                    assert source_files(root / "model_catalog") == before_catalog
+                    print("PASS parent model-only catalog imports named scenes once, renders real GLB with an empty reference panel, preserves sources/root draft and creates no tasks", flush=True)
+
                     assert all(path.endswith("/api/projects/folders") or path.endswith("/api/projects/import-folder") for _, path in browser_writes)
                     assert store.state["feedback"] == [] and not errors, errors
                     target_mock.assert_not_called()
