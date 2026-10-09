@@ -25,6 +25,8 @@ import { poseToken, collectPoseReferences, poseFrameForReference, poseFrameLabel
 import { imageToken, collectImageReferences, createPromptImageStore } from './prompt-images.js';
 import { createPromptMentions } from './prompt-mentions.js';
 import { createPromptReferenceText } from './prompt-reference-text.js';
+import {sceneToken,sceneReferenceLabel,validSceneReference,collectSceneReferences,createSceneReferenceStore,MAX_SCENE_REFERENCES} from './scene-references.js';
+import {renderSceneReferencePreview} from './scene-reference-preview.js';
 import {referenceAliasLabel} from './prompt-reference-icons.js';
 import {createPromptReferenceHit,hitPromptReference} from './prompt-reference-hit.js';
 import {createPromptReferencePopover} from './prompt-reference-popover.js';
@@ -130,6 +132,8 @@ const state = {
   lastPickedDetailNode:null, selectionLevel:'item',
   referencedSceneNodes:[],
   imageRefs:[], draftImageSignature:null, restoredImageRefIds:[], imageReferencesSupported:false,
+  sceneRefs:[], draftSceneReferenceSignature:null, restoredSceneRefIds:[], sceneReferencesSupported:false,
+  citingSceneProject:null, sceneReferenceRound:0,
   poseRefs:[], humanJobs:[], humanDetails:new Map(), humanDetailLoads:new Set(), humanDetailErrors:new Map(),
   humanLoading:false, humanOverlayChoice:'latest',
   poseEdits:[], poseEditor:null, poseEditDrag:null, poseCorrectionsSupported:false,
@@ -183,6 +187,12 @@ annotationDragGhost.setAttribute('aria-hidden', 'true');
 document.body.append(annotationDragGhost);
 const annotationHistory = createAnnotationHistory();
 const promptImageStore = createPromptImageStore(momentDatabase);
+const sceneReferenceStore = createSceneReferenceStore(momentDatabase);
+const sceneReferencePreviewImage=document.createElement('img');
+sceneReferencePreviewImage.id='prompt-scene-reference-preview';sceneReferencePreviewImage.hidden=true;
+sceneReferencePreviewImage.alt='引用时固定的只读场景预览';
+id('prompt-reference-dialog').insertBefore(sceneReferencePreviewImage,id('prompt-reference-detail'));
+id('prompt-reference-dialog').addEventListener('close',()=>{sceneReferencePreviewImage.hidden=true;sceneReferencePreviewImage.removeAttribute('src');});
 const PROMPT_DRAG_MIME = 'application/x-scene-feedback-reference';
 let promptDrag = null;
 let imagePreviewReference = null;
@@ -294,6 +304,7 @@ function saveDraft({allowPlaying=false}={}) {
       poseRefs:state.poseRefs,
       poseEdits:state.poseEdits, poseEditor:state.poseEditor,
       imageRefIds:state.imageRefs.map((item) => item.id),
+      sceneRefIds:state.sceneRefs.map(item=>item.id),
       humanOverlayChoice:state.humanOverlayChoice,
       sceneRevision:state.sceneRevision,
       selectedModelUrl:sceneObject(state.selectedId)?.url || null,
@@ -311,6 +322,7 @@ function saveDraft({allowPlaying=false}={}) {
   } catch { /* A full or disabled local store should not block feedback. */ }
   saveMomentDraft();
   saveImageReferenceDraft();
+  saveSceneReferenceDraft();
 }
 function restoreDraft() {
   try {
@@ -342,6 +354,7 @@ function restoreDraft() {
     state.poseEditor = draft.poseEditor && /^[0-9a-f]{32}$/.test(draft.poseEditor.jobId || '') && /^[0-9a-f]{32}$/.test(draft.poseEditor.referenceId || '')
       ? {...draft.poseEditor,hand:['all','body','feet','face','left','right'].includes(draft.poseEditor.hand) ? draft.poseEditor.hand : 'all',visibility:['visible','occluded','missing'].includes(draft.poseEditor.visibility) ? draft.poseEditor.visibility : 'visible'} : null;
     state.restoredImageRefIds = Array.isArray(draft.imageRefIds) ? draft.imageRefIds.filter((value) => imageToken(value)).slice(0,16) : [];
+    state.restoredSceneRefIds = Array.isArray(draft.sceneRefIds)?draft.sceneRefIds.filter(value=>sceneToken(value)).slice(0,16):[];
     state.humanOverlayChoice = ['latest','hidden'].includes(draft.humanOverlayChoice) || /^[0-9a-f]{32}$/.test(draft.humanOverlayChoice || '')
       ? draft.humanOverlayChoice : 'latest';
     state.restoredSceneRevision = Number.isInteger(draft.sceneRevision) ? draft.sceneRevision : null;
@@ -469,6 +482,7 @@ function setSession(session) {
     state.annotationNameCounters = {}; state.selectedAnnotationId = null;
     promptMentions?.close();promptAttachments?.close();promptReferenceText.reset();
     state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
+    state.sceneRefs=[];state.draftSceneReferenceSignature=null;state.restoredSceneRefIds=[];state.sceneReferenceRound++;
   }
   state.sessionId = session.session_id;
   restoreComparePreferences();
@@ -515,6 +529,7 @@ async function ensureSession() {
   restoreDraft();
   await restoreMomentDraft();
   await restoreImageReferenceDraft();
+  await restoreSceneReferenceDraft();
   setReferenceClip(session.reference_clip || null, {restore:true});
   setReferences(session.reference_images || []);
   renderSceneView();
@@ -599,7 +614,7 @@ function updateSubmitLabel() {
   const status = state.agent?.status || 'disconnected';
   if (state.feedbackTransport === 'mcp_events') {
     setSubmitLabel(state.submitting ? '正在发送…' : state.pendingSubmission ? '重试发送' : '发送反馈');
-    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget;
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget || !!state.citingSceneProject;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
     ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
@@ -616,7 +631,7 @@ function updateSubmitLabel() {
       : bound && ['running', 'awaiting_approval', 'waiting'].includes(status) ? '加入下一轮'
       : bound ? '发送反馈' : '保存反馈';
     setSubmitLabel(label);
-    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget;
+    ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget || !!state.citingSceneProject;
     ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
     ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
     ui.caption.textContent = ['submitted', 'cancelled'].includes(state.sessionStatus)
@@ -637,7 +652,7 @@ function updateSubmitLabel() {
     : status === 'disconnected' || status === 'error' ? '保存反馈'
     : '发送反馈';
   setSubmitLabel(label);
-  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget;
+  ui.submit.disabled = !state.workspaceReady || !Number.isInteger(state.sceneRevision) || state.sessionStatus !== 'open' || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget || !!state.citingSceneProject;
   ui.note.disabled = state.sessionStatus !== 'open' || state.submitting || !!state.pendingSubmission;
   ui.referenceInput.disabled = state.sessionStatus !== 'open' || !!state.pendingSubmission || state.creatingProject || state.navigatingProject;
   if (['submitted', 'cancelled'].includes(state.sessionStatus)) ui.caption.textContent = '会话已结束，标记仍可查看。';
@@ -673,6 +688,7 @@ function updateProjectTitle() {
   ui.projectsButton.setAttribute('aria-label', '展开工作台侧栏，当前场景：' + name);
 }
 function projectBusyReason({allowCreation=false}={}) {
+  if(state.citingSceneProject) return '正在准备场景引用…';
   if (state.unloadingProjectId) return '正在卸载场景…';
   if (state.submitting) return '正在保存反馈，请稍后切换场景。';
   if (state.uploading) return '正在导入文件，请稍后切换场景。';
@@ -770,6 +786,11 @@ function renderProjectPicker() {
     const unloadError = row.querySelector('.project-unload-error');
     unloadError.textContent = confirmed ? state.projectUnloadError || '' : '';
     unloadError.hidden = !unloadError.textContent;
+    const cite=row.querySelector('.project-cite-trigger');
+    cite.hidden=!state.sceneReferencesSupported || current || unavailable || project.can_reference_scene===false;
+    cite.disabled=!!busy || !editable();
+    cite.textContent=state.citingSceneProject===project.project_id?'…':'引用';
+    cite.setAttribute('aria-label','引用场景：'+(project.name || '未命名场景'));
   }
   for (const row of existing.values()) row.remove();
   let empty = ui.projectsList.querySelector('.project-list-empty');
@@ -790,6 +811,8 @@ function makeProjectRow(projectId) {
   button.append(heading,detail,error);
   button.addEventListener('click',()=>navigateProject(state.projects?.find(project=>project.project_id===projectId)));
   const trigger = document.createElement('button');trigger.type='button';trigger.className='project-unload-trigger';trigger.title='卸载场景';
+  const cite=document.createElement('button');cite.type='button';cite.className='project-cite-trigger';cite.title='引用这个场景的固定快照';
+  cite.addEventListener('click',()=>quoteOtherScene(projectId).catch(error=>announce(error.message,true)));
   setActionIcon(trigger,'close');
   const panel = document.createElement('div');panel.className='project-unload-panel';panel.hidden=true;panel.setAttribute('role','group');panel.setAttribute('aria-label','确认卸载场景');
   const description = document.createElement('p');description.className='project-unload-description';
@@ -797,7 +820,7 @@ function makeProjectRow(projectId) {
   const actions = document.createElement('div');actions.className='project-unload-actions';
   const cancel = document.createElement('button');cancel.type='button';cancel.className='project-unload-cancel';cancel.textContent='取消';
   const confirm = document.createElement('button');confirm.type='button';confirm.className='project-unload-confirm';confirm.textContent='卸载';
-  actions.append(cancel,confirm);panel.append(description,unloadError,actions);row.append(button,trigger,panel);
+  actions.append(cancel,confirm);panel.append(description,unloadError,actions);row.append(button,cite,trigger,panel);
   trigger.addEventListener('click',()=>{
     if (projectBusyReason() || state.pendingSubmission) return;
     state.projectUnloadConfirmId=state.projectUnloadConfirmId===projectId ? null : projectId;
@@ -825,7 +848,7 @@ async function unloadSceneProject(projectId) {
   renderProjectPicker();updateSubmitLabel();updateMode();
   if (current) ui.note.disabled=true;
   try {
-    if (current) {await saveMomentDraft.pending;await promptImageStore.pending.catch(()=>{});}
+    if (current) {await saveMomentDraft.pending;await promptImageStore.pending.catch(()=>{});await sceneReferenceStore.pending.catch(()=>{});}
     const result=await api('/api/projects/'+encodeURIComponent(projectId),{method:'DELETE'});
     const fallback=projectNavigationURL(result.fallback,location.origin);
     if (result.unloaded_project_id!==projectId || (current && !fallback)) throw new Error('服务未返回可打开的默认场景，请重试卸载。');
@@ -948,6 +971,7 @@ async function navigateProject(project, {allowCreation=false}={}) {
   saveDraft();
   await saveMomentDraft.pending;
   await promptImageStore.pending.catch(() => {});
+  await sceneReferenceStore.pending.catch(()=>{});
   try {
     location.assign(url);
     if (state.projectCreationResult?.project_id === project.project_id) clearProjectRequest();
@@ -1229,6 +1253,7 @@ function renderEmptyWorkspace() {
 function renderWorkspace(workspace) {
   state.poseCorrectionsSupported = workspace.pose_corrections_supported === true;
   state.imageReferencesSupported = workspace.image_references_supported === true;
+  state.sceneReferencesSupported = workspace.scene_references_supported === true;
   renderPromptReferenceControls();
   promptMentions?.refresh();
   state.networkError = null;
@@ -3914,13 +3939,15 @@ function feedbackEvidenceData() {
   if(dynamicEnabled() && !state.dynamicSnapshots.length) rows.push({name:'当前视频时刻',url:activeReference()?.url,detail:'发送时保留当前参考帧与场景'});
   const imageRefs=state.imageRefs.filter(image=>promptText().includes(`[[image:${image.id}]]`));
   for(const image of imageRefs) rows.push({name:image.label || '额外图片引用',url:image.original_data_url || image.data_url,detail:'在修改说明中引用的固定图片'});
+  const scenes=state.sceneRefs.filter(entry=>promptText().includes(sceneToken(entry.id)));
+  for(const entry of scenes) rows.push({name:sceneReferenceLabel(entry.reference),url:entry.preview_data_url || entry.reference.source_reference_image?.url,detail:'提示中引用的固定只读场景'});
   const poses=state.poseRefs.filter(pose=>promptText().includes(poseToken(pose.job_id,pose.reference_id)));
   const edits=state.poseEdits.filter(pose=>promptText().includes(`[[pose_edit:${pose.id}]]`));
   if(poses.length || edits.length) rows.push({name:'人体姿态证据',detail:`${poses.length} 份姿态引用 · ${edits.length} 份关键点修正`});
   const overlay=views.some(view=>view.comparison?.enabled && view.comparison.opacity>0) || (selected ? selected.comparison?.enabled && selected.comparison.opacity>0 : comparePreferences.enabled && comparePreferences.opacity>0 && !!activeReference());
   const parts=[state.references.length ? `${state.references.length} 张参考图` : null,state.sceneSnapshots.length ? `${state.sceneSnapshots.length} 张截图` : null,
     state.dynamicSnapshots.length ? `${state.dynamicSnapshots.length} 个时刻` : dynamicEnabled() ? '当前时刻' : !selected ? '当前场景' : null,
-    `${state.annotations.length} 个标记`, imageRefs.length ? `${imageRefs.length} 张额外引用` : null,poses.length+edits.length ? '含人体证据' : null,overlay ? '含叠图' : null];
+    `${state.annotations.length} 个标记`, imageRefs.length ? `${imageRefs.length} 张额外引用` : null,scenes.length?`${scenes.length} 个参考场景`:null,poses.length+edits.length ? '含人体证据' : null,overlay ? '含叠图' : null];
   const timeHelp=dynamicEnabled() ? '在提示中输入 / 可加入片段时间；修改时段由提示说明。' : '';
   return {summary:parts.filter(Boolean).join(' · '),rows,
     description:`本轮所有保留图片和标记都会发送；引用用于说明具体目标，并不筛选其他附件。${timeHelp}缩略图为原图预览，提交时附带标注图；发送后可从聊天记录查看保存的附件。`};
@@ -4145,6 +4172,81 @@ async function restoreImageReferenceDraft() {
     state.draftImageSignature = state.imageRefs.map((item) => item.id).join(',');
   } catch { /* Missing image references are reported before sending, never silently omitted. */ }
   renderPromptImageReferences();
+}
+function saveSceneReferenceDraft() {
+  if(!state.sessionId) return;
+  const signature=state.sceneRefs.map(entry=>entry.id).join(',');
+  if(signature===state.draftSceneReferenceSignature) return;
+  state.draftSceneReferenceSignature=signature;
+  const session=state.sessionId;
+  sceneReferenceStore.save(session,state.sceneRefs).catch(()=>{
+    if(state.sessionId!==session) return;
+    state.draftSceneReferenceSignature=null;
+    if(state.sceneRefs.length) announce('场景引用草稿无法保存，刷新前请先发送或保留当前页面。',true);
+  });
+}
+async function sceneReferenceFromRecord(reference) {
+  let preview;
+  try {preview=await renderSceneReferencePreview(reference,{resourceURL});}
+  catch(error) {
+    if(!reference.source_reference_image?.url) throw Error('参考场景预览未能生成：'+error.message+'。请重试引用。');
+    preview={data_url:null,camera:null,width:0,height:0,time_sec:Number.isFinite(reference.source_reference_image.time_sec)?reference.source_reference_image.time_sec:0};
+  }
+  const entry={id:reference.id,reference:structuredClone(reference),
+    preview_data_url:preview.data_url || null,preview_camera:preview.camera || null,
+    width:preview.width,height:preview.height,time_sec:preview.time_sec ?? 0};
+  if(!validSceneReference(entry)) throw Error('参考场景没有可恢复的模型或参考图，未加入提示。');
+  return entry;
+}
+async function restoreSceneReferenceDraft() {
+  const session=state.sessionId;
+  try {
+    const saved=await sceneReferenceStore.load(session);
+    if(state.sessionId!==session) return;
+    state.sceneRefs=saved.filter(entry=>state.restoredSceneRefIds.includes(entry.id));
+    if(state.sceneReferencesSupported) for(const id of state.restoredSceneRefIds) {
+      if(state.sceneRefs.some(entry=>entry.id===id)) continue;
+      try {
+        const reference=await api('/api/workspace/scene-references/'+id);
+        const entry=await sceneReferenceFromRecord(reference);
+        if(state.sessionId!==session) return;
+        state.sceneRefs.push(entry);
+      } catch { /* Missing snapshots block submission instead of changing source. */ }
+    }
+    state.draftSceneReferenceSignature=null;saveSceneReferenceDraft();
+  } catch { /* Source details remain missing until recovered or removed. */ }
+  renderPromptImageReferences();
+}
+async function quoteOtherScene(projectId) {
+  const project=state.projects?.find(project=>project.project_id===projectId);
+  if(!state.sceneReferencesSupported || !editable() || state.citingSceneProject || projectBusyReason() ||
+      !project || projectId===state.projectId || project.creation_status==='unavailable' || project.can_reference_scene===false) return false;
+  const source={session:state.sessionId,project:state.projectId,revision:state.sceneRevision,round:state.sceneReferenceRound,
+    note:ui.note.value,start:ui.note.selectionStart,end:ui.note.selectionEnd};
+  const current=()=>state.sessionId===source.session && state.projectId===source.project &&
+    state.sceneRevision===source.revision && state.sceneReferenceRound===source.round && ui.note.value===source.note && editable();
+  const cited=collectSceneReferences(promptText(),state.sceneRefs);
+  const citedIds=new Set(cited.map(item=>item.id));
+  if(cited.length>=MAX_SCENE_REFERENCES && !state.sceneRefs.some(entry=>citedIds.has(entry.id) && entry.reference.source_project_id===projectId)) throw Error('一条提示最多引用 4 个参考场景，请先移除一处引用。');
+  state.citingSceneProject=projectId;renderProjectPicker();updateSubmitLabel();
+  try {
+    const reference=await api('/api/workspace/scene-references',{method:'POST',body:{project_id:projectId}});
+    if(cited.length>=MAX_SCENE_REFERENCES && !citedIds.has(reference.id)) throw Error('这个场景已有新快照；一条提示最多引用 4 个参考场景，请先移除一处引用。');
+    const existing=state.sceneRefs.find(entry=>entry.id===reference.id);
+    const entry=existing || await sceneReferenceFromRecord(reference);
+    if(!current()) throw Error('场景或提示已更改，已取消加入这处引用；请再引用一次。');
+    const referenced=new Set(cited.map(item=>item.id));
+    const next=existing?state.sceneRefs:[...state.sceneRefs.filter(item=>!referenced.has(item.id)).slice(-12),
+      ...state.sceneRefs.filter(item=>referenced.has(item.id)),entry];
+    await sceneReferenceStore.save(source.session,next);
+    if(!current()) throw Error('场景或提示已更改，已取消加入这处引用；请再引用一次。');
+    await workspaceSidebar.close({restoreFocus:false});
+    if(!current()) throw Error('场景或提示已更改，已取消加入这处引用；请再引用一次。');
+    state.sceneRefs=next;state.draftSceneReferenceSignature=next.map(item=>item.id).join(',');
+    ui.note.setSelectionRange(source.start,source.end);
+    if(!insertNoteReference(sceneReferenceLabel(entry.reference),sceneToken(entry.id),{preserveTool:true})) return false;
+    saveDraft();return true;
+  } finally {state.citingSceneProject=null;renderProjectPicker();updateSubmitLabel();}
 }
 function saveMomentDraft() {
   if (!state.sessionId) return;
@@ -5100,7 +5202,7 @@ function previewPromptImage(entry,source={}) {
 }
 function promptText() { return promptReferenceText.expand(ui.note.value); }
 function resolvePromptReference(token, fallback='',displayKind=null) {
-  const match=/^\[\[(object|node|annotation|image|pose|pose_edit|time):(.+)\]\]$/.exec(token);
+  const match=/^\[\[(object|node|annotation|image|pose|pose_edit|time|scene):(.+)\]\]$/.exec(token);
   if(!match) return null;
   const [,kind,key]=match;
   let name=fallback,label=fallback,title=fallback,missing=false;
@@ -5108,6 +5210,10 @@ function resolvePromptReference(token, fallback='',displayKind=null) {
     // Time prose is immutable once inserted; browsing another frame or source
     // must not retarget a saved timestamp or label it as missing.
     name='时间戳';label=fallback;title=fallback;
+  } else if(kind==='scene') {
+    const entry=state.sceneRefs.find(item=>item.id===key);
+    name=entry?.reference.name || '场景';label=entry?sceneReferenceLabel(entry.reference):fallback;
+    title=label;missing=!entry;
   } else if(kind==='image') {
     const entry=state.imageRefs.find(item=>item.id===key);
     label=entry?.label || fallback;name='图';title=label;missing=!entry;
@@ -5157,6 +5263,12 @@ function previewPromptReference(entry,source={}) {
   id('prompt-reference-title').textContent=entry.alias+' · '+referenceAliasLabel(entry.alias);
   id('prompt-reference-detail').textContent=meta?.title || entry.title || entry.label;
   id('prompt-reference-status').textContent=meta?.missing?'来源已不在当前草稿中，请重新引用或移除。':'';
+  const scene=entry.kind==='scene'?state.sceneRefs.find(item=>sceneToken(item.id)===entry.token):null;
+  sceneReferencePreviewImage.hidden=!scene;
+  if(scene) {
+    sceneReferencePreviewImage.src=scene.preview_data_url || resourceURL(scene.reference.source_reference_image.url);
+    id('prompt-reference-status').textContent='引用时的固定快照，仅供参考；不会修改来源场景。';
+  } else sceneReferencePreviewImage.removeAttribute('src');
   const locate=id('prompt-reference-locate');
   const mark=entry.kind==='annotation'?state.annotations.find(item=>`[[annotation:${item.id}]]`===entry.token):null;
   locate.hidden=!mark;locate.onclick=()=>{promptReferencePopover.close();revealAnnotation(mark);};
@@ -5169,15 +5281,18 @@ function renderPromptImageReferences() {
   ui.imageRefs.classList.toggle('hidden',!entries.length);
   for(const entry of entries) {
     const image=entry.kind==='image'?state.imageRefs.find(item=>imageToken(item.id)===entry.token):null;
-    const chip=document.createElement('div');chip.className=image?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
-    const preview=document.createElement('button');preview.type='button';preview.className=image?'prompt-image-preview':'prompt-reference-preview';
+    const scene=entry.kind==='scene'?state.sceneRefs.find(item=>sceneToken(item.id)===entry.token):null;
+    const visual=image || scene;
+    const chip=document.createElement('div');chip.className=visual?'prompt-image-chip':'prompt-reference-chip';chip.dataset.referenceToken=entry.token;
+    if(scene) chip.dataset.sceneRefId=scene.id;
+    const preview=document.createElement('button');preview.type='button';preview.className=visual?'prompt-image-preview':'prompt-reference-preview';
     preview.title=resolvePromptReference(entry.token,entry.label,entry.kind)?.title || entry.title || entry.label;
     preview.setAttribute('aria-label',referenceAliasLabel(entry.alias)+' · '+preview.title);
-    if(image) {
-      chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;
-      const thumbnail=document.createElement('img');thumbnail.src=image.annotated_data_url || image.original_data_url;thumbnail.alt='';preview.append(thumbnail);
+    if(visual) {
+      if(image) {chip.dataset.imageRefId=image.id;preview.dataset.imageRefId=image.id;}
+      const thumbnail=document.createElement('img');thumbnail.src=image?image.annotated_data_url || image.original_data_url:scene.preview_data_url || resourceURL(scene.reference.source_reference_image.url);thumbnail.alt='';preview.append(thumbnail);
     }
-    const label=document.createElement('span');label.className='prompt-reference-alias';label.textContent=entry.alias+(image?' · '+(image.pane==='reference'?'参考':'场景'):'');preview.append(label);
+    const label=document.createElement('span');label.className='prompt-reference-alias';label.textContent=entry.alias+(image?' · '+(image.pane==='reference'?'参考':'场景'):scene?' · 只读场景':'');preview.append(label);
     preview.addEventListener('click',event=>image?previewPromptImage(image,{anchor:preview,event,entry}):previewPromptReference(entry,{anchor:preview,event,entry}));
     const remove=document.createElement('button');remove.type='button';remove.className=image?'prompt-image-remove':'prompt-reference-remove';
     if(image) remove.dataset.imageRefId=image.id;
@@ -5652,6 +5767,8 @@ function promptReferences(note=promptText()) {
   if (note.length > 10000) throw new Error('提示最多 10000 字，请精简后再发送。');
   if (/\[\[image:/.test(note) && !state.imageReferencesSupported) throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
   collectImageReferences(note,state.imageRefs);
+  if(/\[\[scene:/.test(note) && !state.sceneReferencesSupported) throw Error('服务尚不支持场景引用，请更新服务后再发送。');
+  collectSceneReferences(note,state.sceneRefs);
   collectPoseReferences(note,state.poseRefs);
   if (/\[\[pose_edit:/.test(note) && !state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面后发送。');
   collectPoseEdits(note,state.poseEdits);
@@ -5707,6 +5824,7 @@ function clearSubmittedPrompt(submission) {
   if (state.poseEditor?.restoreLatest) state.humanOverlayChoice='latest';
   state.poseEdits = []; state.poseEditor=null; state.poseEditDrag=null;
   state.imageRefs = [];
+  state.sceneRefs=[];state.sceneReferenceRound++;
   renderPromptImageReferences();
   return true;
 }
@@ -5739,10 +5857,12 @@ async function clearSubmittedDraft(submission) {
   // immediate reload cannot recover the old dynamic screenshots.
   await saveMomentDraft.pending;
   await promptImageStore.pending.catch(() => {});
+  await sceneReferenceStore.pending.catch(()=>{});
   return true;
 }
 async function feedbackPayload(referencedSceneNodes, promptText) {
   const imageRefs = collectImageReferences(promptText,state.imageRefs);
+  const sceneRefs=collectSceneReferences(promptText,state.sceneRefs);
   if (imageRefs.length && !state.imageReferencesSupported) throw new Error('服务尚不支持图片引用，请更新服务并刷新页面后发送。');
   const poseEdits=collectPoseEdits(promptText,state.poseEdits);
   if (poseEdits.length && !state.poseCorrectionsSupported) throw new Error('服务尚不支持关键点修正，请更新服务并刷新页面后发送。');
@@ -5769,6 +5889,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
     pose_refs:collectPoseReferences(promptText,state.poseRefs),
     pose_edits:poseEdits,
     image_refs:structuredClone(imageRefs),
+    ...(sceneRefs.length?{scene_refs:sceneRefs}:{}),
     referenced_scene_nodes:referencedSceneNodes,
     annotations:state.annotations.map((annotation) => {
       const item = {...annotation};
@@ -5793,8 +5914,11 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
   };
 }
 async function submitFeedback() {
-  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget) return;
+  if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget || state.citingSceneProject) return;
   const promptText = promptReferenceText.expand(ui.note.value);
+  if(!state.sceneReferencesSupported && (/\[\[scene:/.test(promptText) || state.pendingSubmission?.payload?.scene_refs?.length)) {
+    announce('服务尚不支持场景引用，请更新服务后再发送；当前草稿已保留。',true);return;
+  }
   if (!state.poseCorrectionsSupported && (/\[\[pose_edit:/.test(promptText) || state.pendingSubmission?.payload?.pose_edits?.length)) {
     announce('服务尚不支持关键点修正，请更新服务并刷新页面后发送。',true); return;
   }

@@ -100,6 +100,7 @@ class WorkspaceGateway:
         result["events_cursor"] = result.pop("event_seq")
         result["object_prompts_supported"] = True
         result["inline_references_supported"] = True
+        result["scene_references_supported"] = not getattr(self, "blank_workbench", False)
         result["image_references_supported"] = True
         result["dynamic_scenes_supported"] = True
         result["human_pose_supported"] = self.pose_jobs is not None
@@ -1639,6 +1640,8 @@ class WorkspaceGateway:
             lines.append("人体按evidence_kind/keypoint_profile解读；projected_3d不是二维实测，跨机位身份须有证据。")
         if manifest.get("human_pose_edits"):
             lines.append("用$capsule-human-tracking apply-corrections读取corrections_path；仅visible人工点可作可见观测，未改点保留原证据类型。")
+        if manifest.get("scene_refs"):
+            lines.append("相似场景引用仅供只读类比；需要时读取其snapshot_json_path和glb_paths。只修改当前项目，勿修改来源场景或把引用物体直接当作当前场景对象。")
         return "\n".join(lines), paths
 
     @staticmethod

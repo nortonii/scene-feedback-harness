@@ -434,6 +434,13 @@ def _make_server_unlocked(
             if self.command == "GET" and path == "/api/workspace/context":
                 workspace = gateway.state()
                 return self._send_json(200, {"project_id": workspace["project_id"], "project_dir": workspace["project_dir"], "session_id": workspace["session_id"], "thread_id": workspace["thread_id"], "delivery_mode": workspace["delivery_mode"], "scene": store.scene(), "reference_images": store.get_session(workspace["session_id"])["reference_images"], "reference_clip": workspace["reference_clip"], "request_feedback": workspace["request_feedback"]})
+            if self.command == "POST" and path == "/api/workspace/scene-references":
+                self._require_browser_capability()
+                return self._send_json(201, registry.capture_scene_reference(self.context, self._read_json()))
+            scene_reference = re.fullmatch(r"/api/workspace/scene-references/([0-9a-f]{32})", path)
+            if self.command == "GET" and scene_reference:
+                from scene_references import SceneReferences
+                return self._send_json(200, SceneReferences(store).get(scene_reference.group(1)))
             if self.command == "GET" and path == "/api/workspace/targets":
                 return self._send_json(200, gateway.list_targets())
             if self.command == "GET" and path == "/api/workspace/models":

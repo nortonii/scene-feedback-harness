@@ -291,6 +291,11 @@ class ProjectRegistry:
             "can_unload": context is not self.root,
             "url": f"/p/{context.project_id}/?{urlencode({'session_id': workspace['session_id']})}",
         }
+        with context.store.lock:
+            session = context.store.state["sessions"].get(workspace["session_id"], {})
+            result["can_reference_scene"] = (not getattr(context.gateway, "blank_workbench", False)
+                and record.get("creation_status", "ready") == "ready"
+                and bool(context.store.state["scene"].get("objects") or session.get("reference_images") or session.get("reference_clip")))
         for key in ("creation_error", "created_thread_id", "request_id"):
             if record.get(key):
                 result[key] = record[key]
@@ -306,6 +311,7 @@ class ProjectRegistry:
         query = urlencode({"session_id": record["session_id"]}) if record.get("session_id") else ""
         result["url"] = f"/p/{record['project_id']}/" + ("?" + query if query else "")
         result["can_unload"] = record["project_id"] != self.root.project_id
+        result["can_reference_scene"] = False
         for key in ("creation_error", "created_thread_id", "request_id"):
             if record.get(key):
                 result[key] = record[key]
@@ -325,6 +331,54 @@ class ProjectRegistry:
                                  else self._unavailable_metadata(record) for project_id, record in self._records.items()
                                  if record.get("loaded") is not False],
                     "current_project_id": current_project_id, "project_unload_supported": True}
+
+    def capture_scene_reference(self, receiver: ProjectContext, payload: dict[str, Any]) -> dict[str, Any]:
+        """Lease both contexts, freeze source evidence, then copy to receiver."""
+        if not isinstance(payload, dict) or set(payload) != {"project_id"}:
+            raise APIError(400, "scene reference capture accepts only project_id")
+        source_id = payload["project_id"]
+        if not isinstance(source_id, str) or not PROJECT_ID.fullmatch(source_id):
+            raise APIError(400, "source project_id must be a lowercase UUID hex value")
+        if source_id == receiver.project_id:
+            raise APIError(400, "choose another scene as the reference")
+        if getattr(receiver.gateway, "blank_workbench", False):
+            raise APIError(409, "select a reconstruction scene before citing a scene reference")
+        source = self.get(source_id)
+        if getattr(source.gateway, "blank_workbench", False):
+            raise APIError(400, "the blank home page cannot be a scene reference")
+        with self.operation(receiver), self.operation(source):
+            with self._lock:
+                source_record = copy.deepcopy(self._records[source_id])
+            if source_record.get("creation_status", "ready") != "ready":
+                raise APIError(409, "source scene is not available for referencing")
+            with source.store.lock:
+                workspace = source.store.state.get("workspace", {})
+                source_session = workspace.get("session_id")
+                session = source.store.state["sessions"].get(source_session, {})
+                scene = copy.deepcopy(source.store.state["scene"])
+                selected = (session.get("reference_images") or [None])[0]
+                clip = session.get("reference_clip")
+                view = None
+                if selected is None and clip:
+                    view = clip
+                    selected = (clip.get("frames") or [None])[0]
+                image = None
+                if selected:
+                    image = {key: copy.deepcopy(selected[key]) for key in ("id", "name", "url", "camera", "time_sec", "frame_index") if key in selected}
+                    if view is not None:
+                        image.update(view_id=view["clip_id"], view_name=view["name"])
+                evidence = {"name": source.name, "source_project_id": source_id,
+                            "source_session_id": source_session, "source_scene_revision": scene["revision"],
+                            "source_project_dir": str(source.project_dir), "scene": scene}
+                if image:
+                    evidence["source_reference_image"] = image
+            blend = source_record.get("import_source", {}).get("blend")
+            if isinstance(blend, str):
+                path = Path(blend).resolve()
+                if path.is_file() and path.suffix.lower() == ".blend" and path.is_relative_to(source.project_dir):
+                    evidence["source_blend_path"] = str(path)
+            from scene_references import SceneReferences
+            return SceneReferences(receiver.store).capture(source.store, evidence)
 
     @staticmethod
     def _check_unload_workspace(workspace: dict[str, Any], gateway: WorkspaceGateway | None = None) -> None:
