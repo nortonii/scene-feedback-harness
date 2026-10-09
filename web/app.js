@@ -142,7 +142,7 @@ const state = {
   restoredCameraSignature:null,
   annotations:[], annotationNameCounters:{}, selectedAnnotationId:null, mode:'select', toolPane:'scene', paneModes:{reference:'select',scene:'select'}, groupId:'', drag:null, textPending:null,
   sceneSnapshots:[], snapshot:null, snapshotSequence:0, sceneView:'live', referenceZoom:1, referencePan:{x:0,y:0},
-  referencePanning:null, spacePan:false,
+  referencePanning:null, snapshotPanning:null, snapshotViewports:new Map(), spacePan:false,
   toastTimer:null, submitting:false, uploading:false, firstFrame:true,
   groundAxis:'auto', detectedUpAxis:'z', restoredUpAxis:null,
   restoredSceneRevision:null, restoredModelUrl:null
@@ -318,6 +318,7 @@ function saveDraft({allowPlaying=false}={}) {
       snapshot:state.snapshot, snapshotSequence:state.snapshotSequence, sceneView:state.sceneView, sceneSnapshotIds:state.sceneSnapshots.map(entry => entry.id),
       dynamicTime:state.time, activeViewId:state.activeViewId, clipEnabled:state.clipEnabled, animationChoices:state.animationChoices,
       referenceZoom:state.referenceZoom, referencePan:state.referencePan,
+      snapshotViewports:[...state.snapshotViewports],
       eventCursor:state.eventCursor
     }));
   } catch { /* A full or disabled local store should not block feedback. */ }
@@ -380,6 +381,10 @@ function restoreDraft() {
     state.referenceZoom = Number.isFinite(draft.referenceZoom) ? clamp(draft.referenceZoom, 1, 8) : 1;
     state.referencePan = Number.isFinite(draft.referencePan?.x) && Number.isFinite(draft.referencePan?.y)
       ? draft.referencePan : {x:0,y:0};
+    state.snapshotViewports=new Map((Array.isArray(draft.snapshotViewports)?draft.snapshotViewports:[]).slice(-24).filter(entry=>
+      Array.isArray(entry) && typeof entry[0]==='string' && entry[0].length<=128 && entry[1] &&
+      Number.isFinite(entry[1].zoom) && Number.isFinite(entry[1].x) && Number.isFinite(entry[1].y)).map(([id,view])=>
+      [id,{zoom:clamp(view.zoom,1,8),x:clamp(view.x,-100000,100000),y:clamp(view.y,-100000,100000)}]));
     ui.groupSelect.value = state.groupId;
     // Preserve drafts from the former two-field composer as one freeform prompt.
     const oldPrompts = typeof draft.objectPromptsText === 'string' ? draft.objectPromptsText.trim() : '';
@@ -484,6 +489,7 @@ function setSession(session) {
     promptMentions?.close();promptAttachments?.close();promptReferenceText.reset();
     state.imageRefs = []; state.draftImageSignature = null; state.restoredImageRefIds = [];
     state.sceneRefs=[];state.draftSceneReferenceSignature=null;state.restoredSceneRefIds=[];state.sceneReferenceRound++;
+    finishSnapshotPan(true);state.snapshotViewports.clear();
   }
   state.sessionId = session.session_id;
   restoreComparePreferences();
@@ -2702,7 +2708,43 @@ function updateSnapshotGeometry() {
   );
   ui.snapshotMedia.style.width = Math.max(1, width * scale) + 'px';
   ui.snapshotMedia.style.height = Math.max(1, height * scale) + 'px';
+  updateSnapshotTransform();
   drawOverlays();
+}
+function snapshotViewport() {
+  return state.snapshotViewports.get(state.snapshot?.id) || {zoom:1,x:0,y:0};
+}
+function setSnapshotViewport(id,view) {
+  state.snapshotViewports.delete(id);state.snapshotViewports.set(id,view);
+  while(state.snapshotViewports.size>24) state.snapshotViewports.delete(state.snapshotViewports.keys().next().value);
+}
+function updateSnapshotTransform() {
+  const view=snapshotViewport();
+  // The complete bitmap, comparison and annotation canvas move together.
+  // These browser-only values never enter the snapshot or its camera evidence.
+  ui.snapshotMedia.style.transform=`translate(-50%,-50%) translate(${view.x}px,${view.y}px) scale(${view.zoom})`;
+}
+function setSnapshotZoom(nextZoom,event) {
+  if(state.sceneView!=='snapshot' || !state.snapshot) return;
+  const previous=snapshotViewport(),zoom=clamp(nextZoom,1,8);
+  if(zoom===previous.zoom) return;
+  let {x,y}=previous;
+  if(event) {
+    const rect=ui.sceneStage.getBoundingClientRect(),anchorX=event.clientX-rect.left-rect.width/2,anchorY=event.clientY-rect.top-rect.height/2;
+    const factor=zoom/previous.zoom;
+    x=anchorX-(anchorX-x)*factor;y=anchorY-(anchorY-y)*factor;
+  }
+  if(zoom===1) {x=0;y=0;}
+  setSnapshotViewport(state.snapshot.id,{zoom,x,y});updateSnapshotTransform();saveDraft();
+}
+function finishSnapshotPan(cancel=false) {
+  const gesture=state.snapshotPanning;
+  if(!gesture) return;
+  state.snapshotPanning=null;
+  if(cancel) setSnapshotViewport(gesture.snapshotId,gesture.previous);
+  delete ui.sceneStage.dataset.snapshotPanning;
+  if(ui.sceneStage.hasPointerCapture(gesture.pointerId)) ui.sceneStage.releasePointerCapture(gesture.pointerId);
+  updateSnapshotTransform();saveDraft();
 }
 function restoreComparePreferences() {
   if (!state.sessionId || comparePreferences.sessionId === state.sessionId) return;
@@ -2818,6 +2860,7 @@ function renderSceneView({persist=true}={}) {
   const hasSnapshot = !!state.snapshot;
   if (!hasSnapshot) state.sceneView = 'live';
   const showingSnapshot = hasSnapshot && state.sceneView === 'snapshot';
+  if(state.snapshotPanning && (!showingSnapshot || state.snapshotPanning.snapshotId!==state.snapshot.id)) finishSnapshotPan(true);
   if (hasSnapshot && ui.snapshotImage.src !== state.snapshot.data_url) ui.snapshotImage.src = state.snapshot.data_url;
   ui.snapshotMedia.classList.toggle('hidden', !showingSnapshot);
   ui.sceneStage.dataset.sceneView=showingSnapshot ? 'snapshot' : 'live';
@@ -4404,7 +4447,7 @@ function updateSceneHint() {
       : '直接在渲染图上圈画，自动保留当前截图';
   } else if (toolMode('scene') === 'select') {
     const selected = selectedAnnotation();
-    ui.sceneHint.textContent = selected?.pane === 'scene' ? selected.name + ' · Backspace 删除 · 拖到会话引用' : '点击标记选中 · 拖到会话引用 · 3D 浏览可旋转场景';
+    ui.sceneHint.textContent = selected?.pane === 'scene' ? selected.name + ' · Backspace 删除 · 拖到会话引用 · 滚轮缩放' : '滚轮缩放 · 空白处拖动平移 · Space 或中／右键拖动 · 点击标记选中';
   } else {
     ui.sceneHint.textContent = '在场景上' +
       ({point:'点一下',rectangle:'拖动框选',line:'拖动画线',arrow:'拖动画箭头',text:'点击加文字',freehand:'随手圈画'})[toolMode('scene')] +
@@ -4596,9 +4639,8 @@ async function revealAnnotation(annotation) {
   workspaceChrome?.open(annotation.pane);
   (annotation.pane === 'scene' ? ui.sceneCanvas : ui.referenceCanvas).focus({preventScroll:true});
 }
-function annotationFromPointer(event,pane) {
+function annotationFromPointer(event,pane,canvas=event.currentTarget) {
   if (pane === 'scene' && state.sceneView !== 'snapshot') return;
-  const canvas = event.currentTarget;
   const point = pointFromPointer(event,canvas), rect = canvas.getBoundingClientRect();
   const zoom = rect.width / canvas.clientWidth;
   const scale = Math.max(1,Math.min(canvas.clientWidth,canvas.clientHeight)/550)*zoom;
@@ -5921,6 +5963,7 @@ async function clearSubmittedDraft(submission) {
   state.sceneSnapshots = [];
   state.snapshotSequence = 0;
   state.snapshot = null;
+  finishSnapshotPan();state.snapshotViewports.clear();
   state.sceneView = 'live';
   state.selectedId = null;
   state.selectedSceneNode = null;
@@ -6398,6 +6441,42 @@ function bindEvents() {
   });
   ui.referenceStage.addEventListener('pointercancel', () => { state.referencePanning = null; });
   ui.snapshotImage.addEventListener('load', updateSnapshotGeometry);
+  const snapshotControl=event=>event.target.closest('button,summary,input,textarea,select,a,[contenteditable],[data-prompt-drag]');
+  ui.sceneStage.addEventListener('wheel',event=>{
+    if(state.sceneView!=='snapshot' || !state.snapshot || snapshotControl(event)) return;
+    event.preventDefault();event.stopPropagation();
+    if(!event.deltaY || state.drag || annotationReferenceDrag || state.snapshotPanning) return;
+    setSnapshotZoom(snapshotViewport().zoom*(event.deltaY<0?1.15:1/1.15),event);
+  },{passive:false,capture:true});
+  ui.sceneStage.addEventListener('pointerdown',event=>{
+    if(state.sceneView!=='snapshot' || !state.snapshot || state.drag || annotationReferenceDrag || snapshotControl(event)) return;
+    const emptySelection=event.button===0 && toolMode('scene')==='select' && !annotationFromPointer(event,'scene',ui.sceneCanvas);
+    if(!(event.button===1 || event.button===2 || event.button===0 && state.spacePan || emptySelection)) return;
+    event.preventDefault();event.stopPropagation();
+    const previous={...snapshotViewport()};
+    state.snapshotPanning={pointerId:event.pointerId,snapshotId:state.snapshot.id,startX:event.clientX,startY:event.clientY,previous};
+    ui.sceneStage.dataset.snapshotPanning='true';ui.sceneStage.setPointerCapture(event.pointerId);
+  },{capture:true});
+  ui.sceneStage.addEventListener('pointermove',event=>{
+    const gesture=state.snapshotPanning;
+    if(!gesture || event.pointerId!==gesture.pointerId) return;
+    event.preventDefault();event.stopPropagation();
+    if(state.sceneView!=='snapshot' || state.snapshot?.id!==gesture.snapshotId) {finishSnapshotPan(true);return;}
+    const previous=gesture.previous;
+    const width=ui.snapshotMedia.clientWidth*previous.zoom,height=ui.snapshotMedia.clientHeight*previous.zoom;
+    const maxX=(ui.sceneStage.clientWidth+width)/2-Math.min(64,width/5),maxY=(ui.sceneStage.clientHeight+height)/2-Math.min(64,height/5);
+    setSnapshotViewport(gesture.snapshotId,{zoom:previous.zoom,
+      x:previous.zoom===1?0:clamp(previous.x+event.clientX-gesture.startX,-maxX,maxX),
+      y:previous.zoom===1?0:clamp(previous.y+event.clientY-gesture.startY,-maxY,maxY)});
+    updateSnapshotTransform();
+  },{capture:true});
+  ui.sceneStage.addEventListener('pointerup',event=>{
+    if(state.snapshotPanning?.pointerId!==event.pointerId) return;
+    event.preventDefault();event.stopPropagation();finishSnapshotPan();
+  },{capture:true});
+  ui.sceneStage.addEventListener('pointercancel',()=>finishSnapshotPan(true));
+  ui.sceneStage.addEventListener('lostpointercapture',()=>finishSnapshotPan(true));
+  ui.sceneStage.addEventListener('contextmenu',event=>{if(state.sceneView==='snapshot' && !snapshotControl(event))event.preventDefault();});
   ui.snapshotCompareImage.addEventListener('load', renderPromptReferenceControls);
   ui.captureScene.addEventListener('click', freezeScene);
   ui.newSceneBadge.addEventListener('click', browseScene);
@@ -6581,6 +6660,7 @@ function bindEvents() {
         return;
       }
     }
+    if (event.key === 'Escape' && state.snapshotPanning) { finishSnapshotPan(true);event.preventDefault();return; }
     if (event.key === 'Escape' && annotationReferenceDrag) { finishAnnotationReferenceDrag(); event.preventDefault(); return; }
     if (['Backspace','Delete'].includes(event.key) && !event.isComposing && !event.ctrlKey && !event.metaKey && !event.altKey &&
         !event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable=false]), dialog[open]')) {
@@ -6608,7 +6688,7 @@ function bindEvents() {
 
   });
   document.addEventListener('keyup', (event) => { if (event.code === 'Space') state.spacePan = false; });
-  window.addEventListener('blur', () => { finishAnnotationReferenceDrag(); state.spacePan = false; state.referencePanning = null; if (state.drag?.type === 'erase') { state.drag = null; drawOverlays(); } });
+  window.addEventListener('blur', () => { finishAnnotationReferenceDrag();finishSnapshotPan(true);state.spacePan = false; state.referencePanning = null; if (state.drag?.type === 'erase') { state.drag = null; drawOverlays(); } });
   window.addEventListener('beforeunload', saveDraft);
   new ResizeObserver(updateReferenceGeometry).observe(ui.referenceStage);
   new ResizeObserver(resizeScene).observe(ui.sceneStage);

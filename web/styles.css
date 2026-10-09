@@ -135,7 +135,10 @@ select { min-width: 0; font-size: var(--text-control); }
 /* A frozen image owns the whole stage, including its empty margins. Keep the
    renderer's geometry available for resizing, captures and the live card. */
 .scene-stage[data-scene-view="snapshot"] > .viewport { visibility: hidden; pointer-events: none; }
+/* A focused, enlarged bitmap must not scroll its container and cancel a pan. */
+.scene-stage[data-scene-view="snapshot"] { overflow: clip; }
 .scene-snapshot-media { position: absolute; z-index: 4; left: 50%; top: 50%; transform: translate(-50%,-50%); max-width: 100%; max-height: 100%; background: var(--stage); }
+.scene-stage[data-snapshot-panning="true"], .scene-stage[data-snapshot-panning="true"] .scene-annotations { cursor: grabbing !important; }
 .scene-annotations { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; touch-action: none; }
 .compare-image { position: absolute; inset: 0; height: 100%; width: 100%; object-fit: contain; pointer-events: none; z-index: 3; }
 .stage-hint { position: absolute; z-index: 5; bottom: 14px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px); font-size: var(--text-caption); color: #474741; background: #f5f4efdd; padding: 5px 8px; opacity: 0; transition: opacity .15s; white-space: normal; text-align: center; pointer-events: none; }
