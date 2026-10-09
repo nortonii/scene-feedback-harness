@@ -197,12 +197,19 @@ def main() -> None:
                 capture(page).save("/tmp/scene_feedback_selection_outline.png")
                 print("PASS native item click outlines both parts, including inner hole and outer torus silhouette, with no bounding-box corners or filled interior",flush=True)
 
-                control(page,'[data-selection-level="part"]').click();p=point(page);page.mouse.click(p["x"],p["y"])
+                control(page,'[data-selection-level="part"]').click()
+                # Changing level already selects the hit part. Pick a sibling first,
+                # then return to the ring; a second click on the ring now deselects.
+                p=point(page,"handle",(0,0,0));page.mouse.click(p["x"],p["y"])
+                page.wait_for_function("__outlineCheck.state.selectedSceneNode?.node_path.join('/')==='0/1'")
+                p=point(page);page.mouse.click(p["x"],p["y"])
                 page.wait_for_function("__outlineCheck.state.selectedSceneNode?.node_path.join('/')==='0/0'")
                 part=silhouette(capture(page),capture(page,original=True,geometry=True))
                 assert in_region(part["red"],handle_center,60)==0
                 assert page.evaluate("__outlineCheck.selectionOutline.root===__outlineCheck.ring")
-                page.evaluate("document.getElementById('clear-selection').click()")
+                page.wait_for_timeout(600)
+                page.mouse.click(p["x"],p["y"])
+                page.wait_for_function("__outlineCheck.state.selectedId===null")
                 assert count(mask(capture(page),red=True))==0
                 assert page.evaluate("__outlineCheck.selectionOutline.root===null && __outlineCheck.selectionOutline.materials.size===0")
                 p=point(page);page.mouse.click(p["x"],p["y"])

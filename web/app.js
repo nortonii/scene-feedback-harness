@@ -247,6 +247,7 @@ const gltfLoader = new GLTFLoader();
 const selectionOutline = new SelectionOutline(renderer);
 let pointerDown = null;
 let sceneClicks = [];
+let selectionClearTimer = null;
 let objectListSignature = null;
 let orbitStart = null;
 
@@ -2419,7 +2420,7 @@ function renderObjectList() {
     button.type = 'button';
     button.className = 'object-item' + (state.selectedId === item.id ? ' active' : '');
     button.dataset.objectId = item.id;
-    button.title = '单击选择，双击或拖到提示中引用';
+    button.title = '单击选择，再次单击取消；双击或拖到提示中引用';
     bindPromptDrag(button,() => ({kind:'object',objectId:item.id,label:item.name || item.id}),'object');
     const swatch = document.createElement('span');
     swatch.className = 'object-color';
@@ -2429,9 +2430,11 @@ function renderObjectList() {
     const kind = document.createElement('small');
     kind.textContent = ({box:'方盒',sphere:'球体',cylinder:'圆柱',model:'模型'})[item.type] || item.type;
     button.append(swatch, name, kind);
-    button.addEventListener('click', () => selectObject(item.id));
+    button.addEventListener('pointerdown', cancelPendingSelectionClear);
+    button.addEventListener('click', () => toggleObjectSelection(item.id));
     button.addEventListener('dblclick',event=>{
-      event.preventDefault();quoteObjectReference({kind:'object',objectId:item.id,label:sceneObject(item.id)?.name || item.name || item.id});
+      event.preventDefault();selectObject(item.id);
+      quoteObjectReference({kind:'object',objectId:item.id,label:sceneObject(item.id)?.name || item.name || item.id});
     });
     const cite = document.createElement('button');
     cite.type = 'button';
@@ -2445,7 +2448,38 @@ function renderObjectList() {
     ui.objectList.append(row);
   }
 }
+function cancelPendingSelectionClear() {
+  clearTimeout(selectionClearTimer);
+  selectionClearTimer = null;
+}
+function clearObjectSelection() {
+  cancelPendingSelectionClear();
+  if (!editable()) return;
+  state.selectedId = null;
+  state.selectedSceneNode = null;
+  state.lastPickedDetailNode = null;
+  renderSelection();
+  saveDraft();
+}
+function toggleObjectSelection(objectId, sceneNode=null, detailNode=null) {
+  if (!editable() || !sceneObject(objectId)) return;
+  cancelPendingSelectionClear();
+  const selectedKey = () => sceneClickKey({objectId:state.selectedId, sceneNode:state.selectedSceneNode});
+  const sameTarget = state.selectedId === objectId && (!sceneNode ||
+    JSON.stringify(state.selectedSceneNode?.node_path) === JSON.stringify(sceneNode.node_path));
+  if (!sameTarget) {
+    selectObject(objectId, sceneNode, detailNode);
+    return;
+  }
+  const key = selectedKey();
+  // Wait for the native double-click before clearing an already selected target.
+  selectionClearTimer = setTimeout(() => {
+    selectionClearTimer = null;
+    if (selectedKey() === key) clearObjectSelection();
+  }, 500);
+}
 function selectObject(objectId, sceneNode=null, detailNode=null) {
+  cancelPendingSelectionClear();
   if (!editable()) return;
   if (!sceneObject(objectId)) return;
   state.selectedId = objectId;
@@ -2458,6 +2492,7 @@ async function loadScene(sceneData) {
   const scene = sceneData || await api('/api/scene');
   const priorRevision = state.sceneRevision;
   if (state.sceneLoading || priorRevision === scene.revision) return;
+  cancelPendingSelectionClear();
   state.sceneLoading = true;
   updateSubmitLabel(); updateMode(); renderTimeline();
   try {
@@ -6119,7 +6154,7 @@ function pickScene(event) {
 }
 function handleSceneClick(event) {
   const selection = pickScene(event);
-  if (selection) selectObject(selection.objectId, selection.sceneNode, selection.detailNode);
+  if (selection) toggleObjectSelection(selection.objectId, selection.sceneNode, selection.detailNode);
   return selection;
 }
 function sceneClickKey(selection) {
@@ -6456,14 +6491,7 @@ function bindEvents() {
   ui.redoAnnotation.addEventListener('click', redoAnnotationEdit);
   ui.referenceAllAnnotations.addEventListener('mousedown', (event) => event.preventDefault());
   ui.referenceAllAnnotations.addEventListener('click', insertAllAnnotationReferences);
-  ui.clearSelection.addEventListener('click', () => {
-    if (!editable()) return;
-    state.selectedId = null;
-    state.selectedSceneNode = null;
-    state.lastPickedDetailNode = null;
-    renderSelection();
-    saveDraft();
-  });
+  ui.clearSelection.addEventListener('click', clearObjectSelection);
   const focusSelection = () => {
     if (!editable()) return;
     browseScene();
@@ -6504,6 +6532,7 @@ function bindEvents() {
     if (event.key === 'Escape') { event.preventDefault(); hideTextEditor(); }
   });
   renderer.domElement.addEventListener('pointerdown', (event) => {
+    cancelPendingSelectionClear();
     if(event.button!==0 || event.isPrimary===false){pointerDown=null;sceneClicks=[];return;}
     pointerDown = {x:event.clientX, y:event.clientY,id:event.pointerId,maxDistance:0};
   });
@@ -6520,7 +6549,7 @@ function bindEvents() {
       key:selection ? sceneClickKey(selection) : null});
     sceneClicks=sceneClicks.slice(-2);
   });
-  renderer.domElement.addEventListener('pointercancel',()=>{pointerDown=null;sceneClicks=[];});
+  renderer.domElement.addEventListener('pointercancel',()=>{cancelPendingSelectionClear();pointerDown=null;sceneClicks=[];});
   controls.addEventListener('start', () => {
     orbitStart = {position:camera.position.clone(), target:controls.target.clone(), quaternion:camera.quaternion.clone()};
   });
