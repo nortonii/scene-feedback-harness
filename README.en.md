@@ -46,6 +46,7 @@ The warm off-white and dark themes retain the glass conversation dock. A single 
 | Control | Purpose |
 | --- | --- |
 | Upper-left sidebar button | Switch independent scenes; CLI mode or a connected Codex Desktop can create a scene and reconstruction task |
+| Folder icon beside Scenes | `打开文件夹` browses service-host folders and imports ready instances without switching the current scene or creating a task |
 | `侧栏 → 任务` | With Codex Desktop connected, switch the current scene’s recipient or create a task with a name, model, reasoning effort, and permissions |
 | `侧栏 → 执行记录` | Execution and feedback queue; approvals, retries, and delivery checks also appear above the conversation prompt |
 | Conversation dock | History appears above the prompt. `收起记录` hides history; `收起会话` hides the whole dock, and `展开会话` brings it back |
@@ -102,7 +103,9 @@ Scene input currently uses a self-contained `.glb` file. Publishing requires geo
 
 ## Switch scenes and start a new reconstruction task
 
-Click the scene name at the top to open the scene list. Return to an existing scene, or enter a name and choose a model, reasoning effort, and permissions to create **a new scene and an independent Codex conversation**. Import reference images or video, then send your reconstruction instructions from the prompt box. An initial GLB is optional.
+Click the upper-left sidebar button to open the scene list. Return to an existing scene, or enter a name and choose a model, reasoning effort, and permissions to create **a new scene and an independent Codex conversation**. Import reference images or video, then send your reconstruction instructions from the prompt box. An initial GLB is optional.
+
+The folder icon `打开文件夹` beside Scenes browses directories on the **service host** or accepts an absolute path; LAN clients see the service host’s folders too. `打开并导入` recursively imports ready instances within the scan limits and adds them to the list without switching your current editing scene or creating a Codex task. Repeated sources and request retries reuse existing scenes; an individual failure does not block other instances. Missing files, invalid JSON, ambiguous GLBs, and scan truncation show reasons. Import reads the original GLB, `.blend`, and references without modifying them, while data and feedback are saved independently. See the [folder import specification](docs/folder-import.md) for markers, compatible layouts, paths, and scan limits. Existing video-ready packages using `status: "ready"`, `scene_glb`, and `reference_sequence` are supported without rewriting the marker or adding `schema_version`.
 
 Each scene keeps its own references, cameras, dynamic views, reconstruction, feedback history, and receiving task. Switching saves the current draft; returning restores it. Separate tabs can view different scenes while previous tasks and queued feedback stay with their original scene. Finish an in-progress submission or import before switching.
 

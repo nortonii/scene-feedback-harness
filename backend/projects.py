@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import hmac
 import json
 import logging
 import os
 from pathlib import Path
 import re
+import shutil
 import tempfile
 import threading
 from typing import Any, Callable
@@ -17,6 +19,7 @@ import uuid
 
 from core import APIError, SceneStore
 from gateway import WorkspaceGateway
+from ready_import import discover_ready_instances, host_directory, ReadyInstance
 
 
 PROJECT_ID = re.compile(r"^[0-9a-f]{32}$")
@@ -47,11 +50,13 @@ class ProjectRegistry:
         self.path = root.store.data_dir / "project_registry.json"
         self.managed_dir = root.store.data_dir / "projects"
         self._lock = threading.RLock()
+        self._import_lock = threading.Lock()
         self.target_binding_lock = threading.RLock()
         self._factory = context_factory
         self._configure = configure_context
         self._contexts = {root.project_id: root}
         self._closed = False
+        self._import_requests: dict[str, str] = {}
         root_record = {
             "project_id": root.project_id, "name": root.name,
             "project_dir": str(root.project_dir), "data_dir": str(root.store.data_dir),
@@ -64,6 +69,14 @@ class ProjectRegistry:
             records = document.get("projects")
             if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
                 raise RuntimeError("invalid project registry")
+            import_requests = document.get("import_requests", {})
+            if not isinstance(import_requests, dict) or any(
+                not isinstance(key, str) or not PROJECT_ID.fullmatch(key)
+                or not isinstance(value, str) or not Path(value).is_absolute()
+                for key, value in import_requests.items()
+            ):
+                raise RuntimeError("invalid folder import requests in registry")
+            self._import_requests = dict(import_requests)
             self._records: dict[str, dict[str, Any]] = {}
             requests: set[str] = set()
             for record in records:
@@ -75,6 +88,8 @@ class ProjectRegistry:
                     if not isinstance(request_id, str) or not PROJECT_ID.fullmatch(request_id) or request_id in requests:
                         raise RuntimeError("invalid or duplicate creation request in registry")
                     requests.add(request_id)
+                    if request_id in self._import_requests:
+                        raise RuntimeError("project creation and folder import share a request ID")
                 self._records[project_id] = dict(record)
             saved_root = self._records.get(root.project_id)
             if saved_root is None or any(saved_root.get(key) != root_record[key] for key in ("project_dir", "data_dir")):
@@ -89,14 +104,20 @@ class ProjectRegistry:
             for project_id, record in self._records.items():
                 if project_id == root.project_id:
                     continue
-                self._validate_managed_paths(record)
+                if record.get("kind") != "imported":
+                    self._validate_managed_paths(record)
                 context = None
                 try:
+                    if record.get("kind") == "imported":
+                        self._validate_managed_paths(record)
                     context = self._factory(record, False)
                     self._contexts[project_id] = context
                     self._configure(context)
                     self._install_binding_guard(context)
-                    context.gateway.start()
+                    if record.get("kind") == "imported":
+                        self._start_imported_context(context, restored=True)
+                    else:
+                        context.gateway.start()
                 except Exception as exc:
                     # A partially created or unavailable child must stay visible
                     # without replacing the existing default workspace.
@@ -129,7 +150,7 @@ class ProjectRegistry:
 
     def _save(self) -> None:
         document = {"schema_version": 1, "default_project_id": self.root.project_id,
-                    "projects": list(self._records.values())}
+                    "projects": list(self._records.values()), "import_requests": self._import_requests}
         descriptor, temporary = tempfile.mkstemp(prefix="projects-", suffix=".json", dir=self.root.store.data_dir)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -145,6 +166,14 @@ class ProjectRegistry:
     def _validate_managed_paths(self, record: dict[str, Any]) -> None:
         base = self.managed_dir / record["project_id"]
         for key, leaf in (("project_dir", "workspace"), ("data_dir", "data")):
+            if key == "project_dir" and record.get("kind") == "imported":
+                source = record.get("import_source")
+                project = record.get("project_dir")
+                if (not isinstance(project, str) or not Path(project).is_absolute()
+                    or str(Path(project).resolve()) != project or not isinstance(source, dict)
+                    or source.get("root") != project or source.get("read_only") is not True):
+                    raise RuntimeError("imported project must use its canonical read-only source directory")
+                continue
             expected = base / leaf
             if record.get(key) != str(expected) or expected.resolve() != expected:
                 raise RuntimeError("managed project directories must remain inside the registry data directory")
@@ -206,9 +235,10 @@ class ProjectRegistry:
         workspace = context.store.workspace()
         record.update({key: workspace.get(key) for key in ("session_id", "thread_id", "scene_revision")})
         record["created_thread_ids"] = list(workspace.get("created_thread_ids", []))
-        if workspace.get("thread_id") and record.get("creation_status") != "ready":
+        if (workspace.get("thread_id") or record.get("kind") == "imported") and record.get("creation_status") != "ready":
             record["creation_status"] = "ready"
-            record["created_thread_id"] = workspace["thread_id"]
+            if workspace.get("thread_id"):
+                record["created_thread_id"] = workspace["thread_id"]
             record.pop("creation_error", None)
             record.pop("creation_http_status", None)
 
@@ -226,6 +256,9 @@ class ProjectRegistry:
         for key in ("creation_error", "created_thread_id", "request_id"):
             if record.get(key):
                 result[key] = record[key]
+        if record.get("kind") == "imported":
+            result["kind"] = "imported"
+            result["import_source"] = copy.deepcopy(record["import_source"])
         return result
 
     def _unavailable_metadata(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -237,6 +270,9 @@ class ProjectRegistry:
         for key in ("creation_error", "created_thread_id", "request_id"):
             if record.get(key):
                 result[key] = record[key]
+        if record.get("kind") == "imported":
+            result["kind"] = "imported"
+            result["import_source"] = copy.deepcopy(record["import_source"])
         return result
 
     def list(self, current_project_id: str) -> dict[str, Any]:
@@ -286,6 +322,8 @@ class ProjectRegistry:
         with self._lock:
             if self._closed:
                 raise APIError(503, "reconstruction service is closing")
+            if request_id in self._import_requests:
+                raise APIError(409, "request_id was already used for folder import")
             for record in self._records.values():
                 if record.get("request_id") == request_id:
                     if record.get("creation_spec") != spec:
@@ -354,6 +392,174 @@ class ProjectRegistry:
                     return self._creation_result(context)
                 raise APIError(record["creation_http_status"], record["creation_error"],
                                detail={"project": self._unavailable_metadata(record)}) from exc
+
+    @staticmethod
+    def _start_imported_context(context: ProjectContext, *, restored: bool = False) -> None:
+        # Event delivery needs the local worker. An existing task may restore
+        # after a user explicitly bound it; a fresh import never owns an adapter.
+        if context.gateway.adapter is not None:
+            workspace = context.gateway.ensure()
+            target = workspace.get("thread_id")
+            if not (restored and context.gateway.external_review and target
+                    and getattr(context.gateway.adapter, "thread_id", None) == target):
+                raise RuntimeError("imported scene unexpectedly has a Codex adapter")
+        context.gateway.desktop_seed_thread_id = None
+        if context.gateway.external_review or context.gateway.feedback_transport == "mcp_events":
+            context.gateway.start()
+
+    def _source_record(self, source: Path) -> dict[str, Any] | None:
+        for record in self._records.values():
+            if record["project_dir"] == str(source):
+                return record
+        return None
+
+    @staticmethod
+    def _close_import_context(context: ProjectContext | None) -> None:
+        if context is None:
+            return
+        try:
+            context.gateway.close()
+        except Exception:
+            logging.exception("Could not close failed imported scene %s", context.project_id)
+        finally:
+            if context.data_lock is not None:
+                try:
+                    context.data_lock.close()
+                except Exception:
+                    logging.exception("Could not release failed imported scene lock %s", context.project_id)
+
+    def _import_instance(self, instance: ReadyInstance) -> tuple[dict[str, Any], bool]:
+        with self._lock:
+            if self._closed:
+                raise APIError(503, "reconstruction service is closing")
+            existing = self._source_record(instance.root)
+            if existing is not None:
+                context = self._contexts.get(existing["project_id"])
+                if context is None:
+                    raise APIError(503, existing.get("creation_error", "registered source is unavailable"))
+                return self.metadata(context), False
+        project_id = uuid.uuid5(uuid.NAMESPACE_URL, "scene-feedback-import:" + str(instance.root)).hex
+        base = self.managed_dir / project_id
+        record = {"project_id": project_id, "name": instance.name, "kind": "imported",
+                  "project_dir": str(instance.root), "data_dir": str(base / "data"),
+                  "creation_status": "ready", "import_source": instance.provenance()}
+        self._validate_managed_paths(record)
+        with self._lock:
+            if project_id in self._records:
+                raise APIError(409, "imported source conflicts with an existing project ID")
+        # Claim only a fresh managed directory. An orphan or externally supplied
+        # data directory is never reused for its credentials or old task state.
+        self.managed_dir.mkdir(mode=0o700, exist_ok=True)
+        try:
+            base.mkdir(mode=0o700)
+        except FileExistsError as exc:
+            raise APIError(409, "managed import data already exists; inspect it before importing this source") from exc
+        context = None
+        try:
+            context = self._factory(record, True)
+            self._configure(context)
+            self._install_binding_guard(context)
+            context.gateway.desktop_seed_thread_id = None
+            workspace = context.gateway.ensure()
+            if (context.project_id != project_id or context.project_dir != instance.root
+                or context.store.data_dir != base / "data" or workspace.get("project_id") != project_id
+                or workspace.get("thread_id") or workspace.get("created_thread_ids")
+                or workspace.get("queue") or context.store.scene().get("objects")):
+                raise RuntimeError("folder import requires a fresh isolated scene context without Codex activity")
+            if context.gateway.adapter is not None:
+                raise RuntimeError("folder import cannot use a Codex adapter")
+            if instance.manifest is not None:
+                clip_payload = {"manifest_path": str(instance.manifest)}
+                if instance.camera_manifest is not None:
+                    clip_payload["camera_manifest_path"] = str(instance.camera_manifest)
+                context.gateway.set_reference_clip_paths(clip_payload)
+            if instance.reference_images:
+                context.gateway.add_reference_paths([str(path) for path in instance.reference_images])
+            # Recheck the GLB immediately before copying, since its source may
+            # have changed while a large reference group was being imported.
+            glb = instance.glb.resolve(strict=True)
+            if not glb.is_relative_to(instance.root) or not glb.is_file():
+                raise APIError(400, "ready scene files must remain inside their instance directory")
+            model = context.store.import_model(str(glb), name=instance.name)
+            if instance.world_up is not None:
+                up_axis = instance.world_up.lower()
+                if up_axis not in {"y", "z"}:
+                    raise APIError(400, "ready scene world_up must be Y or Z")
+                context.store.update_scene(model["scene_revision"], [{
+                    "op": "update", "object_id": model["object"]["id"],
+                    "fields": {"metadata": {**model["object"].get("metadata", {}), "up_axis": up_axis}},
+                }])
+            self._start_imported_context(context)
+            with self._lock:
+                if self._closed:
+                    raise APIError(503, "reconstruction service is closing")
+                # Publication follows successful validation/copies, so failed
+                # imports do not leave catalog entries that look like projects.
+                self._records[project_id] = record
+                self._contexts[project_id] = context
+                try:
+                    self._refresh_creation(context)
+                    metadata = self.metadata(context)
+                    self._save()
+                except BaseException:
+                    self._records.pop(project_id, None)
+                    self._contexts.pop(project_id, None)
+                    raise
+            return metadata, True
+        except BaseException:
+            self._close_import_context(context)
+            # This method created base exclusively and only deletes its own
+            # managed data; the original instance and editable blend stay intact.
+            if base.resolve() == base and base.is_dir():
+                shutil.rmtree(base)
+            raise
+
+    def import_folder(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict) or set(payload) - {"path", "request_id"}:
+            raise APIError(400, "folder import accepts path and request_id")
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not PROJECT_ID.fullmatch(request_id):
+            raise APIError(400, "request_id must be a 32-character lowercase UUID hex value")
+        folder = host_directory(payload.get("path"))
+        # Keep the catalog lock out of image/model copying, allowing the active
+        # scene and project polling to continue while a batch is imported.
+        with self._import_lock:
+            with self._lock:
+                if self._closed:
+                    raise APIError(503, "reconstruction service is closing")
+                previous = self._import_requests.get(request_id)
+                if previous is not None and previous != str(folder):
+                    raise APIError(409, "request_id was already used with a different folder")
+                if any(record.get("request_id") == request_id for record in self._records.values()):
+                    raise APIError(409, "request_id was already used for project creation")
+                if previous is None:
+                    self._import_requests[request_id] = str(folder)
+                    try:
+                        self._save()
+                    except BaseException:
+                        self._import_requests.pop(request_id, None)
+                        raise
+            discovery = discover_ready_instances(str(folder))
+            projects, imported = [], []
+            skipped, errors = list(discovery.skipped), list(discovery.errors)
+            for instance in discovery.instances:
+                try:
+                    metadata, created = self._import_instance(instance)
+                    projects.append(metadata)
+                    item = {"path": str(instance.root), "project_id": metadata["project_id"], "name": metadata["name"]}
+                    if created:
+                        imported.append(item)
+                    else:
+                        skipped.append({**item, "reason": "source directory is already registered"})
+                except Exception as exc:
+                    logging.warning("Could not import ready scene %s: %s", instance.root, exc)
+                    errors.append({"path": str(instance.root), "error": exc.message if isinstance(exc, APIError) else str(exc)[:500]})
+            return {"path": str(folder), "request_id": request_id, "projects": projects,
+                    "imported": imported, "skipped": skipped, "errors": errors,
+                    "truncated": discovery.truncated,
+                    "counters": {"imported": len(imported), "skipped": len(skipped), "errors": len(errors),
+                                 "candidates": discovery.candidates, "directories_scanned": discovery.directories_scanned,
+                                 "entries_scanned": discovery.entries_scanned}}
 
     def close(self) -> None:
         with self._lock:

@@ -7,6 +7,7 @@ import { setupImmersive } from './immersive.js';
 import { setupTheme } from './theme.js';
 import {setupPromptAttachments} from './prompt-attachments.js';
 import {setupWorkspaceSidebar} from './workspace-sidebar.js';
+import {setupWorkspaceFolderImport} from './workspace-folder-import.js';
 import {setupSnapshotGallery} from './snapshot-gallery.js';
 import { setupFeedbackEvidence, savedEvidence } from './feedback-evidence.js';
 import { setupActionIcons, setActionIcon } from './action-icons.js';
@@ -168,6 +169,7 @@ let annotationPreviewTimer = null;
 let liveScenePreview = null;
 let livePreviewTimer = null;
 let workspaceSidebar = null;
+let workspaceFolderImport = null;
 let clearRequest = null;
 let backgroundTransition = null;
 let annotationReferenceDrag = null;
@@ -245,7 +247,7 @@ function announce(message, error=false) {
 async function api(path, options={}) {
   const request = {...options};
   if (state.browserCapability && /^(POST|PUT|PATCH|DELETE)$/i.test(request.method || '') &&
-      (path.startsWith('/api/workspace/') || path.startsWith('/api/sessions/') || path === '/api/projects')) {
+      (path.startsWith('/api/workspace/') || path.startsWith('/api/sessions/') || path === '/api/projects' || path.startsWith('/api/projects/'))) {
     request.headers = {...(request.headers || {}), 'X-Workspace-Capability':state.browserCapability};
   }
   if (options.body && typeof options.body !== 'string') {
@@ -1131,6 +1133,8 @@ function renderWorkspace(workspace) {
     ? workspace.event_delivery : null;
   state.desktopAvailable = workspace.desktop_available ?? !!workspace.thread_id;
   state.projectCreationSupported = state.feedbackTransport !== 'mcp_events' && (workspace.project_creation_supported ?? state.desktopAvailable);
+  state.projectFolderImportSupported = workspace.project_folder_import_supported === true;
+  workspaceFolderImport?.refreshAvailability();
   const nextThreadId = state.feedbackTransport !== 'mcp_events' && state.deliveryMode === 'external' ? workspace.thread_id || null : null;
   if (nextThreadId !== state.boundThreadId) state.targetChoice = nextThreadId;
   state.boundThreadId = nextThreadId;
@@ -1980,7 +1984,7 @@ async function addObject(item) {
     root.add(gltf.scene);
     root.userData.gltfRoot = gltf.scene;
     const asset = gltf.parser.json.asset || {};
-    const declaredUp = String(gltf.scene.userData.up_axis || asset.extras?.up_axis || '').toLowerCase();
+    const declaredUp = String(item.metadata?.up_axis || gltf.scene.userData.up_axis || asset.extras?.up_axis || '').toLowerCase();
     root.userData.upAxis = ['y','z'].includes(declaredUp) ? declaredUp :
       asset.generator === 'scene-feedback-harness room demo' ? 'z' : 'y';
     root.userData.loaded = true;
@@ -5943,7 +5947,13 @@ function bindEvents() {
     onTime:id=>quotePromptTime('snapshot',id),
     onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
-  workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}}});
+  workspaceFolderImport=setupWorkspaceFolderImport({api,
+    isEnabled:()=>state.workspaceReady && state.projectFolderImportSupported && !state.creatingProject && !state.navigatingProject,
+    onImported:()=>loadProjects(),onError:message=>announce(message,true)});
+  workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{
+    workspaceFolderImport?.onPage(page);
+    if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}
+  }});
   minimalLayout = setupMinimalLayout({getState:() => state});
   setupTheme({onChange:applyTheme});
   immersiveWorkspace = setupImmersive({onResize:() => { resizeScene(); updateReferenceGeometry(); }, onLayoutChange:() => workspaceChrome?.layoutChanged(), hasActiveGesture:() => !!(state.drag || annotationReferenceDrag || state.textPending || state.poseEditDrag)});
