@@ -101,6 +101,8 @@ select { min-width: 0; font-size: var(--text-control); }
 .reference-media { position: relative; max-width: 100%; max-height: 100%; flex: none; transform-origin: center center; }
 .reference-media img, .scene-snapshot-media img { display: block; height: 100%; width: 100%; object-fit: contain; user-select: none; -webkit-user-drag: none; }
 .reference-media canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+.livewire-status { position: absolute; z-index: 7; bottom: 12px; left: 12px; right: 12px; width: fit-content; max-width: calc(100% - 24px); display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 5px 8px; border: 1px solid var(--surface-border); border-radius: 12px; color: var(--ink); background: var(--surface-glass); backdrop-filter: blur(14px); font-size: var(--text-caption); }
+.livewire-status .compact-button { min-height: 26px; padding: 3px 7px; }
 .reference-media .human-pose-overlay { pointer-events: none; z-index: 2; }
 .reference-media .human-pose-overlay.pose-editing { pointer-events: auto; cursor: crosshair; }
 .pose-edit-panel { flex: none; padding: 8px 0 4px; border-top: 1px solid var(--line); font-size: var(--text-caption); }

@@ -31,6 +31,7 @@ import {referenceAliasLabel} from './prompt-reference-icons.js';
 import {createPromptReferenceHit,hitPromptReference} from './prompt-reference-hit.js';
 import {createPromptReferencePopover} from './prompt-reference-popover.js';
 import { compactReferenceMessage } from './prompt-reference-display.js';
+import { setupReferenceLivewire } from './livewire.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -170,6 +171,7 @@ const promptReferencePopover=createPromptReferencePopover({getInlineHit:(x,y)=>
 let workspaceControls = null;
 let immersiveWorkspace = null;
 let workspaceChrome = null;
+let livewire = null;
 let feedbackEvidence = null;
 let snapshotGallery = null;
 let pendingTimelineTimeQuote = null;
@@ -373,6 +375,7 @@ function restoreDraft() {
       state.annotations = state.annotations.filter((annotation) => annotation.pane !== 'scene');
     }
     state.paneModes = {reference:validTool(draft.paneModes?.reference), scene:state.sceneView === 'live' ? 'select' : validTool(draft.paneModes?.scene || draft.annotationMode)};
+    if(state.paneModes.scene==='livewire')state.paneModes.scene='select';
     state.toolPane = draft.toolPane === 'reference' ? 'reference' : 'scene';
     state.mode = toolMode(state.toolPane);
     state.time = Number.isFinite(draft.dynamicTime) ? Math.max(0, draft.dynamicTime) : 0;
@@ -445,6 +448,7 @@ function applyAnnotationEdit(from, to) {
     return false;
   }
   pauseTimeline(); hideTextEditor(); state.drag = null;
+  livewire?.cancel();
   cancelPoseEditDrag();
   const previousPoseIds=new Set(state.poseEdits.map(item => item.id));
   state.poseEdits=structuredClone(to.poseEdits || []);
@@ -493,6 +497,7 @@ function setSession(session) {
     finishSnapshotPan(true);state.snapshotViewports.clear();
   }
   state.sessionId = session.session_id;
+  livewire?.sync();
   restoreComparePreferences();
   state.sessionStatus = session.status || 'open';
   state.feedbackCount = Number(session.feedback_count) || 0;
@@ -2983,6 +2988,7 @@ function renderReferenceStrip() {
   renderReferenceViews();
 }
 function showActiveReference() {
+  livewire?.sync();
   const ref = activeReference();
   const hasReference = !!ref;
   ui.referenceMedia.classList.toggle('hidden', !hasReference);
@@ -3897,6 +3903,7 @@ function stepReferenceTimeline(direction) {
   } else seekTimeline(stepTime(view?.frames, state.time, direction, view?.fps || timelineFps(), timelineDuration()), {viewId:view?.clip_id});
 }
 async function seekTimeline(time, {playback=false, forcePose=false, viewId=timelineViewId(), preserveTime=false}={}) {
+  if(livewire?.active)livewire.cancel();
   if (!playback && !editable()) return false;
   if (playback && state.seeking) return false;
   if (!playback) { pauseTimeline(); hideTextEditor(); state.drag = null; }
@@ -4487,17 +4494,19 @@ function updateMode() {
   drawOverlays();
 }
 function validTool(mode) {
-  return ['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode) ? mode : 'select';
+  return ['select','point','rectangle','line','arrow','text','freehand','erase','livewire'].includes(mode) ? mode : 'select';
 }
 function toolMode(pane) { return state.paneModes[pane] || 'select'; }
 function activateToolPane(pane) {
   if (state.toolPane === pane) return;
+  livewire?.cancel();
   state.toolPane = pane; state.mode = toolMode(pane);
   updateMode();
 }
 function setMode(mode, pane=state.toolPane) {
   if (state.submitting || state.pendingSubmission) return;
-  if (!['select','point','rectangle','line','arrow','text','freehand','erase'].includes(mode)) return;
+  if (validTool(mode)!==mode || mode==='livewire' && pane!=='reference') return;
+  livewire?.cancel();
   state.toolPane = pane; state.paneModes[pane] = mode; state.mode = mode;
   cancelPoseEditDrag();
   if (state.poseEditor?.restoreLatest) state.humanOverlayChoice='latest';
@@ -4562,6 +4571,7 @@ function addAnnotation(annotation) {
     if (state.snapshot.selected_scene_nodes[0]) item.scene_node = {...state.snapshot.selected_scene_nodes[0]};
   }
   if (annotation.text) item.text = annotation.text;
+  if (annotation.name) item.name = annotation.name;
   if (annotation.points) item.points = annotation.points;
   if (dynamicEnabled() && moment?.time_sec !== undefined) {
     item.frame_id = moment.id;
@@ -4734,6 +4744,10 @@ function annotationPointerDown(event, pane) {
   if (!editable() || state.spacePan || event.button !== 0) return;
   if(event.isPrimary===false){annotationClicks=[];return;}
   const mode = toolMode(pane);
+  if (mode === 'livewire') {
+    if(pane==='reference') { event.preventDefault();event.currentTarget.focus({preventScroll:true});livewire?.anchor(pointFromPointer(event,event.currentTarget)); }
+    return;
+  }
   if (mode === 'select') {
     selectAnnotationFromPointer(event,pane);
     if(!annotationReferenceDrag)annotationClicks=[];
@@ -4767,6 +4781,8 @@ function annotationPointerDown(event, pane) {
   drawOverlays();
 }
 function annotationPointerMove(event) {
+  if(event.currentTarget===ui.referenceCanvas && toolMode('reference')==='livewire' && !state.spacePan && !state.referencePanning)
+    livewire?.move(pointFromPointer(event,ui.referenceCanvas));
   if (moveAnnotationReferenceDrag(event)) return;
   if (!state.drag || state.drag.pointerId !== event.pointerId) return;
   if (state.drag.type === 'erase') {
@@ -4924,6 +4940,7 @@ function prepareCanvas(canvas) {
   return {context, width:logicalWidth, height:logicalHeight};
 }
 function drawOverlays() {
+  livewire?.sync();
   if (!selectedAnnotation()) state.selectedAnnotationId = null;
   updateAnnotationSelectionHint();
   for (const pane of ['reference','scene']) {
@@ -4942,6 +4959,7 @@ function drawOverlays() {
         points:state.drag.points
       }, surface.width, surface.height, true);
     }
+    if(pane==='reference')livewire?.draw(surface.context,surface.width,surface.height);
   }
   renderHumanPosePanel();
   drawHumanPoseOverlay();
@@ -6042,6 +6060,7 @@ async function feedbackPayload(referencedSceneNodes, promptText) {
   };
 }
 async function submitFeedback() {
+  if(livewire?.active) { announce('请先完成或取消左图的智能轮廓，再发送反馈。',true);return; }
   if (!state.workspaceReady || !state.sessionId || !Number.isInteger(state.sceneRevision) || state.sceneLoading || state.submitting || state.uploading || state.creatingProject || state.navigatingProject || state.creatingTarget || state.switchingTarget || state.citingSceneProject) return;
   const promptText = promptReferenceText.expand(ui.note.value);
   if(!state.sceneReferencesSupported && (/\[\[scene:/.test(promptText) || state.pendingSubmission?.payload?.scene_refs?.length)) {
@@ -6338,6 +6357,13 @@ function bindEvents() {
   setupTheme({onChange:applyTheme});
   immersiveWorkspace = setupImmersive({onResize:() => { resizeScene(); updateReferenceGeometry(); }, onLayoutChange:() => workspaceChrome?.layoutChanged(), hasActiveGesture:() => !!(state.drag || annotationReferenceDrag || state.textPending || state.poseEditDrag)});
   workspaceChrome = setupWorkspaceChrome({getState:() => state, setMode, activateToolPane, revealReference:() => immersiveWorkspace.setReference(true)});
+  livewire=setupReferenceLivewire({getImage:()=>ui.referenceImage,canvas:ui.referenceCanvas,
+    getSource:()=>{const ref=activeReference();return ref && {key:JSON.stringify([state.sessionId,ref.id,resourceURL(ref.url),
+      dynamicEnabled()?state.time:null,state.referenceClip?.clip_id || null,state.activeViewId || null])};},
+    enabled:()=>editable() && state.toolPane==='reference' && toolMode('reference')==='livewire' && referencePixelsReady(),
+    begin:()=>{pauseTimeline();return !!activeReference() && (!dynamicEnabled() || !!ensureDynamicMoment());},
+    onCommit:points=>addAnnotation({pane:'reference',type:'freehand',name:'智能轮廓'+((state.annotationNameCounters.livewire||0)+1),coordinates:{...points[0]},points}),
+    onChange:drawOverlays,onError:message=>announce(message,true)});
   setupActionIcons();
   feedbackEvidence = setupFeedbackEvidence({getDraft:feedbackEvidenceData, api, resourceURL});
   bindPromptReferenceEvents();
@@ -6500,6 +6526,7 @@ function bindEvents() {
     canvas.addEventListener('lostpointercapture', () => finishAnnotationReferenceDrag());
     canvas.addEventListener('dblclick',event=>{
       const pane=canvas===ui.referenceCanvas?'reference':'scene';
+      if(pane==='reference' && toolMode(pane)==='livewire') { event.preventDefault();livewire?.finish();return; }
       if(event.button!==0 || !editable() || toolMode(pane)!=='select' || annotationClicks.length!==2 ||
         annotationClicks[0].key!==annotationClicks[1].key || performance.now()-annotationClicks[0].at>1500)return;
       const mark=annotationFromPointer(event,pane);
@@ -6554,6 +6581,7 @@ function bindEvents() {
     if (!ui.clearDialog.open || !clearRequest) return;
     if (!editable()) { ui.clearDialog.close(); return; }
     pauseTimeline(); hideTextEditor(); state.drag = null;
+    livewire?.cancel();
     const before = annotationEditState();
     if (clearRequest.scope === 'round') {
       for (const sample of [...state.poseEdits]) removePoseEdit(sample,{record:false});
@@ -6595,6 +6623,11 @@ function bindEvents() {
     quoteObjectReference(selectedPromptReference());
   });
   document.addEventListener('keydown', (event) => {
+    if(livewire?.active && !event.isComposing && !event.target.closest('input,textarea,select,[contenteditable],dialog[open]')) {
+      if(event.key==='Escape'){event.preventDefault();event.stopImmediatePropagation();livewire.cancel();return;}
+      if(event.key==='Backspace'){event.preventDefault();event.stopImmediatePropagation();livewire.back();return;}
+      if(event.key==='Enter'){event.preventDefault();event.stopImmediatePropagation();livewire.finish();return;}
+    }
     if (event.key.toLowerCase() !== 'f' || event.ctrlKey || event.metaKey || event.altKey || event.isComposing || event.keyCode === 229 ||
         event.target.closest('input, textarea, select, [contenteditable], dialog[open]') || document.querySelector('dialog[open], .prompt-reference-popover:not([hidden])') || state.sceneView !== 'live') return;
     event.preventDefault(); focusSelection();

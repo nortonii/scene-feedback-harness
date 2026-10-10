@@ -178,6 +178,7 @@ export function setupWorkspaceChrome({getState, setMode, activateToolPane, revea
     byId('annotation-context-label').textContent = target === 'reference' ? '参考' : liveScene ? '场景' : '截图';
     byId('scene-labels-toggle').hidden = target !== 'scene';
     byId('pose-edit-tool').hidden = target !== 'reference';
+    byId('livewire-tool').hidden = target !== 'reference';
     reference.classList.toggle('is-annotation-target', opened && target === 'reference');
     scene.classList.toggle('is-annotation-target', opened && target === 'scene');
     dock.hidden = !opened;
