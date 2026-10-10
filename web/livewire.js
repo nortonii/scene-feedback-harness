@@ -7,8 +7,10 @@ export function setupReferenceLivewire({getImage,canvas,getSource,enabled,begin,
   function notify() { render();onChange(); }
   function render() {
     status.hidden=!enabled();
-    const text=session?.busy ? '正在计算边缘…' : session?.anchors.length
-      ? '点选下一处 · 点起点闭合 · Enter 完成 · Backspace 回退' : '点选起点，沿边缘添加锚点';
+    const state=session?.busy ? 'busy' : session ? 'tracing' : 'idle';
+    if(status.dataset.state!==state)status.dataset.state=state;
+    const text=session?.busy ? '计算边缘…' : session?.anchors.length
+      ? '继续沿边缘点选' : '点选轮廓起点';
     if(message.textContent!==text)message.textContent=text;
     finishButton.hidden=cancelButton.hidden=!session;
     finishButton.disabled=!session || session.busy || session.segments.length===0;
