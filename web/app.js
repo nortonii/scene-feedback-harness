@@ -203,7 +203,13 @@ let promptDrag = null;
 let imagePreviewReference = null;
 const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#eae9e3');
-threeScene.fog = new THREE.Fog('#eae9e3', 14, 36);
+const sceneFog = new THREE.Fog('#eae9e3', 14, 36);
+function applySceneFog() {
+  const strength=(renderSettings?.fogStrength || 0)/100;
+  sceneFog.color.copy(threeScene.background);
+  if(strength>0) { sceneFog.near=14/strength;sceneFog.far=36/strength; }
+  threeScene.fog=strength>0 ? sceneFog : null;
+}
 const camera = new THREE.PerspectiveCamera(44, 1, 0.01, 2000);
 let automaticCameraNear=camera.near,automaticCameraFar=camera.far;
 function applyCameraDepth(near=automaticCameraNear,far=automaticCameraFar) {
@@ -4440,7 +4446,8 @@ async function captureDynamicFrames() {
 function cameraData() {
   const result = {
     position:array(camera.position), target:array(controls.target),
-    up:array(camera.up), fov:camera.fov, aspect:camera.aspect, near:camera.near, far:camera.far
+    up:array(camera.up), fov:camera.fov, aspect:camera.aspect, near:camera.near, far:camera.far,
+    fog:threeScene.fog ? {enabled:true,near:threeScene.fog.near,far:threeScene.fog.far} : {enabled:false}
   };
   const ref = activeReference();
   const pose = state.alignedReferenceId === ref?.id && referenceCamera(ref);
@@ -6293,7 +6300,7 @@ function setRendererSize(width, height) {
 function applyTheme({dark, animate=false}) {
   const palette = {background:new THREE.Color(dark ? '#202327' : '#eae9e3'), grid:new THREE.Color(dark ? '#8e9ba8' : '#ffffff')};
   const apply = () => {
-    threeScene.background.copy(palette.background); threeScene.fog.color.copy(palette.background);
+    threeScene.background.copy(palette.background); sceneFog.color.copy(palette.background);
     ground.material.color.copy(palette.background); grid.material.color.copy(palette.grid);
   };
   if (animate) backgroundTransition = {start:performance.now(), from:threeScene.background.clone(), gridFrom:grid.material.color.clone(), ...palette};
@@ -6308,7 +6315,7 @@ function animate(timestamp) {
     const t = Math.min(1, (timestamp - backgroundTransition.start) / 380);
     const ease = t * t * (3 - 2 * t);
     threeScene.background.lerpColors(backgroundTransition.from, backgroundTransition.background, ease);
-    threeScene.fog.color.copy(threeScene.background); ground.material.color.copy(threeScene.background);
+    sceneFog.color.copy(threeScene.background); ground.material.color.copy(threeScene.background);
     grid.material.color.lerpColors(backgroundTransition.gridFrom, backgroundTransition.grid, ease);
     if (t === 1) backgroundTransition = null;
   }
@@ -6341,7 +6348,8 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
-  renderSettings=setupRenderSettings({onChange:()=>{resizeScene();saveDraft();}});
+  renderSettings=setupRenderSettings({onChange:()=>{applySceneFog();resizeScene();saveDraft();}});
+  applySceneFog();
   snapshotGallery=setupSnapshotGallery({getItems:galleryItems,
     getLive:()=>({active:state.sceneView==='live',disabled:!editable(),cover:liveScenePreview,name:'3D',title:'实时 3D · 拖动旋转、滚轮缩放'}),
     onLive:browseScene,
