@@ -32,6 +32,7 @@ import {createPromptReferenceHit,hitPromptReference} from './prompt-reference-hi
 import {createPromptReferencePopover} from './prompt-reference-popover.js';
 import { compactReferenceMessage } from './prompt-reference-display.js';
 import { setupReferenceLivewire } from './livewire.js';
+import { setupRenderSettings } from './render-settings.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -181,6 +182,7 @@ let liveScenePreview = null;
 let livePreviewTimer = null;
 let workspaceSidebar = null;
 let workspaceFolderImport = null;
+let renderSettings = null;
 let clearRequest = null;
 let backgroundTransition = null;
 let annotationReferenceDrag = null;
@@ -203,6 +205,14 @@ const threeScene = new THREE.Scene();
 threeScene.background = new THREE.Color('#eae9e3');
 threeScene.fog = new THREE.Fog('#eae9e3', 14, 36);
 const camera = new THREE.PerspectiveCamera(44, 1, 0.01, 2000);
+let automaticCameraNear=camera.near,automaticCameraFar=camera.far;
+function applyCameraDepth(near=automaticCameraNear,far=automaticCameraFar) {
+  automaticCameraNear=near;automaticCameraFar=far;
+  const limit=renderSettings?.limit ?? null;
+  camera.far=limit ?? far;
+  camera.near=limit===null ? near : Math.min(near,camera.far/100);
+  renderSettings?.refresh(camera.far);
+}
 camera.up.set(0, 0, 1);
 camera.position.set(5.5, -8.5, 6.5);
 const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
@@ -2347,8 +2357,7 @@ function frameBox(box, {smooth=false, keepDirection=false}={}) {
   const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.45);
   const halfFov = Math.min(camera.fov * Math.PI / 360, Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect));
   const distance = Math.max(radius / Math.sin(halfFov) * 1.15, 0.6);
-  camera.near = Math.max(distance / 1000, 0.005);
-  camera.far = Math.max(distance * 100, 100);
+  applyCameraDepth(Math.max(distance / 1000, 0.005),Math.max(distance * 100, 100));
   camera.updateProjectionMatrix();
   controls.moveTo(center.clone().addScaledVector(direction, distance), center, {smooth});
   saveDraft();
@@ -4431,7 +4440,7 @@ async function captureDynamicFrames() {
 function cameraData() {
   const result = {
     position:array(camera.position), target:array(controls.target),
-    up:array(camera.up), fov:camera.fov, aspect:camera.aspect
+    up:array(camera.up), fov:camera.fov, aspect:camera.aspect, near:camera.near, far:camera.far
   };
   const ref = activeReference();
   const pose = state.alignedReferenceId === ref?.id && referenceCamera(ref);
@@ -6202,9 +6211,12 @@ function pickScene(event) {
     (event.clientX - bounds.left) / bounds.width * 2 - 1,
     -(event.clientY - bounds.top) / bounds.height * 2 + 1
   );
+  camera.updateMatrixWorld();
   raycaster.setFromCamera(pointer, camera);
   const intersections = raycaster.intersectObjects([...state.objectNodes.values()], true);
   for (const hit of intersections) {
+    const depth=-hit.point.clone().applyMatrix4(camera.matrixWorldInverse).z;
+    if(depth<camera.near || depth>camera.far)continue;
     let node = hit.object;
     while (node && !node.userData.objectId) node = node.parent;
     if (node?.userData.objectId) {
@@ -6245,8 +6257,7 @@ function resizeScene() {
     ui.viewport.style.bottom = 'auto';
     ui.viewport.style.width = viewWidth + 'px';
     ui.viewport.style.height = viewHeight + 'px';
-    camera.near = 0.005;
-    camera.far = 2000;
+    applyCameraDepth(0.005,2000);
     camera.fov = 2 * Math.atan(pose.intrinsic.height / (2 * pose.intrinsic.fy)) * 180 / Math.PI;
     camera.aspect = imageWidth / imageHeight;
     camera.updateProjectionMatrix();
@@ -6266,6 +6277,7 @@ function resizeScene() {
     ui.viewport.style.bottom = '0';
     ui.viewport.style.width = '100%';
     ui.viewport.style.height = '100%';
+    applyCameraDepth();
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     setRendererSize(width, height);
@@ -6329,6 +6341,7 @@ async function poll() {
   finally { poll.running = false; }
 }
 function bindEvents() {
+  renderSettings=setupRenderSettings({onChange:()=>{resizeScene();saveDraft();}});
   snapshotGallery=setupSnapshotGallery({getItems:galleryItems,
     getLive:()=>({active:state.sceneView==='live',disabled:!editable(),cover:liveScenePreview,name:'3D',title:'实时 3D · 拖动旋转、滚轮缩放'}),
     onLive:browseScene,
@@ -6341,6 +6354,7 @@ function bindEvents() {
     isEnabled:()=>state.workspaceReady && state.projectFolderImportSupported && !state.creatingProject && !state.navigatingProject && !state.unloadingProjectId,
     onImported:()=>loadProjects(),onError:message=>announce(message,true)});
   workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{
+    if(page==='settings')renderSettings.refresh(camera.far);
     workspaceFolderImport?.onPage(page);
     if(page==='create') {renderCreateProject();if(!state.models || state.modelLoadError) loadModels({forProjects:true}).catch(()=>{});}
     if(page==='tasks' && state.taskConnectionSupported) {

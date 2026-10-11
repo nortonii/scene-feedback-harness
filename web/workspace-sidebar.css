@@ -90,6 +90,15 @@ html:not([data-layout=immersive]) .scene-pane > .pane-head { min-height: 48px; }
 .sidebar-page-heading h2 { margin: 12px 0 0; font-size: 17px; font-weight: 550; }
 .sidebar-detail p, .sidebar-detail li { font-size: 13px; line-height: 1.8; }
 .sidebar-detail h3 { font-size: 14px; font-weight: 550; }
+.render-depth-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 10px; font-size: 13px; }
+#render-depth-auto { min-height: 28px; padding: 3px 10px; border: 1px solid transparent; border-radius: 9px; color: var(--muted); font-size: 12px; }
+#render-depth-auto[aria-pressed=true] { color: var(--ink); border-color: var(--line); background: var(--surface-hover); }
+.render-depth-value { display: flex; align-items: center; gap: 10px; }
+#render-depth-input { min-width: 0; width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); font-size: 13px; }
+.render-depth-value > span { flex: none; color: var(--muted); font-size: 11px; }
+#render-depth-range { width: 100%; margin: 16px 0 0; accent-color: var(--ink); }
+.sidebar-detail #render-depth-status, .sidebar-detail .render-depth-note { margin: 8px 0 0; font-size: 12px; color: var(--muted); }
+#render-depth-input[aria-invalid=true] { border-color: #b34f3e; }
 .sidebar-detail .dialog-intro { margin-top: 0; }
 .sidebar-create { border: 0; margin: 0; }
 .sidebar-create form { display: grid; gap: 9px; margin: 0; }
