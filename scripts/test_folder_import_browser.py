@@ -234,7 +234,7 @@ def main() -> None:
                     assert note.input_value() == draft
                     assert store.scene() == original_scene and store.get_session(session_id) == original_session
                     page.locator('#sidebar-folder-import [data-sidebar-home]').click()
-                    expect(page.locator("#project-list .project-item")).to_have_count(3)
+                    expect(page.locator("#project-list .project-item")).to_have_count(2)
                     print("PASS real sidebar browse/cancel/Enter: two imports, one visible error; current scene, session, camera and draft remain intact", flush=True)
 
                     # Same-request and fresh-request retries both reuse source contexts.
@@ -329,6 +329,7 @@ def main() -> None:
                         return [...ctx.getImageData(0,0,1,1).data];}""") == [255, 0, 0, 255]
                     page.locator("#projects-dialog-button").click()
                     page.wait_for_function("document.getElementById('projects-dialog').dataset.phase === 'open'")
+                    page.locator("#project-folder-all").click()
                     page.locator("#project-list .project-item").filter(has_text=registry.root.name).click()
                     page.wait_for_url(re.compile(re.escape(base + "/p/" + registry.root.project_id) + r"/.*"))
                     ready(page)
@@ -368,7 +369,7 @@ def main() -> None:
                         asset = imported_context.store.scene()["objects"][0]
                         assert (imported_context.store.assets_dir / asset["url"].rsplit("/", 1)[-1]).read_bytes() == (instance / "scene.glb").read_bytes()
                     page.locator('#sidebar-folder-import [data-sidebar-home]').click()
-                    expect(page.locator("#project-list .project-item")).to_have_count(5)
+                    expect(page.locator("#project-list .project-item")).to_have_count(2)
                     catalog_metadata = catalog_result["projects"][0]
                     page.locator("#project-list .project-item").filter(has_text=catalog_metadata["name"]).click()
                     catalog_prefix = "/p/" + catalog_metadata["project_id"]
@@ -381,6 +382,7 @@ def main() -> None:
                     expect(page.locator("#reference-media")).to_be_hidden()
                     page.locator("#projects-dialog-button").click()
                     page.wait_for_function("document.getElementById('projects-dialog').dataset.phase === 'open'")
+                    page.locator("#project-folder-all").click()
                     page.locator("#project-list .project-item").filter(has_text=registry.root.name).click()
                     page.wait_for_url(re.compile(re.escape(base + "/p/" + registry.root.project_id) + r"/.*"))
                     ready(page)

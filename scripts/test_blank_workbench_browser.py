@@ -124,8 +124,8 @@ def main() -> None:
                     imported = import_folder(page, root / "catalog", landing=True)
                     assert len(imported["projects"]) == 2 and not imported["errors"]
                     first_id = imported["projects"][0]["project_id"]
-                    expect(page.locator("#project-list .project-item")).to_have_count(3)
-                    expect(row(page, registry.root.project_id).locator(".project-unload-trigger")).to_be_hidden()
+                    expect(page.locator("#project-list .project-item")).to_have_count(2)
+                    expect(row(page, registry.root.project_id)).to_have_count(0)
                     assert store.scene() == root_scene and store.get_session(session_id) == root_session
                     row(page, first_id).locator(".project-item").click()
                     page.wait_for_url(re.compile(re.escape(base+"/p/"+first_id)+r"/.*"))
@@ -165,7 +165,8 @@ def main() -> None:
                     ready(page)
                     expect(page.locator("#workspace-empty")).to_be_hidden()
                     expect(page.locator("#feedback-note")).to_have_value(child_draft)
-                    assert page.evaluate("JSON.stringify(__blankCheck.cameraData())") == child_camera
+                    restored_camera = page.evaluate("JSON.stringify(__blankCheck.cameraData())")
+                    assert restored_camera == child_camera, (restored_camera, child_camera)
                     assert source_files(root / "catalog") == original_sources
 
                     # A reference-only workspace is a valid normal workspace.

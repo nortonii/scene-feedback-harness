@@ -33,6 +33,7 @@ import {createPromptReferencePopover} from './prompt-reference-popover.js';
 import { compactReferenceMessage } from './prompt-reference-display.js';
 import { setupReferenceLivewire } from './livewire.js';
 import { setupRenderSettings } from './render-settings.js';
+import { setupProjectFolderScope } from './project-folder-scope.js';
 
 const id = (name) => document.getElementById(name);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -117,7 +118,7 @@ const ui = {
 const comparePreferences = {sessionId:null, enabled:true, opacity:45, lastPositive:45};
 const state = {
   projectId:null, projectName:null, sceneDisplayName:null, projects:null, loadingProjects:false,
-  projectLoadError:null, projectListSignature:null, projectModelChoice:null, projectEffortChoice:'',
+  projectLoadError:null, projectListSignature:null, projectListEpoch:0, projectModelChoice:null, projectEffortChoice:'',
   projectModelSignature:null, projectEffortSignature:null, creatingProject:false, navigatingProject:false,
   projectUnloadSupported:false, unloadingProjectId:null, projectUnloadConfirmId:null, projectUnloadError:null, projectUnloadEpoch:0,
   pendingProjectCreate:null, projectCreationResult:null, projectCreationError:null,
@@ -182,6 +183,7 @@ let liveScenePreview = null;
 let livePreviewTimer = null;
 let workspaceSidebar = null;
 let workspaceFolderImport = null;
+let projectFolderScope = null;
 let renderSettings = null;
 let clearRequest = null;
 let backgroundTransition = null;
@@ -331,7 +333,7 @@ function saveDraft({allowPlaying=false}={}) {
       activeReferenceId:state.activeReferenceId, note:promptText(), promptReferenceLabels:promptReferenceText.exportRecords(),
       groundAxis:state.groundAxis, worldUpAxis:controls.worldUp.y === 1 ? 'y' : 'z',
       groupId:state.groupId, camera:{position:array(camera.position), target:array(controls.target),
-        up:array(camera.up), fov:camera.fov, alignedReferenceId:state.alignedReferenceId,
+        up:array(camera.up), fov:camera.fov, automaticNear:automaticCameraNear, automaticFar:automaticCameraFar, alignedReferenceId:state.alignedReferenceId,
         alignmentExact:state.alignmentExact, freeRotation:controls.freeRotation,
         referenceCameraSignature:state.alignedReferenceId ? JSON.stringify(activeReference()?.camera || null) : null},
       snapshot:state.snapshot, snapshotSequence:state.snapshotSequence, sceneView:state.sceneView, sceneSnapshotIds:state.sceneSnapshots.map(entry => entry.id),
@@ -421,6 +423,9 @@ function restoreDraft() {
       camera.position.set(...draft.camera.position);
       if (draft.camera.up?.length === 3) camera.up.set(...draft.camera.up);
       if (Number.isFinite(draft.camera.fov) && draft.camera.fov > 1 && draft.camera.fov < 179) camera.fov = draft.camera.fov;
+      const {automaticNear,automaticFar}=draft.camera;
+      if(Number.isFinite(automaticNear) && Number.isFinite(automaticFar) && automaticNear>0 && automaticFar>automaticNear)
+        applyCameraDepth(automaticNear,automaticFar);
       controls.target.set(...draft.camera.target);
       controls.update();
       state.alignedReferenceId = typeof draft.camera.alignedReferenceId === 'string' ? draft.camera.alignedReferenceId : null;
@@ -770,8 +775,11 @@ function renderProjectPicker() {
   ui.createProjectPanel.classList.toggle('hidden', !state.projectCreationSupported);
   id('sidebar-new-project').hidden=!state.projectCreationSupported;
   if (!ui.projectsDialog.open) return;
-  const projects = Array.isArray(state.projects) ? state.projects : [];
+  const allProjects=Array.isArray(state.projects) ? state.projects : [];
+  const projects=projectFolderScope ? projectFolderScope.filter(allProjects) : allProjects;
   const busy = projectBusyReason();
+  projectFolderScope?.refresh({disabled:!!busy || state.loadingProjects || !!state.unloadingProjectId});
+  for(const child of [...ui.projectsList.children])if(!child.matches('.project-row,.project-list-empty'))child.remove();
   // Reuse each row so polling cannot dismiss a confirmation or steal focus.
   const existing = new Map([...ui.projectsList.querySelectorAll('.project-row')].map(row => [row.dataset.projectId,row]));
   const wanted = new Set(projects.map(project=>project.project_id));
@@ -789,6 +797,7 @@ function renderProjectPicker() {
     button.classList.toggle('is-current',current);
     if (current) button.setAttribute('aria-current','page'); else button.removeAttribute('aria-current');
     row.querySelector('.project-name strong').textContent = project.name || '未命名场景';
+    button.title=project.project_dir || '';
     row.querySelector('.project-name span').textContent = unavailable ? '不可用' : current ? '当前' : '';
     row.querySelector('.project-detail').textContent = (Number.isInteger(project.scene_revision) ? '版本 ' + project.scene_revision : '空白场景') +
       (project.thread_id ? ' · 已连接 Codex 任务' : state.feedbackTransport === 'mcp_events' ? '' : ' · 尚未连接任务') +
@@ -825,7 +834,7 @@ function renderProjectPicker() {
   let empty = ui.projectsList.querySelector('.project-list-empty');
   if (!projects.length) {
     if (!empty) {empty=document.createElement('p');empty.className='muted project-list-empty';ui.projectsList.append(empty);}
-    empty.textContent = state.loadingProjects ? '正在读取场景…' : '还没有可切换的场景。';
+    empty.textContent = state.loadingProjects ? '正在读取场景…' : projectFolderScope?.path ? '这个文件夹暂无已加载场景。' : '还没有可切换的场景。';
   } else empty?.remove();
   ui.refreshProjects.disabled = state.loadingProjects || state.creatingProject || state.navigatingProject || !!state.unloadingProjectId;
   ui.projectsStatus.textContent = busy || (state.projectLoadError ? '场景列表读取失败：' + state.projectLoadError : '');
@@ -968,24 +977,28 @@ function renderCreateProject() {
   else ui.createProjectHelp.textContent = '创建空白场景和独立的 Codex 任务，然后进入新场景。';
   id('project-options-summary').textContent='更多设置 · '+(ui.projectEffort.selectedOptions[0]?.textContent || '模型默认')+' · '+ui.projectPermissions.selectedOptions[0].textContent.split(' · ')[0];
 }
-async function loadProjects() {
-  if (state.loadingProjects) return;
-  state.loadingProjects = true; renderProjectPicker();
-  const unloadEpoch=state.projectUnloadEpoch;
-  try {
-    const result = await api('/api/projects');
-    if (unloadEpoch!==state.projectUnloadEpoch) return;
-    state.projects = Array.isArray(result.projects) ? result.projects : [];
-    state.projectUnloadSupported=result.project_unload_supported===true;
-    state.projectId = result.current_project_id || state.projectId;
-    state.projectLoadError = null;
-    const pending = state.pendingProjectCreate;
-    const recoveryId = pending?.project?.project_id || pending?.project_id;
-    const recovered = pending && state.projects.find((project) => project.request_id === pending.request_id ||
-      (recoveryId && project.project_id === recoveryId));
-    if (recovered) rememberCreatedProject(recovered, recovered.creation_error || null);
-  } catch (error) { state.projectLoadError = error.message; throw error; }
-  finally { state.loadingProjects = false; renderProjectPicker(); }
+function loadProjects({fresh=false}={}) {
+  if (state.loadingProjects && !fresh) return loadProjects.pending;
+  const epoch=++state.projectListEpoch;
+  loadProjects.pending=(async()=>{
+    state.loadingProjects = true; renderProjectPicker();
+    const unloadEpoch=state.projectUnloadEpoch;
+    try {
+      const result = await api('/api/projects');
+      if (epoch!==state.projectListEpoch || unloadEpoch!==state.projectUnloadEpoch) return;
+      state.projects = Array.isArray(result.projects) ? result.projects : [];
+      state.projectUnloadSupported=result.project_unload_supported===true;
+      state.projectId = result.current_project_id || state.projectId;
+      state.projectLoadError = null;
+      const pending = state.pendingProjectCreate;
+      const recoveryId = pending?.project?.project_id || pending?.project_id;
+      const recovered = pending && state.projects.find((project) => project.request_id === pending.request_id ||
+        (recoveryId && project.project_id === recoveryId));
+      if (recovered) rememberCreatedProject(recovered, recovered.creation_error || null);
+    } catch (error) { if(epoch===state.projectListEpoch)state.projectLoadError = error.message;throw error; }
+    finally { if(epoch===state.projectListEpoch) {state.loadingProjects = false;renderProjectPicker();} }
+  })();
+  return loadProjects.pending;
 }
 async function navigateProject(project, {allowCreation=false}={}) {
   if (project?.creation_status === 'unavailable') {
@@ -995,6 +1008,7 @@ async function navigateProject(project, {allowCreation=false}={}) {
   if (busy) { announce(busy, true); renderProjectPicker(); return false; }
   const url = projectNavigationURL(project, location.origin);
   if (!url) { announce('场景地址无效，请刷新场景列表。', true); return false; }
+  if(allowCreation)projectFolderScope?.clear();
   state.navigatingProject = true; renderProjectPicker(); updateSubmitLabel(); updateMode();
   pauseTimeline(); hideTextEditor(); state.drag = null;
   saveDraft();
@@ -6358,9 +6372,15 @@ function bindEvents() {
     onTime:id=>quotePromptTime('snapshot',id),
     onRemove:removeSavedSnapshot,resourceURL});
   workspaceControls = setupWorkspaceControls({getState:() => state, onLabelsChange:drawOverlays});
+  projectFolderScope=setupProjectFolderScope({onChange:()=>{
+    state.projectUnloadConfirmId=null;state.projectUnloadError=null;renderProjectPicker();
+  }});
   workspaceFolderImport=setupWorkspaceFolderImport({api,
     isEnabled:()=>state.workspaceReady && state.projectFolderImportSupported && !state.creatingProject && !state.navigatingProject && !state.unloadingProjectId,
-    onImported:()=>loadProjects(),onError:message=>announce(message,true)});
+    onImported:result=>{
+      if(Array.isArray(result.projects) && result.projects.length)projectFolderScope.set(result.path);
+      return loadProjects({fresh:true});
+    },onError:message=>announce(message,true)});
   workspaceSidebar=setupWorkspaceSidebar({onOpen:loadSidebarProjects,onPage:page=>{
     if(page==='settings')renderSettings.refresh(camera.far);
     workspaceFolderImport?.onPage(page);
